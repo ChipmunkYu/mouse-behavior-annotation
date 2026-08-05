@@ -1,0 +1,93 @@
+"""pytest 共享夹具与辅助函数。"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND_DIR))
+# 避免导入 app.main 时自动创建默认开发数据库
+os.environ["ANNOTATION_BACKEND_SKIP_APP"] = "1"
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app import database as db_mod  # noqa: E402
+from app.auth import hash_password  # noqa: E402
+from app.config import Settings  # noqa: E402
+from app.main import create_app  # noqa: E402
+from app.models import ProjectMembership, User  # noqa: E402
+
+
+def auth_headers(client, username: str = "demo", password: str = "demo123") -> dict:
+    resp = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+class AppContext:
+    def __init__(self, client: TestClient, session_factory):
+        self.client = client
+        self.session_factory = session_factory
+
+    def create_user(self, username: str, password: str = "pw123") -> int:
+        with self.session_factory() as db:
+            user = User(username=username, password_hash=hash_password(password))
+            db.add(user)
+            db.commit()
+            return user.id
+
+    def add_member(self, project_id: int, user_id: int, role: str = "annotator") -> None:
+        with self.session_factory() as db:
+            db.add(ProjectMembership(project_id=project_id, user_id=user_id, role=role))
+            db.commit()
+
+    def make_project_with_video(self, name: str = "标注测试项目") -> dict:
+        headers = auth_headers(self.client)
+        project = self.client.post(
+            "/api/projects", json={"name": name, "description": "测试"}, headers=headers
+        ).json()
+        categories = self.client.get(
+            f"/api/projects/{project['id']}/categories", headers=headers
+        ).json()
+        video = self.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={
+                "filename": "session1.mp4",
+                "duration": 120.0,
+                "fps": 25.0,
+                "width": 1280,
+                "height": 720,
+            },
+            headers=headers,
+        ).json()
+        return {"headers": headers, "project": project, "categories": categories, "video": video}
+
+
+@pytest.fixture()
+def ctx(tmp_path):
+    """每个测试独立的临时 SQLite 数据库 + 测试客户端。"""
+    settings = Settings(
+        env="test",
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+    )
+    app = create_app(settings=settings)
+    with TestClient(app) as client:
+        # 必须在 create_app 之后取用：configure_engine 才会重新赋值 SessionLocal
+        yield AppContext(client, db_mod.SessionLocal)
+
+
+@pytest.fixture()
+def client(ctx):
+    return ctx.client
+
+
+@pytest.fixture()
+def login_headers(ctx):
+    def _login(username: str = "demo", password: str = "demo123") -> dict:
+        return auth_headers(ctx.client, username, password)
+
+    return _login

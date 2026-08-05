@@ -1,0 +1,10 @@
+# 运行时数据（数据库、上传视频、导出片段）
+data/
+
+# 本地环境与缓存
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
