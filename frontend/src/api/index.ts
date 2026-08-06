@@ -8,7 +8,9 @@ import type {
   AnnotationPatchInput,
   Category,
   ExportEvent,
+  Job,
   LoginResponse,
+  MediaStatus,
   Project,
   ProjectCreateInput,
   Review,
@@ -185,6 +187,35 @@ export function createVideoReview(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+// ---------- 媒体（片段）生成（批次 4） ----------
+
+/**
+ * 媒体（片段）生成状态汇总：
+ * GET /api/projects/:pid/videos/:vid/media-status -> MediaStatus。
+ * 仅 approved 视频有实际统计；非 approved 仅返回工作流信息。
+ */
+export function getMediaStatus(
+  projectId: number | string,
+  videoId: number | string
+): Promise<MediaStatus> {
+  return apiFetch<MediaStatus>(`/projects/${projectId}/videos/${videoId}/media-status`);
+}
+
+/** 触发片段生成：POST /api/projects/:pid/videos/:vid/media/generate -> Job。 */
+export function generateMedia(
+  projectId: number | string,
+  videoId: number | string
+): Promise<Job> {
+  return apiFetch<Job>(`/projects/${projectId}/videos/${videoId}/media/generate`, {
+    method: "POST",
+  });
+}
+
+/** 查询后台任务：GET /api/projects/:pid/jobs/:jobId -> Job。 */
+export function getJob(projectId: number | string, jobId: number | string): Promise<Job> {
+  return apiFetch<Job>(`/projects/${projectId}/jobs/${jobId}`);
 }
 
 export type { User };

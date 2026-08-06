@@ -1,4 +1,4 @@
-"""审核工作流接口（批次 3）：提交 / 审核队列 / 审核历史 / 审核裁决。
+"""审核工作流接口（批次 3 + 批次 4 自动入队）：提交 / 审核队列 / 审核历史 / 审核裁决。
 
 流程：draft → submitted → approved/rejected（rejected 可重新提交）。
 - submit：仅 owner/admin/annotator；至少 1 条标注；仅 draft/rejected 可提交；
@@ -6,19 +6,25 @@
 - queue：仅 owner/admin/reviewer；返回 submitted 视频。
 - review：仅 owner/admin/reviewer；仅 submitted；追加 Review(annotation_revision=当前修订)。
   approved → 视频 approved/approved_at/approved_by，标注 approved/reviewer；
-  rejected → 视频 rejected，标注 rejected/reviewer，approved 字段清空。
+  提交成功后自动创建当前 video+revision 的媒体任务（dedupe 幂等）与每条标注 Clip
+  pending 行并调度；若已存在 queued/running/succeeded 任务则幂等，failed 则重试。
+  rejected → 视频 rejected，标注 rejected/reviewer，approved 字段清空，不入队。
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
+from ..media_jobs import enqueue_media_job
 from ..models import Annotation, Review, Video
 from ..schemas import ReviewCreate, ReviewOut, VideoOut
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["reviews"])
 
@@ -149,6 +155,7 @@ def create_review(
     project_id: int,
     video_id: int,
     body: ReviewCreate,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> ReviewOut:
@@ -188,4 +195,19 @@ def create_review(
     db.add(review)
     db.commit()
     db.refresh(review)
+
+    # 批次 4：approved 提交成功后自动入队媒体任务（dedupe 幂等 + pending Clips）。
+    # 入队/调度失败仅记日志，不影响审核结果（可稍后经 media/generate 手动触发）。
+    job = None
+    if body.result == "approved":
+        try:
+            job = enqueue_media_job(db, video)
+        except Exception:  # noqa: BLE001
+            logger.exception("Auto-enqueue media job failed for video %s", video.id)
+            job = None
+    if job is not None:
+        try:
+            request.app.state.media_worker.schedule(job.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Schedule media job %s failed", job.id)
     return _to_review_out(review)

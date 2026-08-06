@@ -139,7 +139,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0003"
+    assert current_revision(url) == "0004"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -200,8 +200,8 @@ def test_p1_old_db_upgrade_preserves_data(tmp_path):
     assert _fk_options(url, "annotations", "annotator_id")["ondelete"] == "RESTRICT"
 
 
-def test_existing_0002_db_to_0003(tmp_path):
-    """已版本化 0002 库（含数据）→ head（0003）：数据保留、FK 策略更新、幂等。"""
+def test_existing_0002_db_to_0004(tmp_path):
+    """已版本化 0002 库（含数据）→ head（0004）：数据保留、FK 策略更新、幂等。"""
     from datetime import datetime
 
     from sqlalchemy import text
@@ -257,8 +257,8 @@ def test_existing_0002_db_to_0003(tmp_path):
     # 0002 状态：上传者/审核人外键尚无显式 ondelete
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
-    run_migrations(url)  # 0002 → 0003
-    assert current_revision(url) == "0003"
+    run_migrations(url)  # 0002 → head（0004）
+    assert current_revision(url) == "0004"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -277,7 +277,7 @@ def test_existing_0002_db_to_0003(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0003"
+    assert current_revision(url) == "0004"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -291,7 +291,7 @@ def test_delete_user_sets_null_uploaded_by_and_reviewer(tmp_path):
 
     settings = _settings(tmp_path, "setnull.db")
     url = settings.resolved_database_url
-    run_migrations(url)  # head（0003）
+    run_migrations(url)  # head（0004）
     db_mod.configure_engine(url)
     now = datetime.utcnow()
     with db_mod.engine.begin() as conn:
@@ -370,7 +370,7 @@ def test_delete_user_rejected_by_created_by_and_annotator(tmp_path):
 
     settings = _settings(tmp_path, "restrict.db")
     url = settings.resolved_database_url
-    run_migrations(url)  # head（0003）
+    run_migrations(url)  # head（0004）
     db_mod.configure_engine(url)
     now = datetime.utcnow()
     with db_mod.engine.begin() as conn:
@@ -468,7 +468,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0003"
+    assert current_revision(url) == "0004"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -518,7 +518,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0003"
+    assert current_revision(url) == "0004"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -533,7 +533,7 @@ def test_unknown_version_raises_without_modification(tmp_path):
 
     settings = _settings(tmp_path, "unknown.db")
     url = settings.resolved_database_url
-    run_migrations(url)  # 先到 head（0003）
+    run_migrations(url)  # 先到 head（0004）
     db_mod.configure_engine(url)
     with db_mod.engine.begin() as conn:
         conn.execute(text("UPDATE alembic_version SET version_num = '9999'"))
@@ -589,7 +589,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0003"
+    assert current_revision(url) == "0004"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -645,7 +645,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0003" in proc.stdout
+    assert "0004" in proc.stdout
 
 
 
@@ -791,3 +791,94 @@ def test_video_out_exposes_workflow_fields(ctx, login_headers):
     assert body["submitted_at"] is None
     assert body["approved_at"] is None
     assert body["approved_by"] is None
+
+
+# ---------- 批次 4：0004 迁移（BackgroundJob.dedupe_key / attempts） ----------
+
+
+def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
+    """全新库 upgrade head：background_jobs 含 dedupe_key / attempts，且 dedupe_key 唯一索引生效。"""
+    settings = _settings(tmp_path, "v0004.db")
+    url = settings.resolved_database_url
+    run_migrations(url)
+    assert current_revision(url) == "0004"
+
+    db_mod.configure_engine(url)
+    insp = sa_inspect(db_mod.engine)
+    cols = {c["name"] for c in insp.get_columns("background_jobs")}
+    assert "dedupe_key" in cols
+    assert "attempts" in cols
+    # 唯一索引存在
+    uniq = [i for i in insp.get_indexes("background_jobs") if i.get("unique")]
+    assert any(i["name"] == "ix_background_jobs_dedupe_key" for i in uniq)
+    assert any("dedupe_key" in i["column_names"] for i in uniq)
+
+    # 新模型默认：attempts 默认 0、dedupe_key 默认 None
+    with db_mod.SessionLocal() as db:
+        job = BackgroundJob(project_id=None, job_type="media")
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        assert job.attempts == 0
+        assert job.dedupe_key is None
+
+
+def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
+    """已版本化 0003 库（含 background_jobs 数据）→ 0004：数据保留、新列默认正确。"""
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    settings = _settings(tmp_path, "v0003.db")
+    url = settings.resolved_database_url
+    upgrade_to(url, "0003")
+    assert current_revision(url) == "0003"
+
+    db_mod.configure_engine(url)
+    now = datetime.utcnow()
+    with db_mod.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO background_jobs (project_id, job_type, status, progress, "
+                "created_at) VALUES (NULL, 'media', 'queued', 0, :now)"
+            ),
+            {"now": now},
+        )
+
+    run_migrations(url)
+    assert current_revision(url) == "0004"
+    with db_mod.SessionLocal() as db:
+        job = db.query(BackgroundJob).one()
+        assert job.job_type == "media"
+        assert job.status == "queued"
+        assert job.dedupe_key is None  # 旧行 dedupe_key 为空
+        assert job.attempts == 0  # 默认 0
+
+    # 重复运行幂等
+    run_migrations(url)
+    assert current_revision(url) == "0004"
+    with db_mod.SessionLocal() as db:
+        assert db.query(BackgroundJob).count() == 1
+
+
+def test_dedupe_key_unique_enforced(tmp_path):
+    """dedupe_key 唯一约束：同一键第二次插入被拒绝（防重复任务的 DB 级兜底）。"""
+    settings = _settings(tmp_path, "dedupe.db")
+    url = settings.resolved_database_url
+    run_migrations(url)
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        db.add(BackgroundJob(project_id=None, job_type="media", dedupe_key="media:video:1:rev:1"))
+        db.commit()
+        dup = BackgroundJob(
+            project_id=None, job_type="media", dedupe_key="media:video:1:rev:1"
+        )
+        db.add(dup)
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+        # 多个 NULL 仍允许（非媒体任务不受影响）
+        db.add(BackgroundJob(project_id=None, job_type="cleanup"))
+        db.add(BackgroundJob(project_id=None, job_type="export"))
+        db.commit()
+        assert db.query(BackgroundJob).count() == 3

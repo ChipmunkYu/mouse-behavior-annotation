@@ -4,6 +4,7 @@ import { createVideo, listProjects, listVideos } from "../api";
 import type { Project, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
+import { MediaStatusSummary } from "../components/MediaStatusPanel";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { formatDate, formatDuration } from "../utils/format";
 
@@ -274,6 +275,10 @@ export default function VideosPage() {
                 ) : null}
                 {v.workflow_status === "approved" && v.approved_at ? (
                   <span>通过于 {formatDate(v.approved_at)}</span>
+                ) : null}
+                {/* approved 卡片仅展示一次片段概要，不做高频轮询；详情进入审核 / 标注页查看 */}
+                {v.workflow_status === "approved" ? (
+                  <MediaStatusSummary projectId={pid} videoId={v.id} />
                 ) : null}
               </div>
               <div className="foot">

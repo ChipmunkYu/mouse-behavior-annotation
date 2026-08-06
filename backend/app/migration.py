@@ -32,7 +32,7 @@ SCRIPT_LOCATION = BACKEND_DIR / "migrations"
 VERSION_TABLE = "alembic_version"
 
 # 已知迁移版本（迁移脚本 migrations/versions/ 中的 revision 字面量）
-KNOWN_REVISIONS = frozenset({"0001", "0002", "0003"})
+KNOWN_REVISIONS = frozenset({"0001", "0002", "0003", "0004"})
 
 # 0001 baseline 建立的 6 张 P1 核心表
 P1_TABLES = frozenset(

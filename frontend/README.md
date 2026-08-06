@@ -15,6 +15,7 @@
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
   - 搜索 + 状态筛选；列表卡片显示时长 / 帧率 / 分辨率 / 状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
+  - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
   - **审核入口**：owner / admin / reviewer 角色显示「✓ 审核工作台」入口（角色来自 `listProjects`）。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
@@ -28,10 +29,12 @@
   - 导出 GET `.../annotations/export` 并下载统一事件 JSON。
   - 保存中 / 已保存 / 失败状态提示。
   - **批次 3 审核工作流**：顶部清晰显示工作流状态与修订号（草稿 / 待审核 / 已通过 / 已退回 + 提交/通过时间）；draft / rejected 可「提交审核」（至少一条标注，有确认），submitted 显示「等待审核」，approved 显示「已通过」；对已提交 / 已通过 / 已退回的视频执行新增 / 编辑 / 删除标注前有明确确认（将退回草稿、审核结果失效、已有片段删除），成功后刷新视频工作流状态。
+  - **批次 4 媒体状态**：approved 视频在侧栏只读展示「媒体片段生成」面板（总数/就绪/处理中/待处理/失败、aria 进度条、最近任务状态；无生成 / 重试按钮），仅在任务进行中轮询，任务落定或离开页面即停止。
 - **审核工作台** `/projects/:projectId/review`：
   - 待审队列（仅元数据，避免一次加载全部视频的标注与流）；选中后按需加载标注 / 类别 / 审核历史 / 视频流。
   - 共享播放器 + 时间轴 + 只读标注列表；审核历史（结果、意见、修订号、审核人、时间）。
-  - 意见输入 + 「通过 / 退回」（退回须填意见，均有确认）。通过文案仅说明审核已通过，不声称片段已生成。
+  - 意见输入 + 「通过 / 退回」（退回须填意见，均有确认）。通过后不再写「后续功能提供」：展示「审核已通过，片段生成已排队 / 处理中」，详情中的媒体状态面板开始轮询 `media-status` 直至任务落定；生成失败时显示错误摘要并提供「重试生成」，任务状态文案区分排队 / 处理中 / 已完成 / 失败 / 已取消，失败绝不误称完成。
+  - 媒体面板仅 approved 显示统计，非 approved 显示「审核通过后将自动开始生成片段」；刷新 / 离开页面 / 切换视频即停止轮询；401 / 403 沿用全局 client 处理。
   - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）。
 - **项目内导航**：视频库 / 审核，按项目角色显示合理入口（owner/admin/reviewer 可见审核）。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
@@ -39,7 +42,8 @@
 ## 技术要点
 
 - 无额外状态管理库与 UI 框架，仅 React 内置能力。
-- API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理 + 友好错误补充，`types.ts` 与后端 Pydantic schema 对齐，含审核工作流字段与 Review 类型）。
+- API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理 + 友好错误补充，`types.ts` 与后端 Pydantic schema 对齐，含审核工作流字段、Review、Job / MediaStatus 类型与任务状态文案；批次 4 字段以后端最终实现为准，核对时仅在 `types.ts` 修正）。
+- 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
 - 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
 - 认证上下文在 `src/auth/`（AuthContext / ProtectedRoute / storage / 401 事件）。
 - 确认对话框：`src/components/ConfirmDialog.tsx` 的 `useConfirm()`（键盘可达，Esc / 遮罩取消，焦点归还）。
@@ -78,7 +82,7 @@ frontend/
     ├── main.tsx / App.tsx / vite-env.d.ts
     ├── api/            # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
     ├── auth/           # AuthContext / ProtectedRoute / storage / 401 事件
-    ├── components/     # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog
+    ├── components/     # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
     ├── pages/          # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化

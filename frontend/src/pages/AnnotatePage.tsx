@@ -23,6 +23,7 @@ import type {
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
+import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/format";
 
@@ -1005,6 +1006,17 @@ export default function AnnotatePage() {
         </section>
 
         <aside className="annotate-side">
+          {video?.workflow_status === "approved" ? (
+            <Card title="媒体片段生成" className="media-card">
+              {/* 已通过：只读展示片段生成状态（无生成 / 重试按钮），轮询在有任务进行时自动继续 */}
+              <MediaStatusPanel
+                projectId={pid}
+                videoId={vid}
+                workflowStatus="approved"
+                retryable={false}
+              />
+            </Card>
+          ) : null}
           <CategoryPanel
             categories={categories}
             activeCategory={activeCategory}

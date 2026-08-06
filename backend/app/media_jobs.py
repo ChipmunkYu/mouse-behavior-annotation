@@ -1,0 +1,454 @@
+"""媒体任务编排（批次 4）：单 worker 领取 / 逐片精确重编码 / 可恢复重试 / 修订隔离。
+
+策略（与 README / 任务契约一致）：
+- **单 worker**：`ThreadPoolExecutor(max_workers=1)`；`media_synchronous=True` 时在调用
+  线程内同步执行（测试可完全确定性驱动，配合可替换执行器不要求系统 ffmpeg）。
+- **领取原子性**：条件 `UPDATE ... SET status='running' WHERE id=? AND status='queued'`
+  独占，杜绝两个线程领取同一 queued 任务；领取同时 attempts+1。
+- **启动恢复**：`running` 视为中断——`attempts < media_max_attempts` 则重排并 attempts+1，
+  否则判 failed（重试上限耗尽，可经 API 手动重试）；启动时统一调度全部 queued 任务。
+- **修订隔离**：处理前 / 每片前 / 完成后均校验视频仍 approved 且 revision 与任务
+  payload 一致；失效 → 任务 cancelled 并清理**本次运行产出**的实体文件，绝不复活
+  已被删除的 Clip 行（worker 从不创建 Clip 行）。
+- **部分失败**：失败的 Clip 置 failed 并写入截断错误；Job 置 failed 并记录摘要；
+  已成功的片段保留；重试只处理 pending/failed（未 ready）的 Clip，成功片段跳过。
+"""
+from __future__ import annotations
+
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .media import MediaCommandError, MediaProcessor
+from .models import Annotation, BackgroundJob, Clip, Video
+
+logger = logging.getLogger(__name__)
+
+JOB_TYPE_MEDIA = "media"
+# Clip 错误字段与任务摘要的截断上限
+ERROR_TRUNCATE_LIMIT = 2000
+
+
+def _now() -> datetime:
+    return datetime.utcnow()
+
+
+def media_dedupe_key(video_id: int, revision: int) -> str:
+    """媒体任务去重键：同一视频+修订唯一（幂等入队 / 防重复任务）。"""
+    return f"media:video:{video_id}:rev:{revision}"
+
+
+def _truncate_error(text: str, limit: int = ERROR_TRUNCATE_LIMIT) -> str:
+    if len(text) > limit:
+        return text[:limit] + f"...[truncated, {len(text)} chars]"
+    return text
+
+
+# ---------- 入队（幂等 / 可重试） ----------
+
+
+def _upsert_media_job(db: Session, video: Video) -> BackgroundJob:
+    """按 dedupe_key 幂等创建/复用媒体任务行。
+
+    - 无任务行 → INSERT（并发竞态由唯一索引兜底，冲突后回退复用已有行）。
+    - 已有 queued/running/succeeded → 原样返回（幂等，不重复调度）。
+    - 已有 failed/cancelled → 重置回 queued（重试；attempts 清零，保留同一行）。
+    """
+    dedupe_key = media_dedupe_key(video.id, video.annotation_revision)
+    payload = {
+        "video_id": video.id,
+        "project_id": video.project_id,
+        "revision": video.annotation_revision,
+    }
+    try:
+        db.execute(
+            sqlite_insert(BackgroundJob)
+            .values(
+                project_id=video.project_id,
+                job_type=JOB_TYPE_MEDIA,
+                status="queued",
+                progress=0,
+                dedupe_key=dedupe_key,
+                payload=payload,
+            )
+            .on_conflict_do_nothing(index_elements=["dedupe_key"])
+        )
+    except IntegrityError:
+        # 极端并发：唯一索引竞态兜底，回滚本次插入后复用已有行
+        db.rollback()
+    job = db.query(BackgroundJob).filter(BackgroundJob.dedupe_key == dedupe_key).one()
+    if job.status in ("failed", "cancelled"):
+        job.status = "queued"
+        job.progress = 0
+        job.error = None
+        job.started_at = None
+        job.finished_at = None
+        job.attempts = 0
+    return job
+
+
+def ensure_pending_clips(db: Session, video: Video) -> int:
+    """为视频当前修订的全部标注幂等创建 pending Clip 行（唯一约束兜底并发重复）。"""
+    stmt = sqlite_insert(Clip)
+    created = 0
+    for ann in db.query(Annotation).filter(Annotation.video_id == video.id).all():
+        result = db.execute(
+            stmt.values(
+                project_id=video.project_id,
+                annotation_id=ann.id,
+                source_revision=video.annotation_revision,
+                status="pending",
+            ).on_conflict_do_nothing(index_elements=["annotation_id", "source_revision"])
+        )
+        created += result.rowcount or 0
+    return created
+
+
+def enqueue_media_job(db: Session, video: Video) -> BackgroundJob | None:
+    """审核通过后自动入队（幂等）：创建 pending Clips + (重)入队媒体任务并提交。
+
+    在 review 提交成功（已 commit）后调用；若视频已非 approved（提交后到入队前的
+    并发失效窗口）返回 None，不创建任何行。提交失败/异常由调用方记录日志。
+    """
+    # 复查：视频仍 approved（评审提交后的并发失效竞态窗口）
+    if video.workflow_status != "approved":
+        return None
+    job = _upsert_media_job(db, video)
+    ensure_pending_clips(db, video)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+# ---------- worker ----------
+
+
+class MediaWorker:
+    """单任务媒体执行器：串行处理媒体任务，可注入执行器与同步/后台调度。"""
+
+    def __init__(self, processor: MediaProcessor, session_factory, settings) -> None:
+        self.processor = processor
+        self.session_factory = session_factory
+        self.settings = settings
+        self.synchronous = settings.media_synchronous
+        self._executor: ThreadPoolExecutor | None = None
+        if not self.synchronous:
+            self._executor = ThreadPoolExecutor(max_workers=1)
+        self._futures: set = set()
+
+    # ---------- 生命周期 ----------
+
+    def start(self) -> None:
+        """启动恢复：running 视为中断（重排或判失败）；随后调度全部 queued 媒体任务。"""
+        self._recover_interrupted()
+        with self.session_factory() as db:
+            job_ids = [
+                row[0]
+                for row in db.query(BackgroundJob.id)
+                .filter(
+                    BackgroundJob.status == "queued",
+                    BackgroundJob.job_type == JOB_TYPE_MEDIA,
+                )
+                .all()
+            ]
+        for job_id in job_ids:
+            self.schedule(job_id)
+
+    def shutdown(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def schedule(self, job_id: int) -> None:
+        """调度一个任务。同步模式：在当前线程内立即执行（测试确定性）。"""
+        if self.synchronous:
+            self._run_job(job_id)
+            return
+        future = self._executor.submit(self._run_job, job_id)
+        self._futures.add(future)
+        future.add_done_callback(self._futures.discard)
+
+    def _recover_interrupted(self) -> None:
+        """中断恢复策略：running → (attempts < 上限 ? 重排 : 判失败)。"""
+        max_attempts = self.settings.media_max_attempts
+        with self.session_factory() as db:
+            rows = (
+                db.query(BackgroundJob)
+                .filter(
+                    BackgroundJob.status == "running",
+                    BackgroundJob.job_type == JOB_TYPE_MEDIA,
+                )
+                .all()
+            )
+            for job in rows:
+                if job.attempts >= max_attempts:
+                    job.status = "failed"
+                    job.error = (
+                        f"Interrupted at startup after {job.attempts} attempts "
+                        "(retry limit reached); re-submit the job to retry"
+                    )
+                    job.finished_at = _now()
+                else:
+                    job.status = "queued"
+                    job.attempts += 1
+                    job.started_at = None
+                    job.error = "Interrupted; requeued at startup"
+            db.commit()
+
+    # ---------- 任务执行 ----------
+
+    def _run_job(self, job_id: int) -> None:
+        try:
+            self._run_job_impl(job_id)
+        except Exception:  # noqa: BLE001  worker 线程绝不外泄异常
+            logger.exception("Media job %s crashed unexpectedly", job_id)
+            try:
+                with self.session_factory() as db:
+                    job = db.get(BackgroundJob, job_id)
+                    if job is not None and job.status == "running":
+                        job.status = "failed"
+                        job.error = "Media worker crashed unexpectedly (see server log)"
+                        job.finished_at = _now()
+                        db.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to record crash for media job %s", job_id)
+
+    def _run_job_impl(self, job_id: int) -> None:
+        with self.session_factory() as db:
+            job = db.get(BackgroundJob, job_id)
+            if job is None:
+                return
+            # 原子领取：仅 queued → running（attempts+1）；rowcount != 1 说明已被领取/完成
+            claimed = db.query(BackgroundJob).filter(
+                BackgroundJob.id == job.id, BackgroundJob.status == "queued"
+            ).update(
+                {
+                    "status": "running",
+                    "started_at": _now(),
+                    "attempts": BackgroundJob.attempts + 1,
+                },
+                synchronize_session=False,
+            )
+            db.commit()
+            if claimed != 1:
+                return
+            db.expire_all()
+            job = db.get(BackgroundJob, job_id)
+            if job is None:
+                return
+            self._process_job(db, job)
+
+    # ---------- 单任务处理 ----------
+
+    def _invalidation_reason(self, db: Session, video_id: int, revision: int) -> str | None:
+        """返回失效原因；视频仍 approved 且修订一致返回 None。"""
+        video = db.get(Video, video_id)
+        if video is None:
+            return "video no longer exists"
+        if video.workflow_status != "approved":
+            return f"video workflow is {video.workflow_status!r}, not 'approved'"
+        if video.annotation_revision != revision:
+            return (
+                f"revision mismatch (job revision {revision}, "
+                f"video revision {video.annotation_revision})"
+            )
+        return None
+
+    def _clips_for_revision(self, db: Session, video_id: int, revision: int) -> list[Clip]:
+        return (
+            db.query(Clip)
+            .join(Annotation, Annotation.id == Clip.annotation_id)
+            .filter(Annotation.video_id == video_id, Clip.source_revision == revision)
+            .order_by(Clip.id)
+            .all()
+        )
+
+    def _resolve_input(self, video: Video) -> Path:
+        """解析源视频路径：严格限制在配置 videos_dir 内，缺失/越界抛 MediaCommandError。"""
+        if not video.storage_path:
+            raise MediaCommandError("video has no storage_path; nothing to re-encode")
+        videos_dir = self.settings.videos_dir.resolve()
+        raw = Path(video.storage_path)
+        path = raw.resolve() if raw.is_absolute() else (videos_dir / raw).resolve()
+        if path == videos_dir or not path.is_relative_to(videos_dir):
+            raise MediaCommandError(
+                "video storage_path escapes the configured videos directory"
+            )
+        if not path.is_file():
+            raise MediaCommandError(f"video file missing on disk: {video.storage_path}")
+        return path
+
+    def _process_job(self, db: Session, job: BackgroundJob) -> None:
+        payload = job.payload or {}
+        video_id = payload.get("video_id")
+        revision = payload.get("revision")
+        if not video_id or not revision:
+            raise MediaCommandError("media job payload missing video_id/revision")
+        settings = self.settings
+
+        # ---- 处理前检查 ----
+        reason = self._invalidation_reason(db, video_id, revision)
+        if reason is not None:
+            self._cancel_invalidated(db, job, reason)
+            return
+
+        clips = self._clips_for_revision(db, video_id, revision)
+        total = len(clips)
+        if total == 0:
+            job.progress = 100
+            job.status = "succeeded"
+            job.finished_at = _now()
+            db.commit()
+            return
+
+        produced: list[Path] = []  # 本次运行成功产出的最终文件（失效时清理）
+        failures: list[str] = []
+        for clip in clips:
+            clip = db.get(Clip, clip.id)  # 重取：并发失效可能已删除该行
+            if clip is None:
+                continue
+            # 跳过已 ready 的 Clip；其余（pending/failed，含崩溃遗留的 processing）
+            # 都要处理——重试只处理未 ready 的片段，成功片段保留
+            if clip.status == "ready":
+                continue
+            # ---- 每片前检查 ----
+            reason = self._invalidation_reason(db, video_id, revision)
+            if reason is not None:
+                self._cleanup_produced(produced, settings)
+                self._cancel_invalidated(db, job, reason)
+                return
+            video = db.get(Video, video_id)
+            try:
+                self._process_clip(db, video, clip, produced)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001  单片段失败 → 该片 failed，任务 failed
+                db.rollback()
+                failures.append(str(exc))
+                cur = db.get(Clip, clip.id)
+                if cur is not None:
+                    cur.status = "failed"
+                    cur.error = _truncate_error(str(exc))
+                    cur.updated_at = _now()
+                    db.commit()
+                break
+            # 进度更新（ready 数 / 总片数）
+            ready = (
+                db.query(Clip)
+                .join(Annotation, Annotation.id == Clip.annotation_id)
+                .filter(
+                    Annotation.video_id == video_id,
+                    Clip.source_revision == revision,
+                    Clip.status == "ready",
+                )
+                .count()
+            )
+            job = db.get(BackgroundJob, job.id)
+            if job is not None:
+                job.progress = int(ready * 100 / total) if total else 100
+                db.commit()
+
+        if failures:
+            job = db.get(BackgroundJob, job.id)
+            if job is not None:
+                job.status = "failed"
+                job.error = _truncate_error(
+                    f"Clip generation failed: {len(failures)} clip(s) failed"
+                    f" (first error: {failures[0]})"
+                )
+                job.finished_at = _now()
+                db.commit()
+            return
+
+        # ---- 完成后复查：失效则取消并清理本次产物 ----
+        reason = self._invalidation_reason(db, video_id, revision)
+        if reason is not None:
+            self._cleanup_produced(produced, settings)
+            self._cancel_invalidated(db, job, reason)
+            return
+
+        job.status = "succeeded"
+        job.progress = 100
+        job.finished_at = _now()
+        db.commit()
+
+    def _process_clip(
+        self, db: Session, video: Video, clip: Clip, produced: list[Path]
+    ) -> None:
+        """渲染单个 Clip：临时文件 → 原子替换；失败清理半成品并抛错。
+
+        路径均限制在 clips_dir / thumbnails_dir 内，DB 存相对名。
+        """
+        settings = self.settings
+        annotation = db.get(Annotation, clip.annotation_id)
+        if annotation is None:
+            raise MediaCommandError(f"annotation {clip.annotation_id} not found for clip")
+        input_path = self._resolve_input(video)
+        clip.status = "processing"
+        db.commit()
+
+        name = f"clip_{clip.annotation_id}_rev{clip.source_revision}"
+        temp_clip = settings.clips_dir / f".{name}.mp4.part"
+        temp_thumb = settings.thumbnails_dir / f".{name}.jpg.part"
+        final_clip = settings.clips_dir / f"{name}.mp4"
+        final_thumb = settings.thumbnails_dir / f"{name}.jpg"
+        settings.clips_dir.mkdir(parents=True, exist_ok=True)
+        settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+        created: list[Path] = []  # 本次调用已落盘的最终文件（失败时清理，避免半成品）
+        try:
+            self.processor.render_clip(
+                input_path=str(input_path),
+                start=annotation.start_time,
+                end=annotation.end_time,
+                output_path=str(temp_clip),
+            )
+            mid = (annotation.start_time + annotation.end_time) / 2.0  # 缩略图取片段中点
+            self.processor.render_thumbnail(
+                input_path=str(input_path),
+                at=mid,
+                output_path=str(temp_thumb),
+            )
+            # 成功后原子替换（同目录 .part → 最终名）
+            os.replace(temp_clip, final_clip)
+            created.append(final_clip)
+            os.replace(temp_thumb, final_thumb)
+            created.append(final_thumb)
+            clip.clip_path = f"{name}.mp4"
+            clip.thumbnail_path = f"{name}.jpg"
+            clip.status = "ready"
+            clip.error = None
+            clip.generated_at = _now()
+            clip.updated_at = _now()
+            produced.extend(created)  # 交给失效清理跟踪
+        except Exception:
+            for path in created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for temp in (temp_clip, temp_thumb):
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _cleanup_produced(self, files: list[Path], settings) -> None:
+        """失效时清理本次运行产出的实体文件（仅限已知路径，删除失败记日志不阻断）。"""
+        for path in files:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove produced media file %s", path)
+
+    def _cancel_invalidated(self, db: Session, job: BackgroundJob, reason: str) -> None:
+        job.status = "cancelled"
+        job.error = f"Cancelled: {reason}"
+        job.finished_at = _now()
+        db.commit()

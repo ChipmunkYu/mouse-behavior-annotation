@@ -141,6 +141,53 @@ export const WORKFLOW_LABELS: Record<string, string> = {
   rejected: "已退回",
 };
 
+// ---------- 后台任务与媒体（片段）生成（批次 4） ----------
+/**
+ * 后台任务（与 backend/app/models.py BackgroundJob 对齐）：
+ * 状态枚举 queued / running / succeeded / failed / cancelled。
+ * 字段命名以当前后端基础模型为准，核对最终实现字段时在此处修正即可。
+ */
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface Job {
+  id: number;
+  project_id: number | null;
+  job_type: string;
+  status: JobStatus;
+  /** 0–100 整数进度 */
+  progress: number;
+  payload: unknown;
+  result_path: string | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  expires_at: string | null;
+}
+
+/** 单个视频的媒体（片段）生成状态汇总（GET /media-status）。 */
+export interface MediaStatus {
+  video_id: number;
+  annotation_revision: number;
+  workflow_status: string;
+  /** 片段总数 */
+  total: number;
+  ready: number;
+  processing: number;
+  failed: number;
+  pending: number;
+  /** 最近一次生成任务（尚未生成过则为 null） */
+  latest_job: Job | null;
+}
+
+export const JOB_LABELS: Record<string, string> = {
+  queued: "排队中",
+  running: "处理中",
+  succeeded: "已完成",
+  failed: "生成失败",
+  cancelled: "已取消",
+};
+
 // ---------- 导出 ----------
 export interface ExportEvent {
   video_id: string;

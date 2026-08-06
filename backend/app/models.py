@@ -274,6 +274,14 @@ class BackgroundJob(Base):
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     result_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 幂等去重键（批次 4）：同视频+修订只允许一行任务，唯一索引兜底并发重复入队；
+    # 可空以兼容全局清理等非媒体任务（SQLite 唯一索引允许多个 NULL）。
+    dedupe_key: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
+    # 任务领取/中断重排次数（批次 4）：重启恢复时 running 视为中断，
+    # attempts < media_max_attempts 则重排，否则判失败（重试上限耗尽）。
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

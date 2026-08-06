@@ -2,7 +2,9 @@
  * 审核工作台 /projects/:projectId/review：
  * - 队列列表（仅元数据，避免一次加载所有视频的标注与流）
  * - 选中视频的共享播放器 + 时间轴 + 只读标注列表
- * - 审核历史、意见输入、通过 / 退回（均有确认；通过文案不声称片段已生成）
+ * - 审核历史、意见输入、通过 / 退回（均有确认）
+ * - 通过后自动开始片段生成：展示「审核已通过，片段生成已排队/处理中」，
+ *   媒体状态面板轮询 media-status 直至任务落定（失败可重试生成）
  * - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）
  * - 仅 owner / admin / reviewer 角色可见入口（项目内角色由 project API 提供）
  */
@@ -22,6 +24,7 @@ import type { Annotation, Category, Project, Review, Video } from "../api/types"
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
+import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 
@@ -160,7 +163,14 @@ export default function ReviewPage() {
     void loadQueue();
   }, [loadQueue]);
 
-  /* 选中视频：只加载该视频的标注 / 类别 / 审核历史 / 视频流，避免一次加载全部 */
+  /* 选中视频：只加载该视频的标注 / 类别 / 审核历史 / 视频流，避免一次加载全部。
+   * selectedVideo 由 selectVideo 显式设置：审核通过后队列刷新不再覆盖已选视频，
+   * 便于在详情中继续查看片段生成进度。 */
+  const selectVideo = useCallback((v: Video) => {
+    setSelectedId(v.id);
+    setSelectedVideo(v);
+  }, []);
+
   useEffect(() => {
     if (selectedId == null) {
       setSelectedVideo(null);
@@ -178,7 +188,6 @@ export default function ReviewPage() {
     let url: string | null = null;
     const vid = selectedId;
 
-    setSelectedVideo(queue?.find((v) => v.id === vid) ?? null);
     setNotice(null);
     setErrorMsg(null);
     setStreamState("loading");
@@ -218,7 +227,7 @@ export default function ReviewPage() {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [selectedId, pid, queue]);
+  }, [selectedId, pid]);
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
     const v = videoRef.current;
@@ -293,8 +302,8 @@ export default function ReviewPage() {
       message:
         result === "approved" ? (
           <>
-            通过后该视频审核完成、标注将被锁定。通过仅表示审核<b>已通过</b>，
-            <b>媒体（片段）生成将在后续功能中提供</b>，本操作不会生成任何片段。
+            通过后该视频审核完成、标注将被锁定，系统将自动开始<b>生成媒体（片段）</b>，
+            任务会<b>排队 / 处理中</b>，可在下方查看进度；生成失败时可重试。
           </>
         ) : (
           <>退回后该视频将返回标注者修改，本次审核意见将保留在历史记录中。标注者的修改将使其回到草稿并需要重新提交。</>
@@ -311,14 +320,22 @@ export default function ReviewPage() {
         result,
         comment: comment.trim() || null,
       });
+      if (result === "approved") {
+        // 通过后保留当前视频在详情中，便于查看片段生成进度
+        setSelectedVideo((prev) =>
+          prev
+            ? { ...prev, workflow_status: "approved", approved_at: new Date().toISOString() }
+            : prev
+        );
+      }
       setNotice(
         result === "approved"
-          ? `已通过：${selectedVideo.filename}。媒体生成将在后续功能完成。`
+          ? `已通过：${selectedVideo.filename}。片段生成已排队 / 处理中，可在下方查看进度。`
           : `已退回：${selectedVideo.filename}，标注者将收到意见并修改。`
       );
       setComment("");
       await loadQueue();
-      setSelectedId(null);
+      if (result === "rejected") setSelectedId(null);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "提交审核失败");
     } finally {
@@ -389,7 +406,7 @@ export default function ReviewPage() {
                       key={v.id}
                       type="button"
                       className={selectedId === v.id ? "queue-item active" : "queue-item"}
-                      onClick={() => setSelectedId(v.id)}
+                      onClick={() => selectVideo(v)}
                       title={v.filename}
                     >
                       <span className="queue-name" title={v.filename}>
@@ -495,6 +512,15 @@ export default function ReviewPage() {
                     />
                   )}
                 </div>
+
+                <Card title="媒体片段生成" className="media-card">
+                  <MediaStatusPanel
+                    projectId={pid}
+                    videoId={selectedId}
+                    workflowStatus={selectedVideo?.workflow_status ?? "draft"}
+                    retryable
+                  />
+                </Card>
 
                 <div className="review-detail">
                   <Card title={`标注（${annotations.length}）· 只读`} className="review-anns">

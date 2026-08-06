@@ -1893,3 +1893,233 @@ a:focus-visible,
   border-color: var(--border);
   font-weight: 700;
 }
+
+/* ============ 批次 4：媒体（片段）生成状态 ============ */
+.media-card .card-body {
+  padding: 10px 12px;
+}
+
+.media-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.media-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.media-headline {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+.media-headline.ok {
+  color: var(--ok);
+  background: var(--ok-weak);
+  border-color: var(--ok);
+}
+
+.media-headline.warn {
+  color: var(--warn);
+  background: var(--warn-weak);
+  border-color: var(--warn);
+}
+
+.media-headline.danger {
+  color: var(--danger);
+  background: var(--danger-weak);
+  border-color: var(--danger);
+}
+
+.media-headline.muted {
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+
+.media-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.media-loading .spinner {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+}
+
+.media-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.media-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+
+.media-stat b {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.media-stat.ok {
+  color: var(--ok);
+  background: var(--ok-weak);
+  border-color: var(--ok);
+}
+
+.media-stat.warn {
+  color: var(--warn);
+  background: var(--warn-weak);
+  border-color: var(--warn);
+}
+
+.media-stat.danger {
+  color: var(--danger);
+  background: var(--danger-weak);
+  border-color: var(--danger);
+}
+
+/* aria 进度条：role="progressbar" + aria-valuenow/min/max */
+.media-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.media-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+.media-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.media-job {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.media-job .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.media-job.queued,
+.media-job.running {
+  color: var(--warn);
+}
+
+.media-job.succeeded {
+  color: var(--ok);
+}
+
+.media-job.failed {
+  color: var(--danger);
+}
+
+.media-job.cancelled,
+.media-job.idle {
+  color: var(--text-3);
+}
+
+.media-error {
+  padding: 6px 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-weak);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.media-note {
+  padding: 8px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.media-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 视频库 approved 卡片的行内片段概要（一次性拉取，不轮询） */
+.media-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  line-height: 1.6;
+}
+
+.media-summary.ok {
+  color: var(--ok);
+  background: var(--ok-weak);
+  border-color: var(--ok);
+}
+
+.media-summary.warn {
+  color: var(--warn);
+  background: var(--warn-weak);
+  border-color: var(--warn);
+}
+
+.media-summary.danger {
+  color: var(--danger);
+  background: var(--danger-weak);
+  border-color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .media-actions .btn {
+    width: 100%;
+  }
+}

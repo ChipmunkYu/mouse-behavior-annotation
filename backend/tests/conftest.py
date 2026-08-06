@@ -17,6 +17,7 @@ from app import database as db_mod  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.media import MediaCommandError  # noqa: E402
 from app.models import ProjectMembership, User  # noqa: E402
 
 
@@ -91,3 +92,67 @@ def login_headers(ctx):
         return auth_headers(ctx.client, username, password)
 
     return _login
+
+
+class FakeMediaProcessor:
+    """可替换媒体执行器（批次 4）：不调用真实 ffmpeg，写入伪文件并可注入失败。
+
+    - `clip_calls` / `thumb_calls`：记录 (input_path, start, end, output_path) 调用。
+    - `fail_clips` / `fail_thumbnails`：annotation_id 集合，命中即抛 MediaCommandError。
+    """
+
+    def __init__(self) -> None:
+        self.clip_calls: list[tuple[str, float, float, str]] = []
+        self.thumb_calls: list[tuple[str, float, str]] = []
+        self.fail_clips: set[int] = set()
+        self.fail_thumbnails: set[int] = set()
+
+    @staticmethod
+    def _annotation_id(output_path: str) -> int:
+        # 输出名形如 .clip_{annotation_id}_rev{n}.mp4.part
+        name = Path(output_path).name
+        start = name.index("clip_") + len("clip_")
+        end = name.index("_rev", start)
+        return int(name[start:end])
+
+    def render_clip(self, *, input_path: str, start: float, end: float, output_path: str) -> None:
+        self.clip_calls.append((input_path, start, end, output_path))
+        ann_id = self._annotation_id(output_path)
+        if ann_id in self.fail_clips:
+            raise MediaCommandError(
+                f"ffmpeg clip failed for annotation {ann_id}: fake-stderr-truncated"
+            )
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"FAKE-MP4-DATA")
+
+    def render_thumbnail(self, *, input_path: str, at: float, output_path: str) -> None:
+        self.thumb_calls.append((input_path, at, output_path))
+        ann_id = self._annotation_id(output_path)
+        if ann_id in self.fail_thumbnails:
+            raise MediaCommandError(
+                f"ffmpeg thumbnail failed for annotation {ann_id}: fake-stderr-truncated"
+            )
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"FAKE-JPG-DATA")
+
+
+class MediaAppContext(AppContext):
+    def __init__(self, client, session_factory, processor: FakeMediaProcessor, app):
+        super().__init__(client, session_factory)
+        self.processor = processor
+        self.app = app
+
+
+@pytest.fixture()
+def media_ctx(tmp_path):
+    """批次 4 媒体测试：注入 FakeMediaProcessor + 同步单线程 worker（不要求系统 ffmpeg）。"""
+    settings = Settings(
+        env="test",
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{(tmp_path / 'media.db').as_posix()}",
+        media_synchronous=True,
+    )
+    processor = FakeMediaProcessor()
+    app = create_app(settings=settings, media_processor=processor)
+    with TestClient(app) as client:
+        yield MediaAppContext(client, db_mod.SessionLocal, processor, app)

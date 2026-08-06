@@ -1,4 +1,4 @@
-# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环）
+# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
@@ -7,6 +7,8 @@
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
 - 批次 3：提交与审核闭环（submit / review queue / review 裁决 / 审核历史），
   标注写入与审核工作流联动（非 draft 修改回 draft + Clip 行与实体文件清理）
+- 批次 4：仅审核通过（approved）的视频，后台精确重编码每条标注为 H.264 MP4 片段并生成
+  JPG 缩略图——单进程单任务执行、可恢复/重试、修订隔离；媒体执行器可替换（测试无需本机 ffmpeg）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 
 ## 目录结构
@@ -20,9 +22,10 @@ backend/
 │   └── versions/
 │       ├── 0001_baseline_p1.py       # baseline：P1 原版 6 张表
 │       ├── 0002_review_clip_job.py   # 增量：Video 工作流字段 + Review/Clip/BackgroundJob
-│       └── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
+│       ├── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
+│       └── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
 ├── app/
-│   ├── main.py            # 应用工厂（启动时自动幂等迁移、CORS、路由注册）
+│   ├── main.py            # 应用工厂（启动时自动幂等迁移、CORS、路由注册、媒体 worker 生命周期）
 │   ├── config.py          # 环境变量配置
 │   ├── database.py        # SQLAlchemy 引擎 / Session / ensure_schema
 │   ├── migration.py       # 程序化 Alembic 入口（启动自动迁移 / CLI 共用）
@@ -31,7 +34,9 @@ backend/
 │   ├── auth.py            # 密码哈希（PBKDF2）+ JWT
 │   ├── seed.py            # 北医 12 类初始化 + demo 账号
 │   ├── deps.py            # 项目成员权限依赖
-│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews
+│   ├── media.py           # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
+│   ├── media_jobs.py      # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
+│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / media
 ├── scripts/               # 本地工具脚本（仅开发，不注册到应用）
 │   ├── migrate.py         # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
 │   └── seed_demo.py       # 幂等演示数据脚本（第一阶段本地演示）
@@ -70,7 +75,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0003），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0004），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -99,11 +104,20 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002 已版本化库 → 增量 `upgrade head` 到 0003（外键策略更新，数据原样保留）。
+- 0003 已版本化库 → 增量 `upgrade head` 到 0004（新增列 + 唯一索引，数据原样保留）。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
+
+### 后台任务去重与重试（0004）
+
+0004 为 `background_jobs` 增加两个字段（SQLite 批处理重建表，已有数据保留）：
+
+| 列 | 可空 | 说明 |
+|---|---|---|
+| `dedupe_key` | 是 | 幂等去重键：同一视频+修订只允许一行任务（唯一索引兜底并发重复入队，防重复任务；NULL 允许多个，兼容全局清理等任务） |
+| `attempts` | 否（默认 0） | 任务领取/中断重排次数，用于重启恢复的重试上限判定 |
 
 ### 外键删除策略（0003，Oracle Gate 1 整改）
 
@@ -119,10 +133,10 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 
 ### 后续整改批次（未实施）
 
-- **批次 4**：BackgroundJob 幂等（任务重入/重复执行的防重保障）、clip 生成与
-  基于 `cleanup-issues.log` 的孤儿文件补偿清理任务。
+- **批次 5+**：生产跨视频片段库；分类导出；基于 `cleanup-issues.log` 的孤儿文件
+  补偿清理任务（批次 7）、导出 ZIP 过期清理等生命周期任务。
 
-以上为 Oracle 整改路线中的后续批次，当前代码未包含实现。
+批次 4（媒体任务去重、精确片段/缩略图后台生成）已实现，见下文「批次 4：精确片段与缩略图」。
 
 ## Demo 账号
 
@@ -166,6 +180,13 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 允许的前端来源（本地 Vite） |
 | `UPLOAD_DISK_RESERVE_BYTES` | `1073741824`（1 GiB） | 上传写入前/每块前检查磁盘可用空间，需保留的安全余量，不足返回 507 |
 | `UPLOAD_CHUNK_SIZE` | `1048576`（1 MiB） | 上传分块流式写入的块大小（字节），应用层不设文件大小上限 |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | 媒体可执行文件（默认取 PATH 命令名；本机无 ffmpeg 时可注入替换执行器） |
+| `MEDIA_CRF` | `23` | libx264 CRF（越小质量越高、体积越大） |
+| `MEDIA_PRESET` | `veryfast` | libx264 预设（速度/体积权衡） |
+| `MEDIA_TIMEOUT_SECONDS` | `600` | 单条媒体命令超时（秒），超时清理半成品并判失败 |
+| `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
+| `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
+| `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
 
 ## API 一览
 
@@ -251,6 +272,40 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 - 删除失败与越界均追加一条 JSONL 到 `DATA_DIR/cleanup-issues.log`（`kind ∈ {delete-failed,
   out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 4 清理任务据此补偿。
 
+### 批次 4：精确片段与缩略图
+
+仅审核通过（`approved`）的视频才会生成片段。approve 提交成功后自动创建
+当前 video+revision 的媒体任务（`job_type=media`，`dedupe_key=media:video:{id}:rev:{revision}`）
+与每条标注的 `pending` Clip 行并调度；`rejected` 不入队。已存在
+`queued/running/succeeded` 任务则幂等复用，`failed/cancelled` 重置回 `queued` 重试。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/media-status` | 媒体生成状态 → `MediaStatusOut`（项目成员可读） |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/media/generate` | 触发/重试生成 → `JobOut`（仅 owner/admin/reviewer、仅 approved） |
+| `GET` | `/api/projects/{project_id}/jobs/{job_id}` | 任务详情 → `JobOut`（项目成员可读） |
+
+**精确重编码**：每条标注按 `[start_time, end_time)` 生成 `libx264 + yuv420p + faststart`
+H.264 MP4（`-ss` 前置输入定位 + 重编码，帧精确）；可选音频映射（`MEDIA_MAP_AUDIO`）。
+缩略图从片段**中点**（`(start+end)/2`）抽一帧 JPEG（`-frames:v 1 -q:v 2`）。
+
+**执行器与并发**：
+- `app/media.py` 封装 subprocess，命令一律**参数列表**调用、**禁用 `shell=True`**；
+  `FFMPEG_PATH` / `FFPROBE_PATH` 可注入替换执行器（本机无 ffmpeg 时测试用 FakeMediaProcessor）。
+- 输入源解析严格限制在 `DATA_DIR/videos` 内（绝对/相对路径统一校验，越界或缺失 → 该 Clip 失败）。
+- 输出先写临时 `.part` 文件，成功后在 `clips_dir` / `thumbnails_dir` **原子替换**；
+  失败清理临时与半成品；stderr 截断写入 Clip/任务错误字段。DB 存相对路径。
+- **单 worker**（`ThreadPoolExecutor(max_workers=1)`，app.state 管理）；领取用条件
+  `UPDATE ... WHERE status='queued'` 原子独占，杜绝两个线程领取同一任务；
+  `MEDIA_SYNCHRONOUS=true` 时在请求线程内同步执行（测试确定性）。
+- **重启恢复**：启动时 `running` 视为中断——`attempts < MEDIA_MAX_ATTEMPTS` 则重排
+  并 `attempts+1`，否则判 `failed`（重试上限耗尽）；同时调度全部 `queued` 任务。
+- **修订隔离**：处理前 / 每片前 / 完成后都校验视频仍 `approved` 且 revision 与任务
+  payload 一致；失效 → 任务 `cancelled` 并清理**本次运行产出**的实体文件，**绝不复活**
+  已被删除的 Clip 行（worker 从不创建 Clip 行）。
+- **部分失败**：失败 Clip 置 `failed` 并写截断错误，Job 置 `failed` 并记录摘要，
+  成功片段保留；重试（`media/generate`）只处理 `pending/failed`（未 ready）的 Clip。
+
 ### 标注
 
 | 方法 | 路径 | 说明 |
@@ -291,7 +346,9 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
   `status ∈ {pending, processing, ready, failed, stale}`（默认 `pending`）。
 - `BackgroundJob`：后台任务（clip 生成 / export / cleanup 共用）——
   job_type/status/progress 0..100/payload/result_path/error/started_at/finished_at/expires_at；
-  `project_id` 可空以支持全局清理任务；`status ∈ {queued, running, succeeded, failed, cancelled}`。
+  `project_id` 可空以支持全局清理任务；`status ∈ {queued, running, succeeded, failed, cancelled}`；
+  批次 4 新增 `dedupe_key`（可空唯一，同视频+修订仅一行任务，防重复）与 `attempts`
+  （领取/中断重排计数，重启恢复重试上限判定）。
 - 类别被标注引用时不可物理删除（外键约束）；P1 仅提供类别读取。
 
 ## 校验规则
@@ -341,18 +398,24 @@ pytest -q
 批次 3 失效联动（三种非 draft 状态下的创建/修改/删除回 draft、revision 仅 +1 且 draft 后稳定、
 Clip 行与实体文件删除、仅影响本视频 Clip、Review 历史保留、越界路径不删除且记日志、
 文件删除失败记日志不阻断、reviewer 不可写标注、直接写 review_status 422），
+批次 4 媒体（ffmpeg 命令构造无 shell / 超时 / 音频映射 / stderr 截断、approved 自动入队与
+pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状态门、media-status 与 job 查询
+成员权限、进度与部分失败保留成功片段、重试只处理 failed、重启恢复 running 重排/判失败、
+修订失效竞态取消且不复活 Clip、文件原子性与半成品清理、输入源路径安全、实际 DB 迁移 0004），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-0002 已版本化库到 0003 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
+0002 与 0003 已版本化库到 0004 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
-被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束）。
+被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束 /
+dedupe_key 唯一约束防重复任务）。
 
 ## 已知边界
 
 - 未实现用户注册接口（通过 `data/` 内联管理或后续 P2 补充）。
 - 视频上传（批次 2）已支持真实文件流式上传（`POST .../videos/upload`）；
   P1 的 JSON Mock 接口（`POST .../videos`）保留不变。**未实现**：ffprobe 元数据探测、
-  ffmpeg 转码（`needs_transcode` 状态在本批不触发任何转码任务）、进度回调。
+  进度回调。
 - 视频流安全边界：`GET .../stream` 只服务解析后位于配置视频目录（`DATA_DIR/videos`）**内部**的文件；绝对路径或含 `../` 的路径逃出该目录一律 404，避免任意读取项目外敏感文件。
-- 审核流程（批次 3）已实现提交/队列/裁决/历史；Clip 实体片段与缩略图由批次 4 生成，
-  本批不运行 ffmpeg；越界路径/删除失败经 `DATA_DIR/cleanup-issues.log` 可观测，补偿清理任务在批次 4。
-- 类别停用/删除管理界面留待后续批次。
+- 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
+  媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
+  本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
+- `cleanup-issues.log` 补偿清理任务（孤儿文件清理）留待批次 7；类别停用/删除管理界面留待后续批次。

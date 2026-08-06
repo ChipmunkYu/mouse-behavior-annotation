@@ -164,3 +164,33 @@ class ReviewOut(BaseModel):
     created_at: datetime
     # 便捷字段：审核人用户名
     reviewer: Optional[str] = None
+
+
+# ---------- 后台任务 / 媒体状态（批次 4） ----------
+class JobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: Optional[int] = None
+    job_type: str
+    status: str
+    progress: int
+    payload: Optional[dict[str, Any]] = None
+    result_path: Optional[str] = None
+    error: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+
+
+class MediaStatusOut(BaseModel):
+    video_id: int
+    revision: int
+    workflow_status: str
+    total: int
+    ready: int
+    processing: int
+    failed: int
+    pending: int
+    latest_job: Optional[JobOut] = None

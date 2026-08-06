@@ -33,6 +33,24 @@ class Settings(BaseSettings):
     # 视频上传：分块流式写入的块大小（字节），应用层不设文件大小上限。
     upload_chunk_size: int = 1024 * 1024
 
+    # ---- 媒体处理（批次 4）：精确片段重编码与缩略图 ----
+    # ffmpeg/ffprobe 可执行文件：默认取 PATH 上的命令名；本机无 ffmpeg 的环境
+    # （或测试）通过 FFMPEG_PATH / FFPROBE_PATH 注入可替换执行器。
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
+    # 重编码质量与速度（libx264）：CRF 越小质量越高、体积越大。
+    media_crf: int = 23
+    media_preset: str = "veryfast"
+    # 单条媒体命令超时（秒），超时视为失败并清理半成品。
+    media_timeout_seconds: int = 600
+    # 片段是否映射音频（默认不映射；开启则 -map 0:a:0? 可选音频 + aac 编码）。
+    media_map_audio: bool = False
+    # 任务重试上限：重启恢复时 running 任务被重排/判失败 attempts 的阈值。
+    media_max_attempts: int = 3
+    # 测试用：true 时媒体 worker 在请求线程内同步执行（配合可替换执行器，
+    # 不要求系统 ffmpeg，测试可确定性驱动任务流程）。
+    media_synchronous: bool = False
+
     @property
     def videos_dir(self) -> Path:
         return self.data_dir / "videos"
