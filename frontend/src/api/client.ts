@@ -39,6 +39,21 @@ function extractDetail(data: unknown): string | null {
   return null;
 }
 
+/** 常见状态码 → 补充说明，让 403/409/422 等错误更可读（详情优先，提示作补充）。 */
+const STATUS_HINTS: Record<number, string> = {
+  403: "你没有权限执行此操作，请确认当前项目角色是否允许",
+  404: "目标资源不存在或已被删除",
+  409: "当前状态不允许此操作（可能状态已变化），请刷新后重试",
+  422: "提交的数据不合法，请检查输入后重试",
+};
+
+function friendlyDetail(status: number, detail: string): string {
+  const hint = STATUS_HINTS[status];
+  if (!hint) return detail;
+  if (detail.startsWith("请求失败") || detail.startsWith("上传失败")) return hint;
+  return `${detail}（${hint}）`;
+}
+
 /**
  * 统一处理 401：仅在已有会话时清除登录态并广播登出事件。
  * JSON 请求（handleResponse）与视频流等原始请求（apiRaw）共用，保证行为一致。
@@ -64,7 +79,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
     } catch {
       // 响应体不是 JSON，保留默认错误信息
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, friendlyDetail(res.status, detail));
   }
 
   if (res.status === 204) return undefined as T;
@@ -174,6 +189,7 @@ export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptio
       } catch {
         // 响应体不是 JSON，保留默认文案
       }
+      msg = friendlyDetail(status, msg);
       if (status === 507) {
         msg = "服务器磁盘空间不足，无法保存该视频。请先清理服务器磁盘空间后重试。";
       }

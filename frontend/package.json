@@ -6,8 +6,11 @@
   "description": "多小鼠行为标注网站前端（Vite + React + TypeScript）",
   "scripts": {
     "dev": "vite",
+    "demo": "vite --mode demo",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "build:demo": "tsc -b && vite build --mode demo",
+    "preview": "vite preview",
+    "preview:demo": "vite preview --outDir dist-demo"
   },
   "dependencies": {
     "react": "^18.3.1",

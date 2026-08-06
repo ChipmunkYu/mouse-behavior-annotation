@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   createAnnotation,
   deleteAnnotation,
@@ -9,6 +9,7 @@ import {
   listCategories,
   listProjects,
   listVideos,
+  submitVideoForReview,
   updateAnnotation,
 } from "../api";
 import { ApiError } from "../api/client";
@@ -19,9 +20,13 @@ import type {
   Project,
   Video,
 } from "../api/types";
-import { ROLE_LABELS } from "../api/types";
-import { Card, EmptyState, Loading } from "../components/ui";
-import { formatTime, formatTimeShort, timeToFrame } from "../utils/format";
+import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
+import { Card, EmptyState, Loading, WorkflowBadge } from "../components/ui";
+import { useConfirm } from "../components/ConfirmDialog";
+import Timeline from "../components/Timeline";
+import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/format";
+import { DEMO_MODE } from "../demo/mode";
+import DemoMouseStage from "../demo/DemoMouseStage";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
@@ -30,71 +35,6 @@ type Point = { time: number; frame: number };
 /* ================= 播放器叠加层（P1 空层，预留 YOLO 框/骨架/空间标注） ================= */
 function OverlayLayer() {
   return <div className="overlay-layer" aria-hidden="true" />;
-}
-
-/* ================= 时间轴 ================= */
-function Timeline({
-  duration,
-  currentTime,
-  annotations,
-  categoryById,
-  onSeek,
-}: {
-  duration: number;
-  currentTime: number;
-  annotations: Annotation[];
-  categoryById: Map<number, Category>;
-  onSeek: (t: number) => void;
-}) {
-  const ticks = useMemo(() => Array.from({ length: 11 }, (_, i) => (duration * i) / 10), [duration]);
-
-  function handleSeek(e: React.MouseEvent<HTMLDivElement>) {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    onSeek(frac * duration);
-  }
-
-  return (
-    <div
-      className="timeline"
-      onClick={handleSeek}
-      title="点击时间轴跳转"
-      role="slider"
-      tabIndex={0}
-      aria-label="时间轴"
-      aria-valuemin={0}
-      aria-valuemax={Math.max(0, Math.round(duration))}
-      aria-valuenow={Math.round(Math.min(currentTime, duration))}
-      aria-valuetext={formatTimeShort(currentTime)}
-    >
-      <div className="timeline-lanes">
-        {annotations.map((a) => {
-          const cat = categoryById.get(a.category_id);
-          const left = Math.min(100, Math.max(0, (a.start_time / duration) * 100));
-          const width = Math.min(100 - left, Math.max(0.15, ((a.end_time - a.start_time) / duration) * 100));
-          return (
-            <div
-              key={a.id}
-              className="timeline-interval"
-              style={{ left: `${left}%`, width: `${width}%`, background: cat?.color ?? "var(--text-3)" }}
-              title={`${cat?.name ?? "未知类别"}：${formatTimeShort(a.start_time)} – ${formatTimeShort(a.end_time)}`}
-            />
-          );
-        })}
-        <div
-          className="playhead"
-          style={{ left: `${Math.min(100, Math.max(0, (currentTime / duration) * 100))}%` }}
-        />
-      </div>
-      <div className="timeline-ticks">
-        {ticks.map((t, i) => (
-          <span key={i} className="timeline-tick" style={{ left: `${(t / duration) * 100}%` }}>
-            {formatTimeShort(t)}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 /* ================= 行为类别面板（按 group 动态分组，绝不硬编码类别） ================= */
@@ -354,7 +294,7 @@ function AnnotationList({
   fps: number | null | undefined;
   currentTime: number;
   onEditSave: (id: number, patch: AnnotationPatchInput) => Promise<void>;
-  onDelete: (id: number) => Promise<void>;
+  onDelete: (ann: Annotation) => Promise<void>;
 }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -371,17 +311,9 @@ function AnnotationList({
   }, [activeId]);
 
   async function handleDelete(ann: Annotation) {
-    const catName = ann.category_name ?? `#${ann.category_id}`;
-    if (
-      !window.confirm(
-        `确认删除标注「${catName}」${formatTimeShort(ann.start_time)}–${formatTimeShort(ann.end_time)} 吗？`
-      )
-    ) {
-      return;
-    }
     setBusyId(ann.id);
     try {
-      await onDelete(ann.id);
+      await onDelete(ann);
       setEditingId(null);
     } catch {
       // 错误提示已由父级处理
@@ -440,6 +372,47 @@ function SaveStatus({ state, message }: { state: SaveState; message?: string | n
   );
 }
 
+/* ================= 提交审核控件 =================
+ * draft / rejected → 「提交审核」；submitted → 「等待审核」；approved → 「已通过」
+ */
+function SubmitReviewControl({
+  status,
+  hasAnnotations,
+  submitting,
+  onSubmit,
+}: {
+  status: string;
+  hasAnnotations: boolean;
+  submitting: boolean;
+  onSubmit: () => void;
+}) {
+  if (status === "submitted") {
+    return (
+      <span className="submit-pill pending" role="status" title="该视频已在审核队列中">
+        ⏳ 等待审核
+      </span>
+    );
+  }
+  if (status === "approved") {
+    return (
+      <span className="submit-pill ok" role="status" title="该视频已审核通过">
+        ✓ 已通过
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="btn btn-sm btn-primary"
+      disabled={!hasAnnotations || submitting}
+      title={hasAnnotations ? "提交审核后，审核人将按当前标注版本审核" : "至少需要一条标注才能提交审核"}
+      onClick={onSubmit}
+    >
+      {submitting ? "提交中…" : "提交审核"}
+    </button>
+  );
+}
+
 /* ================= 标注工作台主页面 ================= */
 export default function AnnotatePage() {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
@@ -464,8 +437,18 @@ export default function AnnotatePage() {
   const [startPoint, setStartPoint] = useState<Point | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmDialog, confirm] = useConfirm();
+
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hint, setHint] = useState("播放视频，选择类别后按 S 设起点、D 设终点；Space 播放/暂停，←/→ 步进一帧");
+
+  // 从片段库跳回标注位置：?t=<秒> 定位播放头（演示模式直接生效）
+  const [searchParams] = useSearchParams();
+  const seekParamRaw = searchParams.get("t");
+  const seekParam = Number(seekParamRaw);
+  const hasSeekTarget = seekParamRaw != null && Number.isFinite(seekParam);
+  const pendingSeekRef = useRef<number | null>(null);
 
   // 供键盘监听读取最新值（避免闭包过期）
   const latest = useRef({ startPoint, activeCategory, video });
@@ -504,6 +487,12 @@ export default function AnnotatePage() {
       setCategories(cats);
       setAnnotations(anns);
       setErrorMsg(null);
+      if (DEMO_MODE) {
+        // 演示模式：无真实视频流，直接启用内置演示画面（时长取元数据）
+        const demoV = vids.find((item) => item.id === vid);
+        if (demoV?.duration) setElementDuration(demoV.duration);
+        setStreamState("ok");
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "加载数据失败");
     } finally {
@@ -515,8 +504,76 @@ export default function AnnotatePage() {
     void loadAll();
   }, [loadAll]);
 
-  /* ---------- 视频流（带 token 拉取 blob） ---------- */
+  /* ---------- 视频元数据刷新（标注变更后工作流状态可能回到 draft） ---------- */
+  const refreshVideo = useCallback(async () => {
+    try {
+      const vids = await listVideos(pid);
+      const v = vids.find((item) => item.id === vid) ?? null;
+      if (v) setVideo(v);
+    } catch {
+      // 元数据刷新失败不阻断标注流程，沿用当前 video 状态
+    }
+  }, [pid, vid]);
+
+  /* ---------- 工作流守卫 ----------
+   * 对已提交 / 已通过 / 已退回的视频执行创建 / 编辑 / 删除标注前，
+   * 明确告知后果（退回草稿、审核失效、已有片段删除）；取消则不发请求。
+   */
+  const guardMutation = useCallback(
+    async (action: string): Promise<boolean> => {
+      const status = video?.workflow_status ?? "draft";
+      if (status === "draft" || !status) return true;
+      const label = WORKFLOW_LABELS[status] ?? status;
+      return confirm({
+        title: `确认${action}？`,
+        message: (
+          <>
+            该视频当前为「<b>{label}</b>」（修订 v{video?.annotation_revision ?? 1}）。
+            修改标注将使其退回<b>草稿</b>，已有审核结果将<b>失效</b>，已有片段（如有）将被删除，需要重新提交审核。
+          </>
+        ),
+        confirmLabel: `仍要${action}`,
+        danger: true,
+      });
+    },
+    [video, confirm]
+  );
+
+  /* ---------- 提交审核 ---------- */
+  const handleSubmitReview = useCallback(async () => {
+    if (!video) return;
+    if (annotations.length === 0) {
+      setErrorMsg("至少需要一条标注才能提交审核");
+      return;
+    }
+    const ok = await confirm({
+      title: "提交审核？",
+      message: (
+        <>
+          提交后该视频将进入审核队列，审核通过前标注将被锁定（修改需经确认并退回草稿）。
+          <br />
+          当前共 <b>{annotations.length}</b> 条标注，修订号 <b>v{video.annotation_revision ?? 1}</b>。
+        </>
+      ),
+      confirmLabel: "提交审核",
+    });
+    if (!ok) return;
+    setSubmitting(true);
+    setErrorMsg(null);
+    try {
+      const updated = await submitVideoForReview(pid, vid);
+      setVideo(updated);
+      setHint("已提交审核，等待审核人处理");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "提交审核失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [video, annotations.length, pid, vid, confirm]);
+
+  /* ---------- 视频流（带 token 拉取 blob）；演示模式跳过，改用内置演示画面 ---------- */
   useEffect(() => {
+    if (DEMO_MODE) return;
     let url: string | null = null;
     let cancelled = false;
     setStreamState("loading");
@@ -549,6 +606,17 @@ export default function AnnotatePage() {
     };
   }, [vid]);
 
+  /* ---------- 从片段库带参跳转：定位到目标时间（演示模式立即生效） ---------- */
+  useEffect(() => {
+    if (!hasSeekTarget) return;
+    if (DEMO_MODE) {
+      const dur = timelineDuration ?? seekParam;
+      setCurrentTime(Math.min(Math.max(0, seekParam), dur));
+    } else {
+      pendingSeekRef.current = seekParam;
+    }
+  }, [hasSeekTarget, seekParam, timelineDuration]);
+
   /* ---------- 保存状态自动复位 ---------- */
   useEffect(() => {
     if (saveState !== "saved") return;
@@ -558,6 +626,10 @@ export default function AnnotatePage() {
 
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
+    if (DEMO_MODE) {
+      setPlaying((p) => !p);
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) void v.play();
@@ -565,6 +637,13 @@ export default function AnnotatePage() {
   }
 
   function step(dir: 1 | -1) {
+    if (DEMO_MODE) {
+      const fps = video?.fps && video.fps > 0 ? video.fps : 30;
+      const dt = 1 / fps;
+      const dur = timelineDuration ?? currentTime;
+      setCurrentTime((c) => Math.min(Math.max(0, c + dir * dt), dur));
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     const fps = latest.current.video?.fps && latest.current.video.fps > 0 ? latest.current.video.fps : 30;
@@ -574,6 +653,11 @@ export default function AnnotatePage() {
   }
 
   function seekTo(t: number) {
+    if (DEMO_MODE) {
+      const dur = timelineDuration ?? t;
+      setCurrentTime(Math.min(Math.max(0, t), dur));
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     v.currentTime = Math.min(Math.max(0, t), v.duration || t);
@@ -581,6 +665,14 @@ export default function AnnotatePage() {
 
   /* ---------- 标注操作 ---------- */
   function markStart() {
+    if (DEMO_MODE) {
+      const time = currentTime;
+      const frame = timeToFrame(time, latest.current.video?.fps);
+      setStartPoint({ time, frame });
+      setErrorMsg(null);
+      setHint(`起点已设置 ${formatTime(time)}（帧 ${frame}），到终点时按 D 提交`);
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     const time = v.currentTime;
@@ -592,7 +684,7 @@ export default function AnnotatePage() {
 
   async function markEnd() {
     const v = videoRef.current;
-    if (!v) return;
+    if (!DEMO_MODE && !v) return;
     const sp = latest.current.startPoint;
     const cat = latest.current.activeCategory;
     if (!cat) {
@@ -605,12 +697,18 @@ export default function AnnotatePage() {
       setHint("");
       return;
     }
-    const time = v.currentTime;
+    const time = DEMO_MODE ? currentTime : videoRef.current?.currentTime ?? 0;
     if (time <= sp.time) {
       setErrorMsg("终点必须晚于起点，请先前进再设终点");
       return;
     }
     const frame = timeToFrame(time, latest.current.video?.fps);
+    // 已提交 / 已通过 / 已退回的视频新增标注前需确认（会退回草稿、审核失效）
+    if (!(await guardMutation("新增标注"))) {
+      setStartPoint(null);
+      setHint("");
+      return;
+    }
     setSaveState("saving");
     try {
       await createAnnotation(pid, vid, {
@@ -625,8 +723,14 @@ export default function AnnotatePage() {
       setSaveState("saved");
       setStartPoint(null);
       setErrorMsg(null);
-      setHint(`已标注：${cat.name} ${formatTime(sp.time)} → ${formatTime(time)}（帧 ${sp.frame}→${frame}）`);
+      const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
+      setHint(
+        wasLocked
+          ? `已标注：${cat.name} ${formatTime(sp.time)} → ${formatTime(time)}（视频已退回草稿，请重新提交审核）`
+          : `已标注：${cat.name} ${formatTime(sp.time)} → ${formatTime(time)}（帧 ${sp.frame}→${frame}）`
+      );
       await loadAnnotations();
+      if (wasLocked) await refreshVideo();
     } catch (err) {
       setSaveState("error");
       setErrorMsg(err instanceof Error ? err.message : "保存标注失败");
@@ -635,21 +739,46 @@ export default function AnnotatePage() {
 
   /* ---------- 列表编辑 / 删除 / 导出 ---------- */
   async function handleEditSave(id: number, patch: AnnotationPatchInput) {
-    await updateAnnotation(pid, vid, id, patch);
-    setSaveState("saved");
-    setHint("标注已更新");
-    await loadAnnotations();
+    if (!(await guardMutation("编辑标注"))) return;
+    try {
+      await updateAnnotation(pid, vid, id, patch);
+      setSaveState("saved");
+      const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
+      setHint(wasLocked ? "标注已更新，视频已退回草稿，请重新提交审核" : "标注已更新");
+      await loadAnnotations();
+      if (wasLocked) await refreshVideo();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "保存标注失败");
+      throw err;
+    }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(ann: Annotation) {
+    const item = `${ann.category_name ?? `#${ann.category_id}`}（${formatTimeShort(ann.start_time)}–${formatTimeShort(ann.end_time)}）`;
+    const status = video?.workflow_status ?? "draft";
+    const locked = status !== "draft" && status !== "";
+    const ok = await confirm({
+      title: "删除标注？",
+      message: locked ? (
+        <>
+          将删除标注「{item}」。该视频当前为「<b>{WORKFLOW_LABELS[status] ?? status}</b>」状态：
+          删除后视频将退回<b>草稿</b>，已有审核结果失效，已有片段（如有）将被删除。
+        </>
+      ) : (
+        <>将删除标注「{item}」，此操作不可撤销。</>
+      ),
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      await deleteAnnotation(pid, vid, id);
+      await deleteAnnotation(pid, vid, ann.id);
       setSaveState("saved");
-      setHint("标注已删除");
+      setHint(locked ? "标注已删除，视频已退回草稿，请重新提交审核" : "标注已删除");
       await loadAnnotations();
+      if (locked) await refreshVideo();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "删除标注失败");
-      throw err;
     }
   }
 
@@ -694,6 +823,8 @@ export default function AnnotatePage() {
     }
     if (isEditable(e.target)) return;
     if (e.repeat) return;
+    // 确认对话框打开时不响应全局快捷键（对话框内部自行处理 Esc / 空格）
+    if (document.querySelector(".modal-overlay")) return;
     switch (e.code) {
       case "ArrowLeft":
         e.preventDefault();
@@ -739,17 +870,38 @@ export default function AnnotatePage() {
             {video?.filename ?? `视频 #${vid}`}
           </span>
         </h1>
+        {video ? (
+          <div className="workflow-chip" title="审核工作流状态与修订号">
+            <WorkflowBadge value={video.workflow_status} revision={video.annotation_revision} />
+            {video.workflow_status === "submitted" && video.submitted_at ? (
+              <span className="workflow-meta">提交于 {formatDate(video.submitted_at)}</span>
+            ) : null}
+            {video.workflow_status === "approved" && video.approved_at ? (
+              <span className="workflow-meta">通过于 {formatDate(video.approved_at)}</span>
+            ) : null}
+            {video.workflow_status === "rejected" ? (
+              <span className="workflow-meta">请修改后重新提交</span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="actions">
+          <SubmitReviewControl
+            status={video?.workflow_status ?? "draft"}
+            hasAnnotations={annotations.length > 0}
+            submitting={submitting}
+            onSubmit={() => void handleSubmitReview()}
+          />
           <button type="button" className="btn btn-sm" onClick={() => void loadAnnotations()}>
             刷新标注
           </button>
-          <button type="button" className="btn btn-sm btn-primary" onClick={() => void handleExport()}>
+          <button type="button" className="btn btn-sm" onClick={() => void handleExport()}>
             导出 JSON
           </button>
         </div>
       </div>
 
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
+      {confirmDialog}
 
       <div className="annotate-body">
         <section className="annotate-main">
@@ -758,22 +910,44 @@ export default function AnnotatePage() {
               <Loading text="加载标注数据…" />
             ) : streamState === "loading" ? (
               <Loading text="视频流加载中…" />
-            ) : videoReady && streamUrl ? (
+            ) : videoReady && (DEMO_MODE || streamUrl) ? (
               <>
-                <div className="video-wrap">
-                  <video
-                    ref={videoRef}
-                    src={streamUrl}
-                    onClick={togglePlay}
-                    title="点击播放 / 暂停（或按 Space）"
-                    onLoadedMetadata={(e) => setElementDuration(e.currentTarget.duration)}
-                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
-                    playsInline
-                  />
-                  <OverlayLayer />
-                </div>
+                {DEMO_MODE ? (
+                  <div className="demo-stage-box">
+                    <DemoMouseStage
+                      duration={timelineDuration ?? 0}
+                      currentTime={currentTime}
+                      playing={playing}
+                      fps={video?.fps}
+                      seed={vid}
+                      badge="标注工作台 · 演示画面"
+                      onTimeUpdate={setCurrentTime}
+                      onTogglePlay={togglePlay}
+                    />
+                  </div>
+                ) : (
+                  <div className="video-wrap">
+                    <video
+                      ref={videoRef}
+                      src={streamUrl ?? undefined}
+                      onClick={togglePlay}
+                      title="点击播放 / 暂停（或按 Space）"
+                      onLoadedMetadata={(e) => {
+                        setElementDuration(e.currentTarget.duration);
+                        if (pendingSeekRef.current != null) {
+                          e.currentTarget.currentTime = Math.min(pendingSeekRef.current, e.currentTarget.duration);
+                          setCurrentTime(e.currentTarget.currentTime);
+                          pendingSeekRef.current = null;
+                        }
+                      }}
+                      onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                      onPlay={() => setPlaying(true)}
+                      onPause={() => setPlaying(false)}
+                      playsInline
+                    />
+                    <OverlayLayer />
+                  </div>
+                )}
 
                 <div className="player-controls">
                   <button

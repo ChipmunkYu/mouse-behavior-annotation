@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { ApiError } from "../api/client";
+import { DEMO_MODE } from "../demo/mode";
 
 export default function LoginPage() {
   const { user, login } = useAuth();
@@ -49,12 +50,21 @@ export default function LoginPage() {
 
   return (
     <div className="login-page">
-      <div className="card login-card">
-        <div className="card-body">
-          <div className="login-brand">
-            <h1>行为标注平台</h1>
-            <p>多小鼠社会行为事件标注 · 登录</p>
+      <div className="login-stack">
+        {DEMO_MODE ? (
+          <div className="demo-strip" role="note">
+            <span className="demo-dot" aria-hidden="true" />
+            当前为<b>演示模式</b>：登录与全部功能由本地模拟数据驱动，无需启动后端；
+            <br />
+            账号 <code>demo</code> / 密码 <code>demo123</code>。
           </div>
+        ) : null}
+        <div className="card login-card">
+          <div className="card-body">
+            <div className="login-brand">
+              <h1>行为标注平台</h1>
+              <p>多小鼠社会行为事件标注 · 登录</p>
+            </div>
 
           <div className="demo-hint">
             <span>开发账号</span>
@@ -101,6 +111,7 @@ export default function LoginPage() {
             </button>
           </form>
         </div>
+      </div>
       </div>
     </div>
   );

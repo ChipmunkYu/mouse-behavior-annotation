@@ -3,9 +3,12 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { createVideo, listProjects, listVideos } from "../api";
 import type { Project, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
-import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
+import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { formatDate, formatDuration } from "../utils/format";
+
+/** 可访问审核工作台的项目角色（仅主/次导航对 owner/admin/reviewer 显示）。 */
+const REVIEW_ROLES = ["owner", "admin", "reviewer"];
 
 interface VideoFormState {
   filename: string;
@@ -169,14 +172,21 @@ export default function VideosPage() {
           <h1>视频库</h1>
           <div className="sub">共 {videos?.length ?? 0} 个视频 · 展示 {filtered.length} 个</div>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary upload-cta"
-          onClick={() => setUploadOpen((v) => !v)}
-          aria-expanded={uploadOpen}
-        >
-          {uploadOpen ? "收起" : "↑ 上传视频"}
-        </button>
+        <div className="page-header-actions">
+          {project && REVIEW_ROLES.includes(project.role) ? (
+            <Link to={`/projects/${pid}/review`} className="btn btn-sm review-entry" title="审核提交的视频">
+              ✓ 审核工作台
+            </Link>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn-primary upload-cta"
+            onClick={() => setUploadOpen((v) => !v)}
+            aria-expanded={uploadOpen}
+          >
+            {uploadOpen ? "收起" : "↑ 上传视频"}
+          </button>
+        </div>
       </div>
 
       {uploadOpen ? (
@@ -256,6 +266,15 @@ export default function VideosPage() {
                 <span>
                   状态 <b>{v.status}</b>
                 </span>
+              </div>
+              <div className="workflow-line">
+                <WorkflowBadge value={v.workflow_status} revision={v.annotation_revision} />
+                {v.workflow_status === "submitted" && v.submitted_at ? (
+                  <span>提交于 {formatDate(v.submitted_at)}</span>
+                ) : null}
+                {v.workflow_status === "approved" && v.approved_at ? (
+                  <span>通过于 {formatDate(v.approved_at)}</span>
+                ) : null}
               </div>
               <div className="foot">
                 <span className="date">{formatDate(v.created_at)}</span>

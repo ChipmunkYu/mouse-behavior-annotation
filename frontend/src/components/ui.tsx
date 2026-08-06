@@ -14,6 +14,10 @@ const BADGE_TONE: Record<string, string> = {
   needs_transcode: "badge badge-warn",
   error: "badge badge-danger",
   archived: "badge badge-muted",
+  running: "badge badge-warn",
+  completed: "badge badge-ok",
+  failed: "badge badge-danger",
+  inactive: "badge badge-muted",
 };
 
 /** 常见枚举值 → 中文显示。 */
@@ -33,11 +37,28 @@ const STATUS_LABELS: Record<string, string> = {
   certain: "确定",
   uncertain: "不确定",
   occluded: "被遮挡",
+  draft: "草稿",
+  submitted: "待审核",
+  running: "进行中",
+  completed: "已完成",
+  failed: "失败",
+  inactive: "已停用",
 };
 
 export function StatusBadge({ value, tone }: { value: string; tone?: string }) {
   const cls = tone ? (BADGE_TONE[tone] ?? "badge badge-muted") : (BADGE_TONE[value] ?? "badge badge-muted");
   return <span className={cls}>{STATUS_LABELS[value] ?? value}</span>;
+}
+
+/** 审核工作流徽标：状态 + 修订号（draft/submitted/approved/rejected 着色）。 */
+export function WorkflowBadge({ value, revision }: { value: string; revision?: number | null }) {
+  return (
+    <span className="workflow-badge" data-status={value ?? "draft"} title={`修订 v${revision ?? 1}`}>
+      <span className="workflow-dot" aria-hidden="true" />
+      {STATUS_LABELS[value] ?? value ?? "草稿"}
+      {revision != null ? <span className="workflow-rev mono">v{revision}</span> : null}
+    </span>
+  );
 }
 
 export function EmptyState({
