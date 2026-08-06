@@ -1,6 +1,9 @@
 """验收：视频元数据创建 / 列表 / 流。"""
 from __future__ import annotations
 
+from app.models import ProjectMembership
+from app.routers import videos as videos_module
+
 
 def test_create_and_list_video(ctx, login_headers):
     headers = login_headers()
@@ -164,3 +167,57 @@ def test_stream_non_member_rejected(ctx, login_headers):
     alice_headers = login_headers(username="alice", password="pw123")
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=alice_headers)
     assert resp.status_code == 403
+
+
+def test_stream_active_member_allowed(ctx, tmp_path, login_headers):
+    """active 成员（非 owner）可流式读取视频。"""
+    headers = login_headers()
+    project = ctx.client.post(
+        "/api/projects", json={"name": "流项目-活动成员"}, headers=headers
+    ).json()
+    video_file = tmp_path / "videos" / "member.mp4"
+    video_file.parent.mkdir(parents=True, exist_ok=True)
+    video_file.write_bytes(b"MEMBER-BYTES")
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "member.mp4", "storage_path": str(video_file)},
+        headers=headers,
+    ).json()
+
+    alice_id = ctx.create_user("alice")
+    alice_headers = login_headers(username="alice", password="pw123")
+    ctx.add_member(project["id"], alice_id)  # 默认 status=active
+
+    resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=alice_headers)
+    assert resp.status_code == 200
+    assert resp.content == b"MEMBER-BYTES"
+
+
+def test_stream_inactive_membership_rejected(ctx, tmp_path, login_headers):
+    """成员存在但 status != active → 403，复用与 upload 一致的稳定文案。"""
+    headers = login_headers()
+    project = ctx.client.post(
+        "/api/projects", json={"name": "流项目-停用成员"}, headers=headers
+    ).json()
+    video_file = tmp_path / "videos" / "private2.mp4"
+    video_file.parent.mkdir(parents=True, exist_ok=True)
+    video_file.write_bytes(b"SECRET-BYTES")
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "private2.mp4", "storage_path": str(video_file)},
+        headers=headers,
+    ).json()
+
+    alice_id = ctx.create_user("alice")
+    alice_headers = login_headers(username="alice", password="pw123")
+    with ctx.session_factory() as db:
+        db.add(
+            ProjectMembership(
+                project_id=project["id"], user_id=alice_id, role="annotator", status="inactive"
+            )
+        )
+        db.commit()
+
+    resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=alice_headers)
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == videos_module.ERR_MEMBERSHIP_INACTIVE

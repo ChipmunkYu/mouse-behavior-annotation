@@ -10,14 +10,20 @@ from . import database as db_mod
 from . import models  # noqa: F401  确保表注册到 Base.metadata
 from . import seed
 from .config import Settings, get_settings
-from .routers import annotations, auth, categories, health, projects, videos
+from .routers import annotations, auth, categories, health, projects, reviews, videos
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """应用工厂：初始化数据库、建表、种子数据，并注册路由。"""
     s = settings or get_settings()
 
-    for directory in (s.data_dir, s.videos_dir, s.exports_dir):
+    for directory in (
+        s.data_dir,
+        s.videos_dir,
+        s.exports_dir,
+        s.clips_dir,
+        s.thumbnails_dir,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
     db_mod.configure_engine(s.resolved_database_url)
@@ -42,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(categories.router)
     app.include_router(videos.router)
     app.include_router(annotations.router)
+    app.include_router(reviews.router)
     return app
 
 

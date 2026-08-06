@@ -42,6 +42,19 @@ class Settings(BaseSettings):
         return self.data_dir / "exports"
 
     @property
+    def clips_dir(self) -> Path:
+        return self.data_dir / "clips"
+
+    @property
+    def thumbnails_dir(self) -> Path:
+        return self.data_dir / "thumbnails"
+
+    @property
+    def cleanup_log(self) -> Path:
+        """清理异常 JSONL 日志：实体文件删除失败 / 越界路径等可观测记录。"""
+        return self.data_dir / "cleanup-issues.log"
+
+    @property
     def resolved_database_url(self) -> str:
         if self.database_url:
             return self.database_url

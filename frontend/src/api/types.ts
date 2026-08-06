@@ -54,6 +54,12 @@ export interface Video {
   height: number | null;
   storage_path: string | null;
   status: string;
+  // 审核工作流字段（批次 3）
+  workflow_status: string;
+  annotation_revision: number;
+  submitted_at: string | null;
+  approved_at: string | null;
+  approved_by: number | null;
   created_at: string;
 }
 
@@ -94,7 +100,6 @@ export interface AnnotationCreateInput {
   start_frame: number;
   end_frame: number;
   confidence?: string;
-  review_status?: string;
   crop_region?: unknown;
 }
 
@@ -105,8 +110,36 @@ export interface AnnotationPatchInput {
   start_frame?: number;
   end_frame?: number;
   confidence?: string;
-  review_status?: string;
 }
+
+// ---------- 审核工作流 ----------
+/** 视频审核工作流状态：draft → submitted → approved / rejected */
+export type WorkflowStatus = "draft" | "submitted" | "approved" | "rejected";
+
+export interface Review {
+  id: number;
+  project_id: number;
+  video_id: number;
+  reviewer_id: number | null;
+  result: "approved" | "rejected";
+  comment: string | null;
+  annotation_revision: number;
+  created_at: string;
+  /** 便捷字段：审核人用户名（后端返回时显示） */
+  reviewer: string | null;
+}
+
+export interface ReviewCreateInput {
+  result: "approved" | "rejected";
+  comment?: string | null;
+}
+
+export const WORKFLOW_LABELS: Record<string, string> = {
+  draft: "草稿",
+  submitted: "待审核",
+  approved: "已通过",
+  rejected: "已退回",
+};
 
 // ---------- 导出 ----------
 export interface ExportEvent {

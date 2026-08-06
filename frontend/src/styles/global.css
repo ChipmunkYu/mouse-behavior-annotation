@@ -1473,3 +1473,423 @@ a:focus-visible,
     gap: 0;
   }
 }
+
+/* ============ 审核工作流（批次 3） ============ */
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-entry {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  text-decoration: none;
+}
+
+.review-entry:hover {
+  background: var(--accent-weak);
+  filter: brightness(0.98);
+  text-decoration: none;
+}
+
+/* 工作流徽标（顶部状态芯片 / 视频卡 / 审核队列共用） */
+.workflow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.workflow-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.workflow-badge .workflow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.workflow-badge .workflow-rev {
+  font-weight: 600;
+  opacity: 0.78;
+}
+
+.workflow-badge[data-status="draft"] {
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+
+.workflow-badge[data-status="submitted"] {
+  color: var(--warn);
+  background: var(--warn-weak);
+  border-color: var(--warn);
+}
+
+.workflow-badge[data-status="approved"] {
+  color: var(--ok);
+  background: var(--ok-weak);
+  border-color: var(--ok);
+}
+
+.workflow-badge[data-status="rejected"] {
+  color: var(--danger);
+  background: var(--danger-weak);
+  border-color: var(--danger);
+}
+
+.workflow-meta {
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* 标注工作台：提交审核 / 等待审核 / 已通过 */
+.submit-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+.submit-pill.pending {
+  color: var(--warn);
+  background: var(--warn-weak);
+  border-color: var(--warn);
+}
+
+.submit-pill.ok {
+  color: var(--ok);
+  background: var(--ok-weak);
+  border-color: var(--ok);
+}
+
+/* 视频卡：工作流状态行 */
+.workflow-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* ============ 确认对话框 ============ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 17, 20, 0.52);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal {
+  width: 100%;
+  max-width: 460px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+}
+
+.modal-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.modal-body {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.65;
+  margin-bottom: 16px;
+}
+
+.modal-body b {
+  color: var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ============ 审核工作台 ============ */
+.review-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.review-body {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.review-side {
+  min-width: 0;
+}
+
+.review-side-note {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.review-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.queue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.queue-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.queue-item.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+  background: var(--accent-weak);
+}
+
+.queue-name {
+  font-weight: 600;
+  font-size: 12px;
+  word-break: break-all;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.queue-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.queue-date {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.review-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.review-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+.review-side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.review-anns .card-body {
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 审核历史 */
+.review-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  padding: 8px 10px;
+}
+
+.review-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-rev {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.review-date {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.review-comment {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-strong);
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* 审核操作 */
+.review-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-actions .btn {
+  flex: 1;
+  min-width: 90px;
+  padding: 6px 12px;
+}
+
+/* 审核播放器：流式布局（不受标注工作台桌面端绝对定位影响） */
+.review-player {
+  flex: none;
+}
+
+.review-player .video-wrap {
+  flex: none;
+}
+
+.review-player .video-wrap video {
+  position: static;
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 55vh;
+  object-fit: contain;
+}
+
+/* ============ 审核工作台：窄屏堆叠 ============ */
+@media (max-width: 960px) {
+  .review-body,
+  .review-detail {
+    grid-template-columns: 1fr;
+  }
+
+  .review-queue {
+    max-height: 260px;
+  }
+
+  .review-anns .card-body {
+    max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .review-actions .btn {
+    flex: 1 1 100%;
+  }
+
+  .workflow-meta {
+    white-space: normal;
+  }
+}
+
+/* ============ 项目内二级导航 ============ */
+.project-nav {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 6px 16px 0;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.project-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.project-nav a {
+  flex: none;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  text-decoration: none;
+}
+
+.project-nav a:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
+.project-nav a.active {
+  color: var(--accent);
+  background: var(--bg-inset);
+  border-color: var(--border);
+  font-weight: 700;
+}

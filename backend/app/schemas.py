@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------- 认证 ----------
@@ -95,8 +95,18 @@ class AnnotationCreate(BaseModel):
     start_frame: int = Field(ge=0)
     end_frame: int = Field(ge=0)
     confidence: str = "certain"
-    review_status: str = "pending"
     crop_region: Optional[dict[str, Any]] = None
+    # review_status 不作为有效输入：创建固定 pending；显式传入非 pending 值 → 422
+    review_status: Optional[str] = None
+
+    @field_validator("review_status")
+    @classmethod
+    def _reject_direct_review_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "pending":
+            raise ValueError(
+                "review_status cannot be set on create; annotations are created as 'pending'"
+            )
+        return v
 
 
 class AnnotationUpdate(BaseModel):
@@ -106,8 +116,16 @@ class AnnotationUpdate(BaseModel):
     start_frame: Optional[int] = Field(default=None, ge=0)
     end_frame: Optional[int] = Field(default=None, ge=0)
     confidence: Optional[str] = None
-    review_status: Optional[str] = None
     crop_region: Optional[dict[str, Any]] = None
+    # 禁止用户直接写 review_status：审核状态只能通过审核 API（review）流转
+    review_status: Optional[str] = None
+
+    @field_validator("review_status")
+    @classmethod
+    def _reject_direct_review_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            raise ValueError("review_status cannot be set directly; use the review API")
+        return v
 
 
 class AnnotationOut(BaseModel):
@@ -127,3 +145,22 @@ class AnnotationOut(BaseModel):
     # 便捷字段：标注者用户名 / 类别名
     annotator: Optional[str] = None
     category_name: Optional[str] = None
+
+
+# ---------- 审核 ----------
+class ReviewCreate(BaseModel):
+    result: Literal["approved", "rejected"]
+    comment: Optional[str] = None
+
+
+class ReviewOut(BaseModel):
+    id: int
+    project_id: int
+    video_id: int
+    reviewer_id: Optional[int] = None
+    result: str
+    comment: Optional[str] = None
+    annotation_revision: int
+    created_at: datetime
+    # 便捷字段：审核人用户名
+    reviewer: Optional[str] = None

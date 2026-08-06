@@ -5,6 +5,7 @@ import LoginPage from "./pages/LoginPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import VideosPage from "./pages/VideosPage";
 import AnnotatePage from "./pages/AnnotatePage";
+import ReviewPage from "./pages/ReviewPage";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:projectId/videos" element={<VideosPage />} />
+          <Route path="/projects/:projectId/review" element={<ReviewPage />} />
           <Route path="/projects/:projectId/annotate/:videoId" element={<AnnotatePage />} />
         </Route>
       </Route>

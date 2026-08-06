@@ -11,6 +11,8 @@ import type {
   LoginResponse,
   Project,
   ProjectCreateInput,
+  Review,
+  ReviewCreateInput,
   User,
   Video,
   VideoCreateInput,
@@ -143,6 +145,46 @@ export function exportAnnotations(
   videoId: number | string
 ): Promise<ExportEvent[]> {
   return apiFetch<ExportEvent[]>(`/projects/${projectId}/videos/${videoId}/annotations/export`);
+}
+
+// ---------- 审核工作流 ----------
+
+/**
+ * 提交视频审核：POST /api/projects/:pid/videos/:vid/submit。
+ * 要求至少有标注；成功返回更新后的 Video（workflow_status = "submitted"）。
+ */
+export function submitVideoForReview(
+  projectId: number | string,
+  videoId: number | string
+): Promise<Video> {
+  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/submit`, {
+    method: "POST",
+  });
+}
+
+/** 审核队列：GET /api/projects/:pid/reviews/queue -> Video[]（仅待审核视频）。 */
+export function listReviewQueue(projectId: number | string): Promise<Video[]> {
+  return apiFetch<Video[]>(`/projects/${projectId}/reviews/queue`);
+}
+
+/** 视频审核历史：GET /api/projects/:pid/videos/:vid/reviews -> Review[]。 */
+export function listVideoReviews(
+  projectId: number | string,
+  videoId: number | string
+): Promise<Review[]> {
+  return apiFetch<Review[]>(`/projects/${projectId}/videos/${videoId}/reviews`);
+}
+
+/** 提交审核结论：POST /api/projects/:pid/videos/:vid/review -> Review。 */
+export function createVideoReview(
+  projectId: number | string,
+  videoId: number | string,
+  input: ReviewCreateInput
+): Promise<Review> {
+  return apiFetch<Review>(`/projects/${projectId}/videos/${videoId}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export type { User };

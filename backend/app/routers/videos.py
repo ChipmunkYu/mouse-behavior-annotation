@@ -252,6 +252,9 @@ def stream_video(
     )
     if membership is None:
         raise HTTPException(status_code=403, detail="You are not a member of this video's project")
+    # 与 upload 权限一致：成员存在但 status != active → 403
+    if membership.status != "active":
+        raise HTTPException(status_code=403, detail=ERR_MEMBERSHIP_INACTIVE)
 
     if not video.storage_path:
         raise HTTPException(status_code=404, detail="Video file is not available (no storage_path)")

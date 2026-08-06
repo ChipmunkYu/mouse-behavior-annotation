@@ -1,10 +1,12 @@
-# 标注网站后端（P1 + 批次 2 视频上传）
+# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
 - 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
+- 批次 3：提交与审核闭环（submit / review queue / review 裁决 / 审核历史），
+  标注写入与审核工作流联动（非 draft 修改回 draft + Clip 行与实体文件清理）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 
 ## 目录结构
@@ -29,7 +31,7 @@ backend/
 │   ├── auth.py            # 密码哈希（PBKDF2）+ JWT
 │   ├── seed.py            # 北医 12 类初始化 + demo 账号
 │   ├── deps.py            # 项目成员权限依赖
-│   └── routers/           # health / auth / projects / categories / videos / annotations
+│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews
 ├── scripts/               # 本地工具脚本（仅开发，不注册到应用）
 │   ├── migrate.py         # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
 │   └── seed_demo.py       # 幂等演示数据脚本（第一阶段本地演示）
@@ -117,8 +119,8 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 
 ### 后续整改批次（未实施）
 
-- **批次 3**：Clip 生命周期清理（过期/陈旧 clip 的显式清理任务）。
-- **批次 4**：BackgroundJob 幂等（任务重入/重复执行的防重保障）。
+- **批次 4**：BackgroundJob 幂等（任务重入/重复执行的防重保障）、clip 生成与
+  基于 `cleanup-issues.log` 的孤儿文件补偿清理任务。
 
 以上为 Oracle 整改路线中的后续批次，当前代码未包含实现。
 
@@ -148,7 +150,11 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 
 ## 配置
 
-数据库、上传视频、导出目录均从环境变量配置，默认位于 `backend/data/` 下（已被 gitignore）：
+数据库、上传视频、导出片段、clip/thumbnail 与清理异常日志均从环境变量配置，
+默认位于 `backend/data/` 下（已被 gitignore）：
+- `DATA_DIR/videos/` 上传视频；`DATA_DIR/exports/` 导出；
+  `DATA_DIR/clips/` 与 `DATA_DIR/thumbnails/` 片段产物（批次 4 生成）；
+  `DATA_DIR/cleanup-issues.log` 清理异常 JSONL（越界路径 / 删除失败）。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
@@ -207,6 +213,44 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 - 响应为现有 `VideoOut`（201），`uploaded_by` = 当前用户、`workflow_status=draft`、`annotation_revision=1`。
 - 错误文案稳定（见 `app/routers/videos.py` 顶部常量）。
 
+### 提交与审核（批次 3）
+
+审核工作流状态机：`draft → submitted → approved / rejected`（`rejected` 可重新提交）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/submit` | 提交视频审核 → `VideoOut` |
+| `GET` | `/api/projects/{project_id}/reviews/queue` | 审核队列 → `VideoOut[]`（仅 `submitted`） |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/reviews` | 审核历史 → `ReviewOut[]`（含所有修订） |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/review` | 审核裁决 → `ReviewOut` |
+
+- **submit**：仅 `owner/admin/annotator`；至少 1 条标注；仅 `draft/rejected` 可提交
+  （`submitted/approved` 拒绝 400）；提交后视频 `workflow_status=submitted`、`submitted_at` 更新，
+  本修订全部标注 `review_status=pending`、`reviewer_id=null`。
+- **queue**：仅 `owner/admin/reviewer`；只返回 `submitted` 视频（跨项目隔离，按 `submitted_at` 倒序）。
+- **reviews（历史）**：项目成员均可读该视频完整审核历史，跨修订累积，不因失效删除。
+- **review**：仅 `owner/admin/reviewer`；仅 `submitted` 可裁决（其余状态 400，重复裁决 400）；
+  追加一条 `Review`（`annotation_revision` = 裁决时视频修订号）并同步：
+  `approved` → 视频 `approved/approved_at/approved_by`、标注 `approved/reviewer_id`；
+  `rejected` → 视频 `rejected`、清空 approved 字段、标注 `rejected/reviewer_id`。
+
+**标注写入与工作流联动**：标注新增/删除/修改（PATCH 实际字段）在视频处于
+`submitted/approved/rejected` 时，先在同一事务内把视频失效回 `draft`：
+`annotation_revision +1`、清空 `submitted_at/approved_at/approved_by`、删除该视频所有 Clip
+记录与实体 clip/thumbnail 文件（`clips_dir` / `thumbnails_dir` 内）；Review 历史与 Annotation
+保留。已处于 `draft` 时连续修改不再递增修订号。
+
+- 标注写入仅 `owner/admin/annotator`；reviewer 不可写（403）。
+- 创建标注固定 `review_status=pending`；直接写 `review_status`（创建非 `pending` 值 / 任意 PATCH）
+  一律 422，审核状态只能走审核 API。
+
+**实体文件清理失败策略（单机原型）**：
+- 顺序：DB 事务先行提交（Clip 行删除 + 视频回 draft），再删除实体文件——保证数据库
+  永不引用已删除文件；若先删文件后提交 DB，事务失败会留下指向已删文件的悬空 Clip 行。
+- 越界路径（绝对路径逃逸 / `../` 穿越 / 等于根目录）**绝不删除**，写入异常日志。
+- 删除失败与越界均追加一条 JSONL 到 `DATA_DIR/cleanup-issues.log`（`kind ∈ {delete-failed,
+  out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 4 清理任务据此补偿。
+
 ### 标注
 
 | 方法 | 路径 | 说明 |
@@ -255,8 +299,11 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 - `end_time > start_time`、`end_frame > start_frame`，且均 ≥ 0。
 - 类别与视频必须属于同一项目。
 - 创建标注的标注者（当前登录用户）必须是项目成员。
-- 更新/删除标注：仅标注者本人或项目 `owner/admin`。
-- `confidence ∈ {certain, uncertain, occluded}`；`review_status ∈ {pending, approved, rejected}`。
+- 更新/删除标注：仅标注者本人或项目 `owner/admin`；标注写入（增/改/删）另限 `owner/admin/annotator`（reviewer 403）。
+- `confidence ∈ {certain, uncertain, occluded}`；`review_status ∈ {pending, approved, rejected}`（由审核 API 流转，直接写 422）。
+- 提交：仅 `owner/admin/annotator`、至少 1 条标注、仅 `draft/rejected`。
+- 审核队列/裁决：仅 `owner/admin/reviewer`；裁决仅 `submitted`。
+- Clip 实体文件删除严格限制在 `clips_dir/thumbnails_dir` 内，越界一律不删除并记录异常。
 
 ## 导出格式
 
@@ -289,6 +336,11 @@ pytest -q
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
 写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
+批次 3 提交与审核（提交角色/状态门/至少一条标注/标注审核字段重置、队列角色与 submitted 过滤、
+审核历史成员可读与跨修订累积、approved/rejected 同步视频与标注、重复操作与跨项目拒绝），
+批次 3 失效联动（三种非 draft 状态下的创建/修改/删除回 draft、revision 仅 +1 且 draft 后稳定、
+Clip 行与实体文件删除、仅影响本视频 Clip、Review 历史保留、越界路径不删除且记日志、
+文件删除失败记日志不阻断、reviewer 不可写标注、直接写 review_status 422），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
 0002 已版本化库到 0003 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -301,5 +353,6 @@ CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 upload
   P1 的 JSON Mock 接口（`POST .../videos`）保留不变。**未实现**：ffprobe 元数据探测、
   ffmpeg 转码（`needs_transcode` 状态在本批不触发任何转码任务）、进度回调。
 - 视频流安全边界：`GET .../stream` 只服务解析后位于配置视频目录（`DATA_DIR/videos`）**内部**的文件；绝对路径或含 `../` 的路径逃出该目录一律 404，避免任意读取项目外敏感文件。
-- 审核流程（reviewer / review_status 流转）留待后续批次，导出中 `reviewer` 固定为 `null`。
+- 审核流程（批次 3）已实现提交/队列/裁决/历史；Clip 实体片段与缩略图由批次 4 生成，
+  本批不运行 ffmpeg；越界路径/删除失败经 `DATA_DIR/cleanup-issues.log` 可观测，补偿清理任务在批次 4。
 - 类别停用/删除管理界面留待后续批次。

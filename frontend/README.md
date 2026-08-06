@@ -12,9 +12,10 @@
     - 支持 mp4 / mov / avi / mkv / webm / m4v / wmv / mpeg / mpg；不设前端大小上限，实际受服务器磁盘空间约束。
     - XMLHttpRequest 真实上传进度（百分比 + 已传/总大小）、可取消（`xhr.abort`）；401 行为与全局 client 一致。
     - 状态：待上传 → 上传中（进度条）→ 成功 / 失败 / 已取消；成功后自动刷新视频列表并可进入标注。
-    - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`。
+    - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
-  - 搜索 + 状态筛选；列表卡片显示时长 / 帧率 / 分辨率 / 状态徽标。
+  - 搜索 + 状态筛选；列表卡片显示时长 / 帧率 / 分辨率 / 状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
+  - **审核入口**：owner / admin / reviewer 角色显示「✓ 审核工作台」入口（角色来自 `listProjects`）。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
@@ -22,18 +23,27 @@
   - 行为类别按 `group` 动态分组展示（绝不硬编码类别），类别颜色仅用于区分。
   - 选择类别后按 **S** / 按钮设起点，**D** / 按钮设终点并 POST 保存。
   - **Space** 播放/暂停，**←/→** 步进一帧（输入框聚焦时不触发）。
-  - 时间轴按 duration 显示彩色标注区间，点击可跳转。
+  - 时间轴按 duration 显示彩色标注区间，点击 / 键盘可跳转。
   - 标注段列表支持 PATCH 类别/时间、DELETE 删除。
   - 导出 GET `.../annotations/export` 并下载统一事件 JSON。
   - 保存中 / 已保存 / 失败状态提示。
+  - **批次 3 审核工作流**：顶部清晰显示工作流状态与修订号（草稿 / 待审核 / 已通过 / 已退回 + 提交/通过时间）；draft / rejected 可「提交审核」（至少一条标注，有确认），submitted 显示「等待审核」，approved 显示「已通过」；对已提交 / 已通过 / 已退回的视频执行新增 / 编辑 / 删除标注前有明确确认（将退回草稿、审核结果失效、已有片段删除），成功后刷新视频工作流状态。
+- **审核工作台** `/projects/:projectId/review`：
+  - 待审队列（仅元数据，避免一次加载全部视频的标注与流）；选中后按需加载标注 / 类别 / 审核历史 / 视频流。
+  - 共享播放器 + 时间轴 + 只读标注列表；审核历史（结果、意见、修订号、审核人、时间）。
+  - 意见输入 + 「通过 / 退回」（退回须填意见，均有确认）。通过文案仅说明审核已通过，不声称片段已生成。
+  - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）。
+- **项目内导航**：视频库 / 审核，按项目角色显示合理入口（owner/admin/reviewer 可见审核）。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 
 ## 技术要点
 
 - 无额外状态管理库与 UI 框架，仅 React 内置能力。
-- API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理，`types.ts` 与后端 Pydantic schema 对齐）。
+- API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理 + 友好错误补充，`types.ts` 与后端 Pydantic schema 对齐，含审核工作流字段与 Review 类型）。
 - 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
 - 认证上下文在 `src/auth/`（AuthContext / ProtectedRoute / storage / 401 事件）。
+- 确认对话框：`src/components/ConfirmDialog.tsx` 的 `useConfirm()`（键盘可达，Esc / 遮罩取消，焦点归还）。
+- 时间轴：共享组件 `src/components/Timeline.tsx`（标注 / 审核共用，含键盘 ←/→）。
 - 深浅中性色 + 紧凑桌面布局，窄屏自动堆叠；类别颜色只用于行为区分。
 - 上传面板与卡片元数据折叠区均使用原生可键盘操作元素（button / details / summary）。
 
@@ -68,8 +78,8 @@ frontend/
     ├── main.tsx / App.tsx / vite-env.d.ts
     ├── api/            # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
     ├── auth/           # AuthContext / ProtectedRoute / storage / 401 事件
-    ├── components/     # AppLayout / ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel（上传面板）
-    ├── pages/          # LoginPage / ProjectsPage / VideosPage / AnnotatePage
+    ├── components/     # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog
+    ├── pages/          # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化
 ```

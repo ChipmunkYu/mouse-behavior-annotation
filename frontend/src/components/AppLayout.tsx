@@ -1,14 +1,63 @@
-import { Link, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, Outlet, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { listProjects } from "../api";
+import type { Project } from "../api/types";
 
-/** 登录后页面共用外壳：顶部导航 + 内容区。 */
+/** 项目内二级导航（按项目角色显示合理入口）。 */
+interface NavItem {
+  label: string;
+  to: (pid: number) => string;
+  roles: string[];
+}
+
+const PROJECT_NAV: NavItem[] = [
+  { label: "视频库", to: (pid) => `/projects/${pid}/videos`, roles: ["owner", "admin", "annotator", "reviewer"] },
+  { label: "审核", to: (pid) => `/projects/${pid}/review`, roles: ["owner", "admin", "reviewer"] },
+];
+
+/** 登录后页面共用外壳：顶栏 + 项目导航 + 内容区。 */
 export default function AppLayout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const { projectId } = useParams<{ projectId: string }>();
+  const [project, setProject] = useState<Project | null>(null);
+
+  const pid = projectId ? Number(projectId) : null;
+
+  useEffect(() => {
+    let alive = true;
+    if (pid == null || !Number.isFinite(pid)) {
+      setProject(null);
+      return;
+    }
+    setProject(null);
+    listProjects()
+      .then((projs) => {
+        if (alive) setProject(projs.find((p) => p.id === pid) ?? null);
+      })
+      .catch(() => {
+        /* 导航加载失败不阻塞页面 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [pid]);
+
+  const role = project?.role ?? null;
+  const navItems = pid != null && role != null ? PROJECT_NAV.filter((n) => n.roles.includes(role)) : [];
+
+  function isActive(item: NavItem): boolean {
+    const path = item.to(pid as number);
+    const p = location.pathname;
+    if (path.endsWith("/videos") && p.includes("/annotate/")) return true;
+    return p.startsWith(path);
+  }
 
   const routeLabel = (): string => {
     const p = location.pathname;
     if (p.includes("/annotate/")) return "标注工作台";
+    if (p.includes("/review")) return "审核工作台";
     if (p.includes("/videos")) return "视频库";
     if (p.includes("/projects")) return "项目";
     return "";
@@ -37,6 +86,19 @@ export default function AppLayout() {
           ) : null}
         </div>
       </header>
+      {navItems.length > 0 ? (
+        <nav className="project-nav" aria-label="项目导航">
+          {navItems.map((item) => (
+            <Link
+              key={item.label}
+              to={item.to(pid as number)}
+              className={isActive(item) ? "active" : undefined}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
       <main className="main">
         <Outlet />
       </main>
