@@ -194,3 +194,38 @@ class MediaStatusOut(BaseModel):
     failed: int
     pending: int
     latest_job: Optional[JobOut] = None
+
+
+# ---------- 跨视频片段库（批次 5） ----------
+class ClipItem(BaseModel):
+    """库中的一条审核通过标注，含对应 ready Clip 的相对路径（非 ready 为 null）。"""
+
+    annotation_id: int
+    video_id: int
+    video_filename: str
+    category_id: int
+    category_name: str
+    start_time: float
+    end_time: float
+    start_frame: int
+    end_frame: int
+    confidence: str
+    clip_path: Optional[str] = None
+    thumbnail_path: Optional[str] = None
+    annotator_name: str
+    review_status: str
+    created_at: datetime
+
+
+class ClipPageOut(BaseModel):
+    items: list[ClipItem]
+    total: int
+    pages: int
+
+
+class ClipCategoryCount(BaseModel):
+    """分类筛选 chip：类别 + 审核通过片段计数。"""
+
+    category_id: int
+    category_name: str
+    count: int

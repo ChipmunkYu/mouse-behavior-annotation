@@ -1,4 +1,4 @@
-# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图）
+# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图 + 批次 5 生产跨视频片段库）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
@@ -9,6 +9,8 @@
   标注写入与审核工作流联动（非 draft 修改回 draft + Clip 行与实体文件清理）
 - 批次 4：仅审核通过（approved）的视频，后台精确重编码每条标注为 H.264 MP4 片段并生成
   JPG 缩略图——单进程单任务执行、可恢复/重试、修订隔离；媒体执行器可替换（测试无需本机 ffmpeg）
+- 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
+  含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 
 ## 目录结构
@@ -36,7 +38,7 @@ backend/
 │   ├── deps.py            # 项目成员权限依赖
 │   ├── media.py           # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
 │   ├── media_jobs.py      # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
-│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / media
+│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / clips / media
 ├── scripts/               # 本地工具脚本（仅开发，不注册到应用）
 │   ├── migrate.py         # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
 │   └── seed_demo.py       # 幂等演示数据脚本（第一阶段本地演示）
@@ -133,10 +135,11 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 
 ### 后续整改批次（未实施）
 
-- **批次 5+**：生产跨视频片段库；分类导出；基于 `cleanup-issues.log` 的孤儿文件
-  补偿清理任务（批次 7）、导出 ZIP 过期清理等生命周期任务。
+- **批次 6**：分类导出；**批次 7**：基于 `cleanup-issues.log` 的孤儿文件补偿清理任务、
+  导出 ZIP 过期清理等生命周期任务。
 
-批次 4（媒体任务去重、精确片段/缩略图后台生成）已实现，见下文「批次 4：精确片段与缩略图」。
+批次 4（媒体任务去重、精确片段/缩略图后台生成）与批次 5（生产跨视频片段库）已实现，
+见下文对应章节。
 
 ## Demo 账号
 
@@ -306,6 +309,41 @@ H.264 MP4（`-ss` 前置输入定位 + 重编码，帧精确）；可选音频�
 - **部分失败**：失败 Clip 置 `failed` 并写截断错误，Job 置 `failed` 并记录摘要，
   成功片段保留；重试（`media/generate`）只处理 `pending/failed`（未 ready）的 Clip。
 
+### 批次 5：生产跨视频片段库
+
+跨视频聚合「审核通过的标注 + 对应 ready 的 Clip」的分页只读接口（**无需 Alembic 迁移**，
+复用现有 Annotation/Video/Clip/BehaviorCategory/User 表；不改变任何现有路由前缀）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/projects/{project_id}/clips` | 片段库分页列表 → `ClipPageOut`（项目成员可读） |
+| `GET` | `/api/projects/{project_id}/clips/categories` | 审核通过片段的类别统计 → `ClipCategoryCount[]` |
+
+**入库条件**：标注 `review_status=approved` **且** 所属视频当前 `workflow_status=approved`。
+失效回 draft 后仍残留的 approved 标注一并排除（杜绝库内出现已失效片段）；
+pending/rejected 一律隔离。`review_status` 查询参数仅接受 `approved`（其余值 422）。
+
+**ClipItem 字段**：`annotation_id, video_id, video_filename, category_id, category_name,
+start_time, end_time, start_frame, end_frame, confidence, clip_path, thumbnail_path,
+annotator_name, review_status, created_at`。
+`clip_path` / `thumbnail_path` 取当前修订（`Clip.source_revision == video.annotation_revision`）
+对应 Clip 的相对路径；**Clip 缺失或非 ready（pending/processing/failed）时为 null**，
+不校验实体文件是否存在。
+
+**分页与排序**：默认 `page_size=20`、上限 100（`page<1` 或 `page_size>100` → 422）；
+排序 `start_time ASC, id ASC` 保证稳定分页。响应 `{items, total, pages}`。
+
+**筛选**：`category_id` / `video_id` / `annotator_id` 精确过滤；`search` 按
+类别名或视频文件名大小写不敏感模糊匹配（`%kw%`）。
+
+**实现要点**：
+- COUNT 与分页先用**轻量 id 查询**（只 join Video/类别做过滤），随后再一条 join
+  取关联列（Video/类别/标注者/当前修订 Clip 一次到位）——**无 N+1**，也不加载
+  `crop_region` 等重列。
+- 仅项目成员可访问（与其余只读接口一致，不校验 membership.active）。
+- **不批量加载视频流**：本接口只返回元数据与相对路径，客户端自行按需请求单条 blob
+  （如经 `GET /api/videos/{video_id}/stream` 或后续的 clip 文件接口）。
+
 ### 标注
 
 | 方法 | 路径 | 说明 |
@@ -402,6 +440,10 @@ Clip 行与实体文件删除、仅影响本视频 Clip、Review 历史保留、
 pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状态门、media-status 与 job 查询
 成员权限、进度与部分失败保留成功片段、重试只处理 failed、重启恢复 running 重排/判失败、
 修订失效竞态取消且不复活 Clip、文件原子性与半成品清理、输入源路径安全、实际 DB 迁移 0004），
+批次 5 片段库（仅审核通过且视频 approved 才入库、pending/rejected 与失效残留隔离、
+非 ready Clip 路径为 null、ready 路径与批次 4 产物一致、分页默认 20/上限 100/稳定排序、
+category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类别统计、成员权限、
+ClipItem 字段完整性、review_status 仅允许 approved），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
 0002 与 0003 已版本化库到 0004 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -418,4 +460,6 @@ dedupe_key 唯一约束防重复任务）。
 - 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
-- `cleanup-issues.log` 补偿清理任务（孤儿文件清理）留待批次 7；类别停用/删除管理界面留待后续批次。
+- 批次 5 片段库只读接口已实现（跨视频聚合审核通过标注与 ready Clip）；
+  分类导出、`cleanup-issues.log` 补偿清理任务（孤儿文件清理）留待批次 6/7；
+  类别停用/删除管理界面留待后续批次。

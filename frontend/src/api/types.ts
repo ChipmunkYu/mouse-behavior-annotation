@@ -203,6 +203,57 @@ export interface ExportEvent {
   review_status: string;
 }
 
+// ---------- 片段库（批次 5） ----------
+/**
+ * 片段列表条目（GET /api/projects/:pid/clips 返回的 ClipItem）。
+ * 字段与后端 Planned ClipOut 对齐：clip_path / thumbnail_path 为空表示片段尚未生成。
+ */
+export interface ClipItem {
+  annotation_id: number;
+  video_id: number;
+  video_filename: string;
+  category_id: number;
+  category_name: string;
+  start_time: number;
+  end_time: number;
+  start_frame: number;
+  end_frame: number;
+  confidence: string;
+  clip_path: string | null;
+  thumbnail_path: string | null;
+  annotator_name: string | null;
+  /** 标注审核状态：pending / approved / rejected */
+  review_status: string;
+  created_at: string;
+}
+
+/** 分页响应：{items, total, pages}。 */
+export interface ClipListResponse {
+  items: ClipItem[];
+  total: number;
+  pages: number;
+}
+
+/** 类别计数（GET /api/projects/:pid/clips/categories），用于筛选 chips。 */
+export interface ClipCategoryCount {
+  category_id: number;
+  category_name: string;
+  count: number;
+}
+
+/** 片段列表的过滤与分页参数（与 GET /clips 查询参数一一对应，全部类型化）。 */
+export interface ClipListParams {
+  category_id?: number | null;
+  video_id?: number | null;
+  /** 搜索关键词：匹配类别名或视频文件名（大小写不敏感，服务端过滤）。 */
+  search?: string | null;
+  page: number;
+  page_size: number;
+}
+
+/** 片段库默认每页条数（后端默认值一致）。 */
+export const DEFAULT_PAGE_SIZE = 20;
+
 // ---------- 通用 ----------
 export const ROLE_LABELS: Record<string, string> = {
   owner: "所有者",

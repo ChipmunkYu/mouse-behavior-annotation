@@ -7,6 +7,9 @@ import type {
   AnnotationCreateInput,
   AnnotationPatchInput,
   Category,
+  ClipCategoryCount,
+  ClipListParams,
+  ClipListResponse,
   ExportEvent,
   Job,
   LoginResponse,
@@ -216,6 +219,51 @@ export function generateMedia(
 /** 查询后台任务：GET /api/projects/:pid/jobs/:jobId -> Job。 */
 export function getJob(projectId: number | string, jobId: number | string): Promise<Job> {
   return apiFetch<Job>(`/projects/${projectId}/jobs/${jobId}`);
+}
+
+// ---------- 片段库（批次 5） ----------
+
+/**
+ * 片段列表（分页 + 类别/视频筛选 + 关键词搜索）：
+ * GET /api/projects/:pid/clips?category_id=&video_id=&search=&page=&page_size= -> ClipListResponse。
+ * 仅发送已声明的查询参数，过滤参数与分页全部类型化（ClipListParams）。
+ * 注：片段库只含审核通过（review_status=approved）的标注；search 由服务端匹配类别名/视频文件名。
+ */
+export function listClips(projectId: number | string, params: ClipListParams): Promise<ClipListResponse> {
+  const qs = new URLSearchParams();
+  if (params.category_id != null) qs.set("category_id", String(params.category_id));
+  if (params.video_id != null) qs.set("video_id", String(params.video_id));
+  if (params.search && params.search.trim().length > 0) qs.set("search", params.search.trim());
+  qs.set("page", String(params.page));
+  qs.set("page_size", String(params.page_size));
+  return apiFetch<ClipListResponse>(`/projects/${projectId}/clips?${qs.toString()}`);
+}
+
+/** 片段类别计数：GET /api/projects/:pid/clips/categories -> ClipCategoryCount[]。 */
+export function listClipCategories(projectId: number | string): Promise<ClipCategoryCount[]> {
+  return apiFetch<ClipCategoryCount[]>(`/projects/${projectId}/clips/categories`);
+}
+
+/**
+ * 片段缩略图（批次 5）：thumbnail_path 为 thumbnails_dir 内相对文件名，
+ * 经 /thumbnails/{name} 以 Bearer 拉取 blob 并生成 object URL（普通 <img> 无法携带
+ * 认证请求头，与视频流同理）。缩略图路由尚不存在或拉取失败时返回 null，
+ * 由调用方回退到 SVG 占位图——绝不用损坏的图片打断界面。
+ */
+export async function fetchClipThumbnailUrl(thumbnailPath: string): Promise<string | null> {
+  try {
+    const res = await apiRaw(`/thumbnails/${encodeURIComponent(thumbnailPath)}`);
+    if (res.status === 401) {
+      handleUnauthorized();
+      return null;
+    }
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (blob.size === 0) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 export type { User };

@@ -13,7 +13,7 @@ from . import seed
 from .config import Settings, get_settings
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
-from .routers import annotations, auth, categories, health, media, projects, reviews, videos
+from .routers import annotations, auth, categories, clips, health, media, projects, reviews, videos
 
 
 def _default_media_processor(settings: Settings) -> MediaProcessor:
@@ -89,6 +89,7 @@ def create_app(
     app.include_router(videos.router)
     app.include_router(annotations.router)
     app.include_router(reviews.router)
+    app.include_router(clips.router)
     app.include_router(media.router)
     return app
 
