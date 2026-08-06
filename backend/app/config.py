@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     demo_password: str = "demo123"
     # 允许的前端来源，逗号分隔
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 视频上传：磁盘安全保留空间（字节）。写入前/每块写入前检查 videos_dir 可用空间，
+    # 不足（可用空间将低于该保留值）时返回 507。用于避免大视频上传耗尽数据盘。
+    upload_disk_reserve_bytes: int = 1024**3
+    # 视频上传：分块流式写入的块大小（字节），应用层不设文件大小上限。
+    upload_chunk_size: int = 1024 * 1024
 
     @property
     def videos_dir(self) -> Path:

@@ -86,3 +86,112 @@ export async function apiRaw(path: string, init: RequestInit = {}): Promise<Resp
   if (token) headers.set("Authorization", `Bearer ${token}`);
   return fetch(`${API_BASE}${path}`, { ...init, headers });
 }
+
+// ---------- 文件上传（multipart，支持真实进度与取消） ----------
+
+export interface UploadProgress {
+  /** 已上传字节数 */
+  loaded: number;
+  /** 总字节数（不可计算时为 0） */
+  total: number;
+  /** 0–100 整数百分比 */
+  percent: number;
+}
+
+export interface UploadFileOptions {
+  /** multipart 字段名，默认 "file" */
+  field?: string;
+  /** 服务端保存的文件名，默认取 File.name */
+  filename?: string;
+  /** 上传进度回调（仅当浏览器可计算总大小时触发） */
+  onProgress?: (p: UploadProgress) => void;
+  /** 传入 AbortSignal 可取消上传；取消时 Promise 以 AbortError 拒绝 */
+  signal?: AbortSignal;
+}
+
+/**
+ * multipart 文件上传（XMLHttpRequest）：
+ * - 自动附加 Bearer token，401 行为与 apiFetch 一致（清登录态并广播登出）
+ * - 不设置 Content-Type，让浏览器自动生成 multipart boundary
+ * - 通过 signal 取消：xhr.abort()，Promise 以 DOMException "AbortError" 拒绝
+ * - 507 等错误仍提取后端 {detail}，无 detail 时给出友好兜底文案
+ */
+export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptions = {}): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}${path}`);
+
+    const token = getToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+
+    const onAbort = () => xhr.abort();
+    if (options.signal) {
+      if (options.signal.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanupSignal = () => options.signal?.removeEventListener("abort", onAbort);
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        options.onProgress?.({
+          loaded: e.loaded,
+          total: e.total,
+          percent: Math.min(100, Math.round((e.loaded / e.total) * 100)),
+        });
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      cleanupSignal();
+      const status = xhr.status;
+
+      if (status === 401) {
+        handleUnauthorized();
+        reject(new ApiError(401, "登录已过期或凭据无效，请重新登录"));
+        return;
+      }
+
+      if (status >= 200 && status < 300) {
+        if (status === 204 || xhr.responseText === "") {
+          resolve(undefined as T);
+        } else {
+          try {
+            resolve(JSON.parse(xhr.responseText) as T);
+          } catch {
+            reject(new ApiError(status, "上传响应解析失败"));
+          }
+        }
+        return;
+      }
+
+      let msg = `上传失败（HTTP ${status}）`;
+      try {
+        const detail = extractDetail(JSON.parse(xhr.responseText) as unknown);
+        if (detail) msg = detail;
+      } catch {
+        // 响应体不是 JSON，保留默认文案
+      }
+      if (status === 507) {
+        msg = "服务器磁盘空间不足，无法保存该视频。请先清理服务器磁盘空间后重试。";
+      }
+      reject(new ApiError(status, msg));
+    });
+
+    xhr.addEventListener("error", () => {
+      cleanupSignal();
+      reject(new ApiError(0, "网络错误，上传中断，请检查网络后重试"));
+    });
+
+    xhr.addEventListener("abort", () => {
+      cleanupSignal();
+      reject(new DOMException("Aborted", "AbortError"));
+    });
+
+    const form = new FormData();
+    form.append(options.field ?? "file", file, options.filename ?? (file as File).name ?? "upload");
+    xhr.send(form);
+  });
+}

@@ -44,3 +44,17 @@ export function timeToFrame(time: number, fps: number | null | undefined): numbe
   const f = fps && fps > 0 ? fps : 30;
   return Math.max(0, Math.round(time * f));
 }
+
+/** 文件大小：B / KB / MB / GB（≥100 时取整，否则保留 1 位小数）。 */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes;
+  let i = -1;
+  do {
+    v /= 1024;
+    i += 1;
+  } while (v >= 1024 && i < units.length - 1);
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}

@@ -1,7 +1,7 @@
 /**
  * 后端接口封装（路由与 backend/app/routers/* 一一对应）。
  */
-import { apiFetch, apiRaw, ApiError, handleUnauthorized } from "./client";
+import { apiFetch, apiRaw, ApiError, handleUnauthorized, uploadFile, type UploadProgress } from "./client";
 import type {
   Annotation,
   AnnotationCreateInput,
@@ -50,6 +50,25 @@ export function createVideo(projectId: number | string, input: VideoCreateInput)
   return apiFetch<Video>(`/projects/${projectId}/videos`, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+/**
+ * 上传视频文件：POST /api/projects/:projectId/videos/upload（multipart field "file"）。
+ * - 201 返回 Video；不兼容格式时后端可能返回 status = "needs_transcode"
+ * - 通过 signal 取消上传（xhr.abort），取消时以 AbortError 拒绝
+ * - 507 磁盘不足等错误统一为 ApiError（带可读信息）
+ */
+export function uploadVideo(
+  projectId: number | string,
+  file: File,
+  options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal }
+): Promise<Video> {
+  return uploadFile<Video>(`/projects/${projectId}/videos/upload`, file, {
+    field: "file",
+    filename: file.name,
+    onProgress: options.onProgress,
+    signal: options.signal,
   });
 }
 

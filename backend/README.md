@@ -1,9 +1,10 @@
-# 标注网站后端（第一阶段 / P1）
+# 标注网站后端（P1 + 批次 2 视频上传）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
 - 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
+- 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 
 ## 目录结构
@@ -157,6 +158,8 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` | 令牌有效期（分钟） |
 | `DEMO_USERNAME` / `DEMO_PASSWORD` | `demo` / `demo123` | 种子开发账号 |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 允许的前端来源（本地 Vite） |
+| `UPLOAD_DISK_RESERVE_BYTES` | `1073741824`（1 GiB） | 上传写入前/每块前检查磁盘可用空间，需保留的安全余量，不足返回 507 |
+| `UPLOAD_CHUNK_SIZE` | `1048576`（1 MiB） | 上传分块流式写入的块大小（字节），应用层不设文件大小上限 |
 
 ## API 一览
 
@@ -184,8 +187,25 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/projects/{project_id}/videos` | 项目视频列表 |
-| `POST` | `/api/projects/{project_id}/videos` | JSON 创建视频元数据（P1 Mock 上传） |
+| `POST` | `/api/projects/{project_id}/videos` | JSON 创建视频元数据（P1 Mock 上传，保留） |
+| `POST` | `/api/projects/{project_id}/videos/upload` | 真实视频流式上传（multipart 字段 `file`）→ 201 |
 | `GET` | `/api/videos/{video_id}/stream` | 若 `storage_path` 解析到配置视频目录内且文件存在则 `FileResponse`，否则 404 |
+
+### 真实视频上传（批次 2）
+
+- 仅 **active 项目成员** 可上传（非成员 403、项目不存在 404、未登录 401）。
+- multipart 字段 `file`；**应用层不设文件大小上限**，`UploadFile` 按 `UPLOAD_CHUNK_SIZE`
+  分块流式写入临时文件，绝不一次性 `read()` 全部内容。
+- 扩展名（**大小写不敏感**）是唯一校验依据，`Content-Type` 仅辅助、不参与校验。
+  允许：`mp4, mov, avi, mkv, webm, m4v, wmv, mpeg, mpg`；拒绝空文件、无扩展名/不允许的扩展名。
+- 媒体 `status` 映射（本批不运行 ffprobe/ffmpeg）：浏览器通常可直接播放的
+  `mp4/webm/mov/m4v` → `uploaded`；`avi/mkv/wmv/mpeg/mpg` → `needs_transcode`。
+- 磁盘目标使用 **UUID 不可碰撞名**，`storage_path` 存相对路径（限制在 `DATA_DIR/videos` 内）；
+  临时 `.part` 文件写入成功后 **原子 rename**；失败/取消/DB 提交失败均清理临时与最终孤儿文件。
+- 每次写入前/每块写入前用 `shutil.disk_usage` 检查 `videos_dir` 可用空间，
+  写入后须保留 `UPLOAD_DISK_RESERVE_BYTES` 安全余量，不足返回 **507**。
+- 响应为现有 `VideoOut`（201），`uploaded_by` = 当前用户、`workflow_status=draft`、`annotation_revision=1`。
+- 错误文案稳定（见 `app/routers/videos.py` 顶部常量）。
 
 ### 标注
 
@@ -209,7 +229,9 @@ baseline（0001）再升级到 head（0003），**不删除任何已有数据**�
 - `ProjectMembership`：`user_id + project_id` 唯一，`role ∈ {owner, admin, annotator, reviewer}`。
 - `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；创建项目时初始化北医 12 类。
 - `Video`：项目级元数据（filename/duration/fps/width/height/storage_path/status）。
-  - 媒体 `status` 保持不变；新增独立的工作流字段：
+  - 媒体 `status ∈ {metadata, uploaded, needs_transcode}`：`metadata` 为 P1 Mock 创建；
+    批次 2 真实上传按扩展名映射为 `uploaded`（mp4/webm/mov/m4v）或 `needs_transcode`（avi/mkv/wmv/mpeg/mpg）。
+  - 新增独立的工作流字段：
     `workflow_status ∈ {draft, submitted, approved, rejected}`（默认 `draft`）、
     `annotation_revision`（≥1，默认 1）、`submitted_at` / `approved_at` / `approved_by`（可空）。
 - `Annotation`：视频级标注（起止时间、起止帧、confidence、review_status、crop_region 可空）。
@@ -265,15 +287,19 @@ pytest -q
 ```
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
+视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
+写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
 0002 已版本化库到 0003 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
 被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束）。
 
-## 已知边界（P1）
+## 已知边界
 
 - 未实现用户注册接口（通过 `data/` 内联管理或后续 P2 补充）。
-- 视频上传保持简单：`POST .../videos` 接受 JSON 元数据；`storage_path` 为绝对路径或相对 `data/videos/` 的相对路径。
+- 视频上传（批次 2）已支持真实文件流式上传（`POST .../videos/upload`）；
+  P1 的 JSON Mock 接口（`POST .../videos`）保留不变。**未实现**：ffprobe 元数据探测、
+  ffmpeg 转码（`needs_transcode` 状态在本批不触发任何转码任务）、进度回调。
 - 视频流安全边界：`GET .../stream` 只服务解析后位于配置视频目录（`DATA_DIR/videos`）**内部**的文件；绝对路径或含 `../` 的路径逃出该目录一律 404，避免任意读取项目外敏感文件。
-- 审核流程（reviewer / review_status 流转）留待 P2，导出中 `reviewer` 固定为 `null`。
-- 类别停用/删除管理界面留待 P2。
+- 审核流程（reviewer / review_status 流转）留待后续批次，导出中 `reviewer` 固定为 `null`。
+- 类别停用/删除管理界面留待后续批次。

@@ -4,6 +4,7 @@ import { createVideo, listProjects, listVideos } from "../api";
 import type { Project, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
+import VideoUploadPanel from "../components/VideoUploadPanel";
 import { formatDate, formatDuration } from "../utils/format";
 
 interface VideoFormState {
@@ -26,6 +27,11 @@ const EMPTY_FORM: VideoFormState = {
   storage_path: "",
 };
 
+/** 待转码的视频：已上传但浏览器可能无法直接播放，明确提示且不提供“进入标注”。 */
+function isNeedsTranscode(v: Video): boolean {
+  return v.status === "needs_transcode";
+}
+
 export default function VideosPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -38,7 +44,10 @@ export default function VideosPage() {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
 
-  const [showForm, setShowForm] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+
+  // 开发用 Mock 元数据表单（折叠区，不参与真实上传）
+  const [devOpen, setDevOpen] = useState(false);
   const [form, setForm] = useState<VideoFormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -74,6 +83,17 @@ export default function VideosPage() {
       return true;
     });
   }, [videos, query, statusFilter]);
+
+  const handleUploaded = useCallback(async () => {
+    await load();
+  }, [load]);
+
+  const handleEnterAnnotation = useCallback(
+    (video: Video) => {
+      navigate(`/projects/${pid}/annotate/${video.id}`);
+    },
+    [navigate, pid]
+  );
 
   function updateField(key: keyof VideoFormState, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -118,7 +138,7 @@ export default function VideosPage() {
         storage_path: form.storage_path.trim() || null,
       });
       await load();
-      setShowForm(false);
+      setDevOpen(false);
       setForm(EMPTY_FORM);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "创建视频失败");
@@ -149,12 +169,165 @@ export default function VideosPage() {
           <h1>视频库</h1>
           <div className="sub">共 {videos?.length ?? 0} 个视频 · 展示 {filtered.length} 个</div>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setShowForm((v) => !v)}>
-          {showForm ? "收起" : "+ 新建视频（JSON 元数据）"}
+        <button
+          type="button"
+          className="btn btn-primary upload-cta"
+          onClick={() => setUploadOpen((v) => !v)}
+          aria-expanded={uploadOpen}
+        >
+          {uploadOpen ? "收起" : "↑ 上传视频"}
         </button>
       </div>
 
-      {showForm ? (
+      {uploadOpen ? (
+        <VideoUploadPanel
+          projectId={pid}
+          onUploaded={() => void handleUploaded()}
+          onEnterAnnotation={handleEnterAnnotation}
+          onClose={() => setUploadOpen(false)}
+        />
+      ) : null}
+
+      <div className="video-toolbar">
+        <input
+          className="input search"
+          type="search"
+          value={query}
+          placeholder="按文件名搜索…"
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <select
+          className="select"
+          style={{ width: 150 }}
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+        >
+          <option value="">全部状态</option>
+          {statusOptions.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+        <span className="flex-spacer" />
+        <button type="button" className="btn btn-sm" onClick={() => void load()}>
+          刷新
+        </button>
+      </div>
+
+      {videos === null ? (
+        <Loading />
+      ) : filtered.length === 0 ? (
+        <Card>
+          <EmptyState
+            title={videos.length === 0 ? "暂无视频" : "没有匹配的视频"}
+            hint={
+              videos.length === 0
+                ? "点击右上角「上传视频」上传真实视频文件；开发调试可展开页面底部「开发用」区域录入 Mock 元数据"
+                : "调整搜索关键词或状态筛选"
+            }
+          />
+        </Card>
+      ) : (
+        <div className="video-grid">
+          {filtered.map((v) => (
+            <div key={v.id} className="card video-card">
+              <div className="thumb" aria-hidden="true">
+                {isNeedsTranscode(v) ? "⟳" : v.storage_path ? "▶" : "▢"}
+              </div>
+              <div className="name" title={v.filename}>
+                {v.filename}
+              </div>
+              {isNeedsTranscode(v) ? (
+                <div className="video-note" role="note">
+                  已上传，待转码：当前浏览器可能无法播放该视频，转码完成后可正常播放与标注。
+                </div>
+              ) : null}
+              <div className="meta">
+                <span>
+                  时长 <b>{formatDuration(v.duration)}</b>
+                </span>
+                <span>
+                  帧率 <b>{v.fps != null ? `${v.fps} fps` : "—"}</b>
+                </span>
+                <span>
+                  分辨率 <b>{v.width && v.height ? `${v.width}×${v.height}` : "—"}</b>
+                </span>
+                <span>
+                  状态 <b>{v.status}</b>
+                </span>
+              </div>
+              <div className="foot">
+                <span className="date">{formatDate(v.created_at)}</span>
+                <StatusBadge value={v.status} />
+              </div>
+              {isNeedsTranscode(v) ? (
+                <div className="actions">
+                  <details className="video-meta-details">
+                    <summary>查看元数据</summary>
+                    <dl className="video-meta-list">
+                      <div>
+                        <dt>filename</dt>
+                        <dd>{v.filename}</dd>
+                      </div>
+                      <div>
+                        <dt>status</dt>
+                        <dd>{v.status}</dd>
+                      </div>
+                      <div>
+                        <dt>storage_path</dt>
+                        <dd>{v.storage_path ?? "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>duration / fps</dt>
+                        <dd>
+                          {formatDuration(v.duration)} · {v.fps != null ? `${v.fps} fps` : "—"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>分辨率</dt>
+                        <dd>{v.width && v.height ? `${v.width}×${v.height}` : "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>created_at</dt>
+                        <dd>{formatDate(v.created_at)}</dd>
+                      </div>
+                    </dl>
+                  </details>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    style={{ width: "100%" }}
+                    disabled
+                    title="视频待转码，转码完成后可进入标注"
+                  >
+                    待转码 · 暂不可标注
+                  </button>
+                </div>
+              ) : (
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    style={{ width: "100%" }}
+                    onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}
+                  >
+                    进入标注 →
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 开发用：Mock 元数据录入（不经过真实上传，仅本地调试） */}
+      <details
+        className="dev-panel"
+        open={devOpen}
+        onToggle={(e) => setDevOpen(e.currentTarget.open)}
+      >
+        <summary>开发用：Mock 元数据录入</summary>
         <form className="card create-form" onSubmit={handleCreate}>
           <div className="card-body">
             <div className="field">
@@ -226,7 +399,7 @@ export default function VideosPage() {
                   id="video-status"
                   className="input"
                   value={form.status}
-                  placeholder="默认 metadata；如 ready / uploading / error"
+                  placeholder="默认 metadata；如 ready / needs_transcode / error"
                   onChange={(e) => updateField("status", e.target.value)}
                 />
               </div>
@@ -243,99 +416,16 @@ export default function VideosPage() {
             </div>
             <div className="form-error">{formError ?? ""}</div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button type="button" className="btn" onClick={() => setShowForm(false)}>
-                取消
+              <button type="button" className="btn" onClick={() => setDevOpen(false)}>
+                收起
               </button>
-              <button type="submit" className="btn btn-primary" disabled={creating}>
+              <button type="submit" className="btn" disabled={creating}>
                 {creating ? "创建中…" : "创建视频"}
               </button>
             </div>
           </div>
         </form>
-      ) : null}
-
-      <div className="video-toolbar">
-        <input
-          className="input search"
-          type="search"
-          value={query}
-          placeholder="按文件名搜索…"
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <select
-          className="select"
-          style={{ width: 150 }}
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-        >
-          <option value="">全部状态</option>
-          {statusOptions.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <span className="flex-spacer" />
-        <button type="button" className="btn btn-sm" onClick={() => void load()}>
-          刷新
-        </button>
-      </div>
-
-      {videos === null ? (
-        <Loading />
-      ) : filtered.length === 0 ? (
-        <Card>
-          <EmptyState
-            title={videos.length === 0 ? "暂无视频" : "没有匹配的视频"}
-            hint={
-              videos.length === 0
-                ? "点击「新建视频（JSON 元数据）」录入 Mock 视频信息"
-                : "调整搜索关键词或状态筛选"
-            }
-          />
-        </Card>
-      ) : (
-        <div className="video-grid">
-          {filtered.map((v) => (
-            <div key={v.id} className="card video-card">
-              <div className="thumb" aria-hidden="true">
-                {v.storage_path ? "▶" : "▢"}
-              </div>
-              <div className="name" title={v.filename}>
-                {v.filename}
-              </div>
-              <div className="meta">
-                <span>
-                  时长 <b>{formatDuration(v.duration)}</b>
-                </span>
-                <span>
-                  帧率 <b>{v.fps != null ? `${v.fps} fps` : "—"}</b>
-                </span>
-                <span>
-                  分辨率 <b>{v.width && v.height ? `${v.width}×${v.height}` : "—"}</b>
-                </span>
-                <span>
-                  状态 <b>{v.status}</b>
-                </span>
-              </div>
-              <div className="foot">
-                <span className="date">{formatDate(v.created_at)}</span>
-                <StatusBadge value={v.status} />
-              </div>
-              <div className="actions">
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary"
-                  style={{ width: "100%" }}
-                  onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}
-                >
-                  进入标注 →
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      </details>
     </div>
   );
 }

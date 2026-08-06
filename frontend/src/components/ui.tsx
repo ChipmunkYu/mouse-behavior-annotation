@@ -10,6 +10,8 @@ const BADGE_TONE: Record<string, string> = {
   ready: "badge badge-ok",
   metadata: "badge badge-muted",
   uploading: "badge badge-warn",
+  uploaded: "badge badge-ok",
+  needs_transcode: "badge badge-warn",
   error: "badge badge-danger",
   archived: "badge badge-muted",
 };
@@ -21,6 +23,8 @@ const STATUS_LABELS: Record<string, string> = {
   ready: "就绪",
   metadata: "仅元数据",
   uploading: "上传中",
+  uploaded: "已上传",
+  needs_transcode: "待转码",
   error: "异常",
   archived: "已归档",
   pending: "待审核",
