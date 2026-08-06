@@ -11,7 +11,7 @@
 ├── backend/          # FastAPI + SQLite 后端（含 tests/、scripts/seed_demo.py）
 ├── frontend/         # React + TypeScript + Vite 前端
 ├── 参考文档/          # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
-├── 需求文档.md        # 需求文档（v0.4）
+├── 需求文档.md        # 需求文档（v0.5）
 ├── README.md         # 本文件
 └── boris-9.13.0-win64-setup.exe   # BORIS 桌面版安装包（参考用）
 ```
