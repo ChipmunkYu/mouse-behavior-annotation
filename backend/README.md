@@ -134,12 +134,8 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 | `projects.created_by` | 否 | `users.id` | `RESTRICT`（被项目引用时禁止删除创建者） |
 | `annotations.annotator_id` | 否 | `users.id` | `RESTRICT`（被标注引用时禁止删除标注者） |
 
-### 后续整改批次
-
-- **批次 7**：基于 `cleanup-issues.log` 的孤儿文件补偿清理任务、
-  导出 ZIP 过期清理等生命周期任务。
-
-批次 4（媒体任务）、批次 5（生产跨视频片段库）与批次 6（项目分类导出）已实现，
+批次 4（媒体任务）、批次 5（生产跨视频片段库）、批次 6（项目分类导出）与
+批次 7（生命周期清理）已实现，
 见下文对应章节。
 
 ## Demo 账号
@@ -191,6 +187,10 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 | `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
 | `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
+| `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
+| `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
+| `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件和孤儿导出 ZIP 的保留时间 |
+| `JOB_RETENTION_DAYS` | `30` | 无结果路径的 terminal 后台任务日志保留天数 |
 
 ## API 一览
 
@@ -274,7 +274,7 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
   永不引用已删除文件；若先删文件后提交 DB，事务失败会留下指向已删文件的悬空 Clip 行。
 - 越界路径（绝对路径逃逸 / `../` 穿越 / 等于根目录）**绝不删除**，写入异常日志。
 - 删除失败与越界均追加一条 JSONL 到 `DATA_DIR/cleanup-issues.log`（`kind ∈ {delete-failed,
-  out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 4 清理任务据此补偿。
+  out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 7 清理任务据此补偿。
 
 ### 批次 4：精确片段与缩略图
 
@@ -375,6 +375,33 @@ annotator_name, review_status, created_at`。
 - ZIP 先在 `DATA_DIR/exports` 生成任务专属临时 archive，再原子替换为
   `export_project_{project_id}_{job_id}.zip`；每次结果文件唯一。下载同时校验成功状态、
   `EXPORT_RETENTION_DAYS`（默认 7 天）、路径边界和实体存在性。
+
+### 批次 7：生命周期清理
+
+应用启动时立即清理一次，此后由单线程周期 worker 执行；每次真实运行写入一条
+`BackgroundJob(job_type=cleanup)` 成功或失败记录，并以进程内非阻塞锁防止重叠。该 worker 与
+媒体/导出 executor 一样只支持当前**单应用进程**部署，不可让多个进程共享任务库和数据目录。
+原视频永不自动删除；有效 DB 引用的 Clip/缩略图长期保留；导出 ZIP 仅在对应 export job
+到期（`expires_at <= now`）后删除。程序已知的 `.part`、export staging/tmp 及无有效未过期
+export job 引用的程序命名孤儿 ZIP 保留 24h，无结果路径的 terminal job 保留 30d。
+`DATA_DIR` 是可由管理员配置并解析的可信 anchor，但 `videos/clips/thumbnails/exports` 子根及其
+anchor 后的任何组件只要是 symlink，该 lane 就整体拒绝；删除前还会复核实体类型和 lstat 身份。
+
+过期 ZIP 使用 file-first、逐 job 短事务：文件删除后立即清空该 job 的 `result_path` 并提交；若
+提交失败，DB 引用与审计记录仍保留，下轮会把“文件已不存在”视为可自愈并再次清空引用。
+terminal 非 export、失败 export、非法/越界结果路径不会永久保护 ZIP：先安全清空脏引用，满
+30 天后再删除任务。清理异常 JSONL 只是审计与重试线索，不能授权删除；补偿删除只接受正式
+`clip_{annotation_id}_rev{revision}.mp4/.jpg`，并再次校验可信根、Clip 无引用及当前视频修订。
+
+手工检查或执行同一套规则：
+
+```bash
+.venv\Scripts\python scripts\cleanup_retention.py --dry-run
+.venv\Scripts\python scripts\cleanup_retention.py
+```
+
+`--dry-run` 对 ZIP、临时文件、`result_path`、异常日志和后台任务均为零副作用；脚本仍会先运行
+`ensure_schema`，因此数据库迁移/建表不属于 dry-run 保证范围。
 
 ### 标注
 
@@ -494,6 +521,5 @@ dedupe_key 唯一约束防重复任务）。
 - 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
-- 批次 5 片段库只读接口与批次 6 项目分类 ZIP 导出已实现；
-  `cleanup-issues.log` 补偿清理任务及过期 ZIP 实体清理留待批次 7；
+- 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；
   类别停用/删除管理界面留待后续批次。

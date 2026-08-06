@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
@@ -53,7 +54,13 @@ class Settings(BaseSettings):
 
     # ---- 分类导出（批次 6） ----
     # 导出 ZIP 生成后的保留天数：超过后 `export/download` 拒绝下载（批次 7 清理实体文件）。
-    export_retention_days: int = 7
+    export_retention_days: int = Field(default=7, ge=0)
+
+    # ---- 生命周期清理（批次 7） ----
+    cleanup_enabled: bool = True
+    cleanup_interval_seconds: int = Field(default=60 * 60, ge=1)
+    temp_retention_hours: int = Field(default=24, ge=0)
+    job_retention_days: int = Field(default=30, ge=0)
 
     @property
     def videos_dir(self) -> Path:

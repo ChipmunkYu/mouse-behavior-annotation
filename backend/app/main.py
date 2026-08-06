@@ -11,6 +11,7 @@ from . import database as db_mod
 from . import models  # noqa: F401  确保表注册到 Base.metadata
 from . import seed
 from .config import Settings, get_settings
+from .cleanup import RetentionCleaner
 from .export_jobs import ExportWorker
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
@@ -67,6 +68,11 @@ def create_app(
         session_factory=db_mod.SessionLocal,
         settings=s,
     )
+    cleanup_worker = RetentionCleaner(
+        session_factory=db_mod.SessionLocal,
+        settings=s,
+        synchronous=s.media_synchronous,
+    )
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -75,9 +81,11 @@ def create_app(
         export_worker._recover_interrupted()
         worker.start(recover=False)
         export_worker.start(recover=False)
+        cleanup_worker.start()
         try:
             yield
         finally:
+            cleanup_worker.shutdown()
             export_worker.shutdown()
             worker.shutdown()
 
@@ -86,6 +94,7 @@ def create_app(
     app.state.settings = s
     app.state.media_worker = worker
     app.state.export_worker = export_worker
+    app.state.cleanup_worker = cleanup_worker
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origin_list,

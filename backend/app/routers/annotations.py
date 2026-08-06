@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +23,7 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from ..config import Settings
+from ..cleanup_io import append_cleanup_issues, remove_checked, safe_path
 from ..database import get_db
 from ..deps import project_access
 from ..models import Annotation, BehaviorCategory, Clip, Video
@@ -99,11 +99,13 @@ class _InvalidationPlan:
     __slots__ = ("files", "issues")
 
     def __init__(self) -> None:
-        self.files: list[Path] = []
+        self.files: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
 
 
-def _resolve_stored_file(stored: str | None, root_dir: Path) -> tuple[Path | None, str | None]:
+def _resolve_stored_file(
+    stored: str | None, root_dir: Path, data_dir: Path
+) -> tuple[Path | None, str | None]:
     """解析 Clip 实体文件路径并校验边界。
 
     返回 (resolved, reason)：
@@ -114,12 +116,7 @@ def _resolve_stored_file(stored: str | None, root_dir: Path) -> tuple[Path | Non
     """
     if not stored:
         return None, None
-    root = root_dir.resolve()
-    raw = Path(stored)
-    path = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
-    if path == root or not path.is_relative_to(root):
-        return None, "out-of-bounds"
-    return path, None
+    return safe_path(stored, root_dir, data_dir)
 
 
 def _invalidate_video(db: Session, video: Video, settings: Settings) -> _InvalidationPlan:
@@ -142,21 +139,33 @@ def _invalidate_video(db: Session, video: Video, settings: Settings) -> _Invalid
         .all()
     )
     for clip in clips:
-        for stored, root in (
-            (clip.clip_path, settings.clips_dir),
-            (clip.thumbnail_path, settings.thumbnails_dir),
+        for stored, root, media_kind in (
+            (clip.clip_path, settings.clips_dir, "clip"),
+            (clip.thumbnail_path, settings.thumbnails_dir, "thumbnail"),
         ):
-            path, reason = _resolve_stored_file(stored, root)
+            path, reason = _resolve_stored_file(stored, root, settings.data_dir)
             if path is not None:
-                plan.files.append(path)
+                plan.files.append(
+                    {
+                        "path": path,
+                        "annotation_id": clip.annotation_id,
+                        "revision": clip.source_revision,
+                        "media_kind": media_kind,
+                        "root": root.name,
+                    }
+                )
             elif reason is not None:
                 plan.issues.append(
                     {
                         "kind": "out-of-bounds",
+                        "path": stored,
                         "clip_id": clip.id,
+                        "annotation_id": clip.annotation_id,
+                        "revision": clip.source_revision,
+                        "media_kind": media_kind,
                         "video_id": video.id,
                         "stored": stored,
-                        "root": str(root),
+                        "root": root.name,
                         "message": "stored path resolved outside the allowed root; file NOT deleted",
                     }
                 )
@@ -176,9 +185,7 @@ def _record_cleanup_issue(log_path: Path, entry: dict[str, Any]) -> None:
     """
     entry.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_cleanup_issues(log_path, [entry])
     except OSError:
         logger.exception("Failed to write cleanup issue log: %s", log_path)
 
@@ -195,13 +202,21 @@ def _cleanup_files(plan: _InvalidationPlan, settings: Settings) -> None:
     for issue in plan.issues:
         _record_cleanup_issue(settings.cleanup_log, issue)
         logger.warning("Cleanup skipped out-of-bounds path: %s", issue)
-    for path in plan.files:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            entry = {"kind": "delete-failed", "path": str(path), "error": str(exc)}
+    for item in plan.files:
+        path = item["path"]
+        root = settings.clips_dir if item["media_kind"] == "clip" else settings.thumbnails_dir
+        deleted, reason = remove_checked(
+            path, root_dir=root, data_dir=settings.data_dir
+        )
+        if reason is not None:
+            entry = {
+                "kind": "delete-failed",
+                "path": str(path),
+                "error": reason,
+                **{key: value for key, value in item.items() if key != "path"},
+            }
             _record_cleanup_issue(settings.cleanup_log, entry)
-            logger.warning("Failed to remove orphan file %s: %s", path, exc)
+            logger.warning("Failed to remove orphan file %s: %s", path, reason)
 
 
 def _to_out(annotation: Annotation) -> AnnotationOut:

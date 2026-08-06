@@ -74,6 +74,7 @@ def ctx(tmp_path):
         env="test",
         data_dir=tmp_path,
         database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+        cleanup_enabled=False,
     )
     app = create_app(settings=settings)
     with TestClient(app) as client:
@@ -151,6 +152,7 @@ def media_ctx(tmp_path):
         data_dir=tmp_path,
         database_url=f"sqlite:///{(tmp_path / 'media.db').as_posix()}",
         media_synchronous=True,
+        cleanup_enabled=False,
     )
     processor = FakeMediaProcessor()
     app = create_app(settings=settings, media_processor=processor)
