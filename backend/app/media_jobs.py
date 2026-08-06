@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +55,7 @@ def _truncate_error(text: str, limit: int = ERROR_TRUNCATE_LIMIT) -> str:
 # ---------- 入队（幂等 / 可重试） ----------
 
 
-def _upsert_media_job(db: Session, video: Video) -> BackgroundJob:
+def _upsert_media_job(db: Session, video: Video, *, force_requeue: bool = False) -> BackgroundJob:
     """按 dedupe_key 幂等创建/复用媒体任务行。
 
     - 无任务行 → INSERT（并发竞态由唯一索引兜底，冲突后回退复用已有行）。
@@ -83,7 +85,7 @@ def _upsert_media_job(db: Session, video: Video) -> BackgroundJob:
         # 极端并发：唯一索引竞态兜底，回滚本次插入后复用已有行
         db.rollback()
     job = db.query(BackgroundJob).filter(BackgroundJob.dedupe_key == dedupe_key).one()
-    if job.status in ("failed", "cancelled"):
+    if job.status in ("failed", "cancelled") or (force_requeue and job.status == "succeeded"):
         job.status = "queued"
         job.progress = 0
         job.error = None
@@ -91,6 +93,195 @@ def _upsert_media_job(db: Session, video: Video) -> BackgroundJob:
         job.finished_at = None
         job.attempts = 0
     return job
+
+
+def resolve_input_path(settings, video: Video) -> Path:
+    """解析源视频路径：严格限制在配置 videos_dir 内，缺失/越界抛 MediaCommandError。
+
+    独立函数供媒体 worker 与导出补生成共用（批次 6）。
+    """
+    if not video.storage_path:
+        raise MediaCommandError("video has no storage_path; nothing to re-encode")
+    videos_dir = settings.videos_dir.resolve()
+    raw = Path(video.storage_path)
+    path = raw.resolve() if raw.is_absolute() else (videos_dir / raw).resolve()
+    if path == videos_dir or not path.is_relative_to(videos_dir):
+        raise MediaCommandError(
+            "video storage_path escapes the configured videos directory"
+        )
+    if not path.is_file():
+        raise MediaCommandError(f"video file missing on disk: {video.storage_path}")
+    return path
+
+
+def resolve_entity_path(stored: str | None, root_dir: Path) -> Path | None:
+    """Resolve a stored media path without allowing access outside its configured root."""
+    if not stored:
+        return None
+    root = root_dir.resolve()
+    raw = Path(stored)
+    path = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    if path == root or not path.is_relative_to(root):
+        return None
+    return path
+
+
+def clip_entities_ready(clip: Clip, settings) -> bool:
+    """A ready row is usable only when both safely-resolved entities still exist."""
+    clip_path = resolve_entity_path(clip.clip_path, settings.clips_dir)
+    thumb_path = resolve_entity_path(clip.thumbnail_path, settings.thumbnails_dir)
+    return bool(clip.status == "ready" and clip_path and clip_path.is_file() and thumb_path and thumb_path.is_file())
+
+
+def render_clip_files(processor, settings, video: Video, annotation: Annotation, clip: Clip) -> list[Path]:
+    """渲染单个 Clip 的 mp4 + 缩略图（临时文件 → 原子替换），供媒体 worker 与导出补生成共用。
+
+    - 输入源解析严格限制在 settings.videos_dir 内（越界/缺失 → MediaCommandError）。
+    - 输出先写临时 `.part`，成功后原子替换；失败清理半成品并重新抛出。
+    - 成功后更新 clip 的 clip_path / thumbnail_path / status=ready / error / generated_at。
+    - 返回本次成功落盘的最终文件列表（供失效清理跟踪）。
+    """
+    input_path = resolve_input_path(settings, video)
+    name = f"clip_{clip.annotation_id}_rev{clip.source_revision}"
+    render_id = uuid.uuid4().hex
+    temp_clip = settings.clips_dir / f".{name}.{render_id}.mp4.part"
+    temp_thumb = settings.thumbnails_dir / f".{name}.{render_id}.jpg.part"
+    final_clip = settings.clips_dir / f"{name}.mp4"
+    final_thumb = settings.thumbnails_dir / f"{name}.jpg"
+    settings.clips_dir.mkdir(parents=True, exist_ok=True)
+    settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+    created: list[Path] = []  # 本次调用已落盘的最终文件（失败时清理，避免半成品）
+    try:
+        processor.render_clip(
+            input_path=str(input_path),
+            start=annotation.start_time,
+            end=annotation.end_time,
+            output_path=str(temp_clip),
+        )
+        mid = (annotation.start_time + annotation.end_time) / 2.0  # 缩略图取片段中点
+        processor.render_thumbnail(
+            input_path=str(input_path),
+            at=mid,
+            output_path=str(temp_thumb),
+        )
+        # 成功后原子替换（同目录 .part → 最终名）
+        os.replace(temp_clip, final_clip)
+        created.append(final_clip)
+        os.replace(temp_thumb, final_thumb)
+        created.append(final_thumb)
+        clip.clip_path = f"{name}.mp4"
+        clip.thumbnail_path = f"{name}.jpg"
+        clip.status = "ready"
+        clip.error = None
+        clip.generated_at = _now()
+        clip.updated_at = _now()
+        return created
+    except Exception:
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        for temp in (temp_clip, temp_thumb):
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def claim_and_render_clip(
+    db: Session,
+    processor,
+    settings,
+    video_id: int,
+    annotation_id: int,
+    clip_id: int,
+    *,
+    wait_seconds: float = 10.0,
+    poll_seconds: float = 0.05,
+) -> tuple[Path, list[Path]]:
+    """Claim one clip in the database, or wait for the current owner to finish it."""
+    deadline = time.monotonic() + wait_seconds
+    owns_claim = False
+    claim_token: datetime | None = None
+    created: list[Path] = []
+    try:
+        while True:
+            next_claim_token = _now()
+            claimed = (
+                db.query(Clip)
+                .filter(Clip.id == clip_id, Clip.status.in_(("pending", "failed")))
+                .update(
+                    {"status": "processing", "error": None, "updated_at": next_claim_token},
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            if claimed == 1:
+                owns_claim = True
+                claim_token = next_claim_token
+                break
+            db.expire_all()
+            current = db.get(Clip, clip_id)
+            if current is None:
+                raise MediaCommandError(f"clip {clip_id} no longer exists")
+            if clip_entities_ready(current, settings):
+                path = resolve_entity_path(current.clip_path, settings.clips_dir)
+                assert path is not None
+                return path, []
+            if current.status == "ready":
+                db.query(Clip).filter(Clip.id == clip_id, Clip.status == "ready").update(
+                    {
+                        "status": "pending",
+                        "clip_path": None,
+                        "thumbnail_path": None,
+                        "error": None,
+                        "generated_at": None,
+                        "updated_at": _now(),
+                    },
+                    synchronize_session=False,
+                )
+                db.commit()
+                continue
+            if current.status != "processing":
+                continue
+            if time.monotonic() >= deadline:
+                raise MediaCommandError(f"timed out waiting for clip {clip_id} render owner")
+            time.sleep(poll_seconds)
+
+        db.expire_all()
+        clip = db.get(Clip, clip_id)
+        video = db.get(Video, video_id)
+        annotation = db.get(Annotation, annotation_id)
+        if clip is None or video is None or annotation is None:
+            raise MediaCommandError("clip render input no longer exists")
+        created = render_clip_files(processor, settings, video, annotation, clip)
+        db.commit()
+        path = resolve_entity_path(clip.clip_path, settings.clips_dir)
+        if path is None or not path.is_file():
+            raise MediaCommandError(f"clip file missing after render: {clip.clip_path}")
+        return path, created
+    except Exception as exc:
+        db.rollback()
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if owns_claim and claim_token is not None:
+            db.query(Clip).filter(
+                Clip.id == clip_id,
+                Clip.status == "processing",
+                Clip.updated_at == claim_token,
+            ).update(
+                {"status": "failed", "error": _truncate_error(str(exc)), "updated_at": _now()},
+                synchronize_session=False,
+            )
+            db.commit()
+        raise
 
 
 def ensure_pending_clips(db: Session, video: Video) -> int:
@@ -110,7 +301,113 @@ def ensure_pending_clips(db: Session, video: Video) -> int:
     return created
 
 
-def enqueue_media_job(db: Session, video: Video) -> BackgroundJob | None:
+def reset_missing_ready_clips(db: Session, video: Video, settings) -> bool:
+    """Atomically make ready rows with missing/unsafe entities eligible for regeneration."""
+    changed = False
+    clips = (
+        db.query(Clip)
+        .join(Annotation, Annotation.id == Clip.annotation_id)
+        .filter(
+            Annotation.video_id == video.id,
+            Clip.source_revision == video.annotation_revision,
+            Clip.status == "ready",
+        )
+        .all()
+    )
+    for clip in clips:
+        if clip_entities_ready(clip, settings):
+            continue
+        updated = (
+            db.query(Clip)
+            .filter(Clip.id == clip.id, Clip.status == "ready")
+            .update(
+                {
+                    "status": "pending",
+                    "clip_path": None,
+                    "thumbnail_path": None,
+                    "error": None,
+                    "generated_at": None,
+                    "updated_at": _now(),
+                },
+                synchronize_session=False,
+            )
+        )
+        changed = changed or updated == 1
+    return changed
+
+
+def reset_interrupted_job_clips(db: Session, job: BackgroundJob) -> int:
+    """CAS-reset processing clips owned by one interrupted, requeued startup job.
+
+    This is startup recovery, not timeout-based claim stealing. Callers must finish
+    recovery for both worker types before either worker starts scheduling jobs.
+    """
+    payload = job.payload or {}
+    candidates: list[Clip] = []
+    if job.job_type == JOB_TYPE_MEDIA:
+        video_id = payload.get("video_id")
+        revision = payload.get("revision")
+        video = db.get(Video, video_id) if video_id else None
+        if video is not None and video.annotation_revision == revision:
+            candidates = (
+                db.query(Clip)
+                .join(Annotation, Annotation.id == Clip.annotation_id)
+                .filter(
+                    Annotation.video_id == video.id,
+                    Clip.source_revision == revision,
+                    Clip.status == "processing",
+                )
+                .all()
+            )
+    elif job.job_type == "export":
+        annotation_ids = set(payload.get("annotation_ids") or [])
+        revisions = {
+            int(video_id): revision
+            for video_id, revision in (payload.get("video_revisions") or {}).items()
+        }
+        if annotation_ids and revisions:
+            rows = (
+                db.query(Clip, Video)
+                .join(Annotation, Annotation.id == Clip.annotation_id)
+                .join(Video, Video.id == Annotation.video_id)
+                .filter(
+                    Annotation.id.in_(annotation_ids),
+                    Clip.status == "processing",
+                    Clip.source_revision == Video.annotation_revision,
+                )
+                .all()
+            )
+            candidates = [
+                clip
+                for clip, video in rows
+                if revisions.get(video.id) == video.annotation_revision
+            ]
+
+    reset = 0
+    for clip in candidates:
+        reset += (
+            db.query(Clip)
+            .filter(
+                Clip.id == clip.id,
+                Clip.status == "processing",
+                Clip.updated_at == clip.updated_at,
+            )
+            .update(
+                {
+                    "status": "pending",
+                    "clip_path": None,
+                    "thumbnail_path": None,
+                    "error": None,
+                    "generated_at": None,
+                    "updated_at": _now(),
+                },
+                synchronize_session=False,
+            )
+        )
+    return reset
+
+
+def enqueue_media_job(db: Session, video: Video, settings=None) -> BackgroundJob | None:
     """审核通过后自动入队（幂等）：创建 pending Clips + (重)入队媒体任务并提交。
 
     在 review 提交成功（已 commit）后调用；若视频已非 approved（提交后到入队前的
@@ -119,8 +416,9 @@ def enqueue_media_job(db: Session, video: Video) -> BackgroundJob | None:
     # 复查：视频仍 approved（评审提交后的并发失效竞态窗口）
     if video.workflow_status != "approved":
         return None
-    job = _upsert_media_job(db, video)
     ensure_pending_clips(db, video)
+    repaired = reset_missing_ready_clips(db, video, settings) if settings is not None else False
+    job = _upsert_media_job(db, video, force_requeue=repaired)
     db.commit()
     db.refresh(job)
     return job
@@ -144,9 +442,10 @@ class MediaWorker:
 
     # ---------- 生命周期 ----------
 
-    def start(self) -> None:
+    def start(self, *, recover: bool = True) -> None:
         """启动恢复：running 视为中断（重排或判失败）；随后调度全部 queued 媒体任务。"""
-        self._recover_interrupted()
+        if recover:
+            self._recover_interrupted()
         with self.session_factory() as db:
             job_ids = [
                 row[0]
@@ -198,6 +497,7 @@ class MediaWorker:
                     job.attempts += 1
                     job.started_at = None
                     job.error = "Interrupted; requeued at startup"
+                    reset_interrupted_job_clips(db, job)
             db.commit()
 
     # ---------- 任务执行 ----------
@@ -269,19 +569,8 @@ class MediaWorker:
         )
 
     def _resolve_input(self, video: Video) -> Path:
-        """解析源视频路径：严格限制在配置 videos_dir 内，缺失/越界抛 MediaCommandError。"""
-        if not video.storage_path:
-            raise MediaCommandError("video has no storage_path; nothing to re-encode")
-        videos_dir = self.settings.videos_dir.resolve()
-        raw = Path(video.storage_path)
-        path = raw.resolve() if raw.is_absolute() else (videos_dir / raw).resolve()
-        if path == videos_dir or not path.is_relative_to(videos_dir):
-            raise MediaCommandError(
-                "video storage_path escapes the configured videos directory"
-            )
-        if not path.is_file():
-            raise MediaCommandError(f"video file missing on disk: {video.storage_path}")
-        return path
+        """解析源视频路径（委托模块级 `resolve_input_path`，媒体 worker 与导出共用）。"""
+        return resolve_input_path(self.settings, video)
 
     def _process_job(self, db: Session, job: BackgroundJob) -> None:
         payload = job.payload or {}
@@ -289,6 +578,11 @@ class MediaWorker:
         revision = payload.get("revision")
         if not video_id or not revision:
             raise MediaCommandError("media job payload missing video_id/revision")
+        if payload.get("project_id") != job.project_id:
+            raise MediaCommandError("media job payload project_id does not match job project_id")
+        video = db.get(Video, video_id)
+        if video is None or video.project_id != job.project_id:
+            raise MediaCommandError("media job video does not belong to job project")
         settings = self.settings
 
         # ---- 处理前检查 ----
@@ -312,9 +606,7 @@ class MediaWorker:
             clip = db.get(Clip, clip.id)  # 重取：并发失效可能已删除该行
             if clip is None:
                 continue
-            # 跳过已 ready 的 Clip；其余（pending/failed，含崩溃遗留的 processing）
-            # 都要处理——重试只处理未 ready 的片段，成功片段保留
-            if clip.status == "ready":
+            if clip_entities_ready(clip, settings):
                 continue
             # ---- 每片前检查 ----
             reason = self._invalidation_reason(db, video_id, revision)
@@ -324,17 +616,11 @@ class MediaWorker:
                 return
             video = db.get(Video, video_id)
             try:
-                self._process_clip(db, video, clip, produced)
-                db.commit()
+                created = self._process_clip(db, video, clip)
+                produced.extend(created)
             except Exception as exc:  # noqa: BLE001  单片段失败 → 该片 failed，任务 failed
                 db.rollback()
                 failures.append(str(exc))
-                cur = db.get(Clip, clip.id)
-                if cur is not None:
-                    cur.status = "failed"
-                    cur.error = _truncate_error(str(exc))
-                    cur.updated_at = _now()
-                    db.commit()
                 break
             # 进度更新（ready 数 / 总片数）
             ready = (
@@ -376,68 +662,15 @@ class MediaWorker:
         job.finished_at = _now()
         db.commit()
 
-    def _process_clip(
-        self, db: Session, video: Video, clip: Clip, produced: list[Path]
-    ) -> None:
-        """渲染单个 Clip：临时文件 → 原子替换；失败清理半成品并抛错。
+    def _process_clip(self, db: Session, video: Video, clip: Clip) -> list[Path]:
+        """渲染单个 Clip（委托模块级 `render_clip_files`）：临时文件 → 原子替换。
 
         路径均限制在 clips_dir / thumbnails_dir 内，DB 存相对名。
+        失败由 `render_clip_files` 清理半成品并抛错，调用方把该 Clip 置 failed。
         """
-        settings = self.settings
-        annotation = db.get(Annotation, clip.annotation_id)
-        if annotation is None:
-            raise MediaCommandError(f"annotation {clip.annotation_id} not found for clip")
-        input_path = self._resolve_input(video)
-        clip.status = "processing"
-        db.commit()
-
-        name = f"clip_{clip.annotation_id}_rev{clip.source_revision}"
-        temp_clip = settings.clips_dir / f".{name}.mp4.part"
-        temp_thumb = settings.thumbnails_dir / f".{name}.jpg.part"
-        final_clip = settings.clips_dir / f"{name}.mp4"
-        final_thumb = settings.thumbnails_dir / f"{name}.jpg"
-        settings.clips_dir.mkdir(parents=True, exist_ok=True)
-        settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
-
-        created: list[Path] = []  # 本次调用已落盘的最终文件（失败时清理，避免半成品）
-        try:
-            self.processor.render_clip(
-                input_path=str(input_path),
-                start=annotation.start_time,
-                end=annotation.end_time,
-                output_path=str(temp_clip),
-            )
-            mid = (annotation.start_time + annotation.end_time) / 2.0  # 缩略图取片段中点
-            self.processor.render_thumbnail(
-                input_path=str(input_path),
-                at=mid,
-                output_path=str(temp_thumb),
-            )
-            # 成功后原子替换（同目录 .part → 最终名）
-            os.replace(temp_clip, final_clip)
-            created.append(final_clip)
-            os.replace(temp_thumb, final_thumb)
-            created.append(final_thumb)
-            clip.clip_path = f"{name}.mp4"
-            clip.thumbnail_path = f"{name}.jpg"
-            clip.status = "ready"
-            clip.error = None
-            clip.generated_at = _now()
-            clip.updated_at = _now()
-            produced.extend(created)  # 交给失效清理跟踪
-        except Exception:
-            for path in created:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
-        finally:
-            for temp in (temp_clip, temp_thumb):
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        return claim_and_render_clip(
+            db, self.processor, self.settings, video.id, clip.annotation_id, clip.id
+        )[1]
 
     def _cleanup_produced(self, files: list[Path], settings) -> None:
         """失效时清理本次运行产出的实体文件（仅限已知路径，删除失败记日志不阻断）。"""

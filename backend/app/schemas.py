@@ -229,3 +229,28 @@ class ClipCategoryCount(BaseModel):
     category_id: int
     category_name: str
     count: int
+
+
+# ---------- 全项目分类导出（批次 6） ----------
+class ExportRequest(BaseModel):
+    """导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。"""
+
+    category_ids: Optional[list[int]] = None
+
+
+class MissingClipOut(BaseModel):
+    """状态接口中缺失（未 ready）片段的标注信息。"""
+
+    annotation_id: int
+    category_name: str
+    video_filename: str
+
+
+class ExportStatusOut(BaseModel):
+    """导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。"""
+
+    latest_job: Optional[JobOut] = None
+    exportable_count: int
+    ready_count: int
+    missing_count: int
+    missing_clips: list[MissingClipOut]

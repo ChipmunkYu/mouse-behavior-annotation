@@ -203,6 +203,39 @@ export interface ExportEvent {
   review_status: string;
 }
 
+// ---------- 导出（批次 6） ----------
+/** 发起导出请求体：category_ids 为空数组 / 缺省表示导出全部类别（POST /api/projects/:pid/export）。 */
+export interface ExportRequestInput {
+  category_ids?: number[];
+}
+
+/** 缺失片段条目（导出 status 返回）：标注已审核通过、但剪辑文件尚未生成的片段。 */
+export interface MissingClip {
+  annotation_id: number;
+  category_name: string;
+  video_filename: string;
+}
+
+/**
+ * 导出状态汇总（GET /api/projects/:pid/export/status）。
+ * 计数均为项目级：可导出 = 审核通过标注总数；就绪 = 片段已生成可打包；缺失 = 待生成。
+ */
+export interface ExportStatus {
+  /** 最近一次导出任务（尚未发起过则为 null） */
+  latest_job: Job | null;
+  /** 可导出（审核通过）标注总数 */
+  exportable_count: number;
+  /** 片段已就绪、可打包进 ZIP 的数量 */
+  ready_count: number;
+  /** 片段缺失（未生成）数量 */
+  missing_count: number;
+  /** 缺失片段明细（仅缺失时非空） */
+  missing_clips: MissingClip[];
+}
+
+/** 导出 ZIP 在服务器端的保留时长（天），下载提示文案用。 */
+export const EXPORT_RETENTION_DAYS = 7;
+
 // ---------- 片段库（批次 5） ----------
 /**
  * 片段列表条目（GET /api/projects/:pid/clips 返回的 ClipItem）。

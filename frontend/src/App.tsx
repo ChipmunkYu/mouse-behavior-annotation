@@ -7,6 +7,7 @@ import VideosPage from "./pages/VideosPage";
 import AnnotatePage from "./pages/AnnotatePage";
 import ReviewPage from "./pages/ReviewPage";
 import ClipsPage from "./pages/ClipsPage";
+import ExportPage from "./pages/ExportPage";
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/projects/:projectId/videos" element={<VideosPage />} />
           <Route path="/projects/:projectId/clips" element={<ClipsPage />} />
           <Route path="/projects/:projectId/review" element={<ReviewPage />} />
+          <Route path="/projects/:projectId/export" element={<ExportPage />} />
           <Route path="/projects/:projectId/annotate/:videoId" element={<AnnotatePage />} />
         </Route>
       </Route>

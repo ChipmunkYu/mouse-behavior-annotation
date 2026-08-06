@@ -11,9 +11,10 @@ from . import database as db_mod
 from . import models  # noqa: F401  确保表注册到 Base.metadata
 from . import seed
 from .config import Settings, get_settings
+from .export_jobs import ExportWorker
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
-from .routers import annotations, auth, categories, clips, health, media, projects, reviews, videos
+from .routers import annotations, auth, categories, clips, exports, health, media, projects, reviews, videos
 
 
 def _default_media_processor(settings: Settings) -> MediaProcessor:
@@ -61,20 +62,30 @@ def create_app(
         session_factory=db_mod.SessionLocal,
         settings=s,
     )
+    export_worker = ExportWorker(
+        processor=processor,
+        session_factory=db_mod.SessionLocal,
+        settings=s,
+    )
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
-        # 启动恢复：running 任务视为中断（重排/判失败）；调度全部 queued 任务
-        worker.start()
+        # 两类恢复先全部完成再调度，避免后恢复者重置另一 worker 的新 Clip claim。
+        worker._recover_interrupted()
+        export_worker._recover_interrupted()
+        worker.start(recover=False)
+        export_worker.start(recover=False)
         try:
             yield
         finally:
+            export_worker.shutdown()
             worker.shutdown()
 
     app = FastAPI(title="Behavior Annotation Backend", version="0.1.0", lifespan=_lifespan)
     # 供各路由读取当前应用配置（如 stream 的视频目录安全边界）
     app.state.settings = s
     app.state.media_worker = worker
+    app.state.export_worker = export_worker
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origin_list,
@@ -90,6 +101,7 @@ def create_app(
     app.include_router(annotations.router)
     app.include_router(reviews.router)
     app.include_router(clips.router)
+    app.include_router(exports.router)
     app.include_router(media.router)
     return app
 

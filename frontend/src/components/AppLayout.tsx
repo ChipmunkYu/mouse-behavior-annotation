@@ -15,6 +15,8 @@ const PROJECT_NAV: NavItem[] = [
   { label: "视频库", to: (pid) => `/projects/${pid}/videos`, roles: ["owner", "admin", "annotator", "reviewer"] },
   { label: "片段库", to: (pid) => `/projects/${pid}/clips`, roles: ["owner", "admin", "annotator", "reviewer"] },
   { label: "审核", to: (pid) => `/projects/${pid}/review`, roles: ["owner", "admin", "reviewer"] },
+  // 批次 6：导出入口放在审核之后，仅 owner / admin 可见（与导出权限一致）
+  { label: "导出", to: (pid) => `/projects/${pid}/export`, roles: ["owner", "admin"] },
 ];
 
 /** 登录后页面共用外壳：顶栏 + 项目导航 + 内容区。 */
@@ -59,6 +61,7 @@ export default function AppLayout() {
     const p = location.pathname;
     if (p.includes("/annotate/")) return "标注工作台";
     if (p.includes("/review")) return "审核工作台";
+    if (p.includes("/export")) return "导出";
     if (p.includes("/clips")) return "片段库";
     if (p.includes("/videos")) return "视频库";
     if (p.includes("/projects")) return "项目";

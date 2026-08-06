@@ -26,6 +26,8 @@ def require_membership(db: Session, project_id: int, user_id: int) -> ProjectMem
         raise HTTPException(
             status_code=403, detail="You are not a member of this project"
         )
+    if membership.status != "active":
+        raise HTTPException(status_code=403, detail="Project membership is not active")
     return membership
 
 
