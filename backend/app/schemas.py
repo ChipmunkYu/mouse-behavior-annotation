@@ -78,6 +78,12 @@ class VideoOut(BaseModel):
     height: Optional[int] = None
     storage_path: Optional[str] = None
     status: str
+    # 审核工作流字段（新增；旧数据迁移后由 DB 默认值填充）
+    workflow_status: str = "draft"
+    annotation_revision: int = 1
+    submitted_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[int] = None
     created_at: datetime
 
 

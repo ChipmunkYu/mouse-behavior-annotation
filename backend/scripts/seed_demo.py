@@ -79,11 +79,11 @@ def seed_demo(
     if duration <= 0 or fps <= 0:
         raise ValueError("duration 与 fps 必须为正数")
 
-    # 与 create_app 相同的初始化路径：目录、引擎、建表
+    # 与 create_app 相同的初始化路径：目录、引擎、幂等迁移建表
     for directory in (settings.data_dir, settings.videos_dir, settings.exports_dir):
         directory.mkdir(parents=True, exist_ok=True)
     db_mod.configure_engine(settings.resolved_database_url)
-    db_mod.Base.metadata.create_all(bind=db_mod.engine)
+    db_mod.ensure_schema(settings.resolved_database_url)
 
     with db_mod.SessionLocal() as db:
         demo_user = ensure_demo_user(db, settings)

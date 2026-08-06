@@ -21,7 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         directory.mkdir(parents=True, exist_ok=True)
 
     db_mod.configure_engine(s.resolved_database_url)
-    db_mod.Base.metadata.create_all(bind=db_mod.engine)
+    db_mod.ensure_schema(s.resolved_database_url)
 
     with db_mod.SessionLocal() as db:
         seed.ensure_demo_user(db, s)

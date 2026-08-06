@@ -40,6 +40,21 @@ def configure_engine(database_url: str) -> Engine:
     return engine
 
 
+def ensure_schema(database_url: str) -> None:
+    """配置引擎后执行幂等 schema 迁移（供 create_app / seed_demo 启动共用）。
+
+    - 文件/网络库：走 Alembic——全新空库建立完整 schema；未版本化 P1 旧库先标记
+      baseline 再升级；已版本化直接升级到 head。不删除已有数据，重复执行无副作用。
+    - `sqlite:///:memory:`：内存库每次全新，直接 create_all（无迁移版本可循）。
+    """
+    if database_url == "sqlite:///:memory:":
+        Base.metadata.create_all(bind=engine)
+        return
+    from .migration import run_migrations
+
+    run_migrations(database_url)
+
+
 def get_db():
     """FastAPI 依赖：请求级会话。"""
     if SessionLocal is None:
