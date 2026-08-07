@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from app.media import FfmpegMediaProcessor, MediaCommandError, format_time
-from app.models import Annotation, BackgroundJob, Clip, User, Video
+from app.models import Annotation, BackgroundJob, Clip, ProjectMembership, User, Video
 
 from .conftest import auth_headers
 
@@ -411,6 +411,56 @@ def test_media_status_permissions(media_ctx):
     ).status_code == 404
 
 
+def test_inactive_member_cannot_access_media_export_or_jobs(media_ctx):
+    ctx = media_ctx
+    headers = auth_headers(ctx.client)
+    project, _categories, video, _anns = _setup(ctx, headers, annotations=1)
+    _approve(ctx, project, video)
+    job_id = _jobs(ctx, project["id"])[0].id
+    user_id = ctx.create_user("inactive-owner")
+    ctx.add_member(project["id"], user_id, role="owner")
+    with ctx.session_factory() as db:
+        membership = db.query(ProjectMembership).filter_by(
+            project_id=project["id"], user_id=user_id
+        ).one()
+        membership.status = "inactive"
+        db.commit()
+    inactive = auth_headers(ctx.client, "inactive-owner", "pw123")
+    urls = [
+        f"/api/projects/{project['id']}/videos/{video['id']}/media-status",
+        f"/api/projects/{project['id']}/jobs/{job_id}",
+        f"/api/projects/{project['id']}/export/status",
+        f"/api/projects/{project['id']}/export/download",
+    ]
+    assert all(ctx.client.get(url, headers=inactive).status_code == 403 for url in urls)
+    assert _generate(ctx, project, video, inactive).status_code == 403
+    assert ctx.client.post(
+        f"/api/projects/{project['id']}/export", json={}, headers=inactive
+    ).status_code == 403
+
+
+def test_missing_ready_entity_is_reported_and_regenerated(media_ctx):
+    ctx = media_ctx
+    headers = auth_headers(ctx.client)
+    project, _categories, video, _anns = _setup(ctx, headers, annotations=1)
+    _approve(ctx, project, video)
+    clip = _clips(ctx, project["id"])[0]
+    (ctx.app.state.settings.thumbnails_dir / clip.thumbnail_path).unlink()
+    calls_before = len(ctx.processor.clip_calls)
+
+    status = _media_status(ctx, project, video).json()
+    assert status["ready"] == 0
+    assert status["pending"] == 1
+    response = _generate(ctx, project, video)
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert len(ctx.processor.clip_calls) == calls_before + 1
+    rebuilt = _clips(ctx, project["id"])[0]
+    assert rebuilt.status == "ready"
+    assert (ctx.app.state.settings.clips_dir / rebuilt.clip_path).is_file()
+    assert (ctx.app.state.settings.thumbnails_dir / rebuilt.thumbnail_path).is_file()
+
+
 def test_get_job_endpoint(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
@@ -617,7 +667,7 @@ def test_restart_requeues_interrupted_running_job(media_ctx):
                 project_id=project["id"],
                 annotation_id=anns[0]["id"],
                 source_revision=1,
-                status="pending",
+                status="processing",  # 模拟任务领取 Clip 后进程崩溃
             )
         )
         job = BackgroundJob(

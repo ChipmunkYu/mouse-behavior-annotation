@@ -456,6 +456,10 @@ def test_file_delete_failure_recorded_without_blocking(ctx, login_headers, tmp_p
     assert len(failed) == 1
     assert failed[0]["path"].endswith("dirclip.mp4")
     assert failed[0]["error"]
+    assert failed[0]["annotation_id"] == ann["id"]
+    assert failed[0]["revision"] == 1
+    assert failed[0]["media_kind"] == "clip"
+    assert failed[0]["root"] == "clips"
 
 
 # ---------- 角色与直接 review_status ----------

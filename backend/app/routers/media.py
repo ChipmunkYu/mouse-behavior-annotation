@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
-from ..media_jobs import enqueue_media_job, media_dedupe_key
+from ..media_jobs import clip_entities_ready, enqueue_media_job, media_dedupe_key
 from ..models import Annotation, BackgroundJob, Clip, Video
 from ..schemas import JobOut, MediaStatusOut
 
@@ -53,6 +53,7 @@ def _to_job_out(job: BackgroundJob) -> JobOut:
 def media_status(
     project_id: int,
     video_id: int,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> MediaStatusOut:
@@ -67,7 +68,10 @@ def media_status(
     )
     counts = {"total": len(clips), "ready": 0, "processing": 0, "failed": 0, "pending": 0}
     for clip in clips:
-        counts[clip.status] = counts.get(clip.status, 0) + 1
+        status = clip.status
+        if status == "ready" and not clip_entities_ready(clip, request.app.state.settings):
+            status = "pending"
+        counts[status] = counts.get(status, 0) + 1
     job = (
         db.query(BackgroundJob)
         .filter(BackgroundJob.dedupe_key == media_dedupe_key(video.id, revision))
@@ -110,8 +114,9 @@ def generate_media(
             status_code=400,
             detail="Only approved videos can generate media",
         )
-    job = enqueue_media_job(db, video)
+    job = enqueue_media_job(db, video, request.app.state.settings)
     request.app.state.media_worker.schedule(job.id)
+    db.refresh(job)
     return _to_job_out(job)
 
 
@@ -122,8 +127,10 @@ def get_job(
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> JobOut:
-    """项目成员可查本项目内任意任务（媒体任务一律绑定 project_id）。"""
+    """项目任务隔离查询；导出任务仅 owner/admin，其他任务保持成员可读。"""
     job = db.get(BackgroundJob, job_id)
     if job is None or job.project_id != project_id:
         raise HTTPException(status_code=404, detail="Job not found in this project")
+    if job.job_type == "export" and access[1].role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Only owner/admin can view export jobs")
     return _to_job_out(job)

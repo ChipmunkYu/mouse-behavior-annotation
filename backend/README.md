@@ -1,4 +1,4 @@
-# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图）
+# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图 + 批次 5 生产跨视频片段库）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
@@ -9,6 +9,8 @@
   标注写入与审核工作流联动（非 draft 修改回 draft + Clip 行与实体文件清理）
 - 批次 4：仅审核通过（approved）的视频，后台精确重编码每条标注为 H.264 MP4 片段并生成
   JPG 缩略图——单进程单任务执行、可恢复/重试、修订隔离；媒体执行器可替换（测试无需本机 ffmpeg）
+- 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
+  含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 
 ## 目录结构
@@ -25,7 +27,7 @@ backend/
 │       ├── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
 │       └── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
 ├── app/
-│   ├── main.py            # 应用工厂（启动时自动幂等迁移、CORS、路由注册、媒体 worker 生命周期）
+│   ├── main.py            # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │   ├── config.py          # 环境变量配置
 │   ├── database.py        # SQLAlchemy 引擎 / Session / ensure_schema
 │   ├── migration.py       # 程序化 Alembic 入口（启动自动迁移 / CLI 共用）
@@ -36,7 +38,8 @@ backend/
 │   ├── deps.py            # 项目成员权限依赖
 │   ├── media.py           # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
 │   ├── media_jobs.py      # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
-│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / media
+│   ├── export_jobs.py     # 项目分类导出：缺失片段补生成、ZIP 打包、任务恢复
+│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / clips / media / exports
 ├── scripts/               # 本地工具脚本（仅开发，不注册到应用）
 │   ├── migrate.py         # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
 │   └── seed_demo.py       # 幂等演示数据脚本（第一阶段本地演示）
@@ -131,12 +134,9 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 | `projects.created_by` | 否 | `users.id` | `RESTRICT`（被项目引用时禁止删除创建者） |
 | `annotations.annotator_id` | 否 | `users.id` | `RESTRICT`（被标注引用时禁止删除标注者） |
 
-### 后续整改批次（未实施）
-
-- **批次 5+**：生产跨视频片段库；分类导出；基于 `cleanup-issues.log` 的孤儿文件
-  补偿清理任务（批次 7）、导出 ZIP 过期清理等生命周期任务。
-
-批次 4（媒体任务去重、精确片段/缩略图后台生成）已实现，见下文「批次 4：精确片段与缩略图」。
+批次 4（媒体任务）、批次 5（生产跨视频片段库）、批次 6（项目分类导出）与
+批次 7（生命周期清理）已实现，
+见下文对应章节。
 
 ## Demo 账号
 
@@ -187,6 +187,10 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 | `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
 | `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
+| `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
+| `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
+| `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件和孤儿导出 ZIP 的保留时间 |
+| `JOB_RETENTION_DAYS` | `30` | 无结果路径的 terminal 后台任务日志保留天数 |
 
 ## API 一览
 
@@ -270,7 +274,7 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
   永不引用已删除文件；若先删文件后提交 DB，事务失败会留下指向已删文件的悬空 Clip 行。
 - 越界路径（绝对路径逃逸 / `../` 穿越 / 等于根目录）**绝不删除**，写入异常日志。
 - 删除失败与越界均追加一条 JSONL 到 `DATA_DIR/cleanup-issues.log`（`kind ∈ {delete-failed,
-  out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 4 清理任务据此补偿。
+  out-of-bounds}`）并记入应用日志，**不阻断业务请求、绝不无声**；批次 7 清理任务据此补偿。
 
 ### 批次 4：精确片段与缩略图
 
@@ -299,12 +303,105 @@ H.264 MP4（`-ss` 前置输入定位 + 重编码，帧精确）；可选音频�
   `UPDATE ... WHERE status='queued'` 原子独占，杜绝两个线程领取同一任务；
   `MEDIA_SYNCHRONOUS=true` 时在请求线程内同步执行（测试确定性）。
 - **重启恢复**：启动时 `running` 视为中断——`attempts < MEDIA_MAX_ATTEMPTS` 则重排
-  并 `attempts+1`，否则判 `failed`（重试上限耗尽）；同时调度全部 `queued` 任务。
+  并 `attempts+1`，否则判 `failed`（重试上限耗尽）。仅对本次确认中断并重排的 media/export
+  job，将其关联且仍属视频当前 revision 的 `processing` Clip 通过
+  `id + status + updated_at` CAS 重置为 `pending`；普通等待超时不会重置或夺取活跃 claim。
+  应用先完成两类 job/Clip 恢复，再调度全部 `queued` 任务，避免 worker 启动顺序互相破坏。
+- **部署边界**：Clip claim 目前没有持久化 owner token/heartbeat/lease，本恢复语义仅适用于当前
+  app 内单进程 executor 部署。不得使用 `uvicorn --workers N` 或让多个应用进程共享该任务库；
+  如需多进程，必须先增加 claim owner + heartbeat + stale lease CAS 回收，不能依赖本启动恢复。
 - **修订隔离**：处理前 / 每片前 / 完成后都校验视频仍 `approved` 且 revision 与任务
   payload 一致；失效 → 任务 `cancelled` 并清理**本次运行产出**的实体文件，**绝不复活**
   已被删除的 Clip 行（worker 从不创建 Clip 行）。
 - **部分失败**：失败 Clip 置 `failed` 并写截断错误，Job 置 `failed` 并记录摘要，
   成功片段保留；重试（`media/generate`）只处理 `pending/failed`（未 ready）的 Clip。
+
+### 批次 5：生产跨视频片段库
+
+跨视频聚合「审核通过的标注 + 对应 ready 的 Clip」的分页只读接口（**无需 Alembic 迁移**，
+复用现有 Annotation/Video/Clip/BehaviorCategory/User 表；不改变任何现有路由前缀）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/projects/{project_id}/clips` | 片段库分页列表 → `ClipPageOut`（项目成员可读） |
+| `GET` | `/api/projects/{project_id}/clips/categories` | 审核通过片段的类别统计 → `ClipCategoryCount[]` |
+
+**入库条件**：标注 `review_status=approved` **且** 所属视频当前 `workflow_status=approved`。
+失效回 draft 后仍残留的 approved 标注一并排除（杜绝库内出现已失效片段）；
+pending/rejected 一律隔离。`review_status` 查询参数仅接受 `approved`（其余值 422）。
+
+**ClipItem 字段**：`annotation_id, video_id, video_filename, category_id, category_name,
+start_time, end_time, start_frame, end_frame, confidence, clip_path, thumbnail_path,
+annotator_name, review_status, created_at`。
+`clip_path` / `thumbnail_path` 取当前修订（`Clip.source_revision == video.annotation_revision`）
+对应 Clip 的相对路径；**Clip 缺失或非 ready（pending/processing/failed）时为 null**，
+不校验实体文件是否存在。
+
+**分页与排序**：默认 `page_size=20`、上限 100（`page<1` 或 `page_size>100` → 422）；
+排序 `start_time ASC, id ASC` 保证稳定分页。响应 `{items, total, pages}`。
+
+**筛选**：`category_id` / `video_id` / `annotator_id` 精确过滤；`search` 按
+类别名或视频文件名大小写不敏感模糊匹配（`%kw%`）。
+
+**实现要点**：
+- COUNT 与分页先用**轻量 id 查询**（只 join Video/类别做过滤），随后再一条 join
+  取关联列（Video/类别/标注者/当前修订 Clip 一次到位）——**无 N+1**，也不加载
+  `crop_region` 等重列。
+- 仅项目成员可访问（与其余只读接口一致，不校验 membership.active）。
+- **不批量加载视频流**：本接口只返回元数据与相对路径，客户端自行按需请求单条 blob
+  （如经 `GET /api/videos/{video_id}/stream` 或后续的 clip 文件接口）。
+
+### 批次 6：项目分类 ZIP 导出
+
+项目导出只包含「标注 `review_status=approved` 且视频当前 `workflow_status=approved`」的
+当前修订片段。接口均要求项目 `owner/admin`；任务详情沿用通用 job 路由，但 export 类型
+同样执行该角色限制。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/projects/{project_id}/export` | 新建导出任务，可选 `category_ids`；同项目 queued/running 时 409 |
+| `GET` | `/api/projects/{project_id}/export/status` | 最近任务及 `exportable_count/ready_count/missing_count/missing_clips` |
+| `GET` | `/api/projects/{project_id}/jobs/{job_id}` | 项目隔离的任务详情；export 仅 owner/admin |
+| `GET` | `/api/projects/{project_id}/export/download` | 下载最近成功、未过期且实体路径安全的 ZIP |
+
+**任务与文件语义**：
+- 每次导出新建一条 `BackgroundJob(job_type=export)` 和唯一 dedupe key，保留历史任务、结果与
+  过期时间；项目 active 导出通过 queued/running 查询排他。
+- 状态统计以最近任务的类别范围为准；ready 必须同时满足当前修订、`Clip.status=ready`、
+  `clip_path` 位于 `DATA_DIR/clips` 内且实体文件存在，否则列入 missing。
+- worker 对 missing Clip 复用注入的 `MediaProcessor` 同步补生成；任一片段失败则任务失败，
+  不发布新 ZIP。成功包按 `{group}/{category}/{安全文件名}.mp4` 组织，根目录包含
+  `annotations.json`。
+- ZIP 先在 `DATA_DIR/exports` 生成任务专属临时 archive，再原子替换为
+  `export_project_{project_id}_{job_id}.zip`；每次结果文件唯一。下载同时校验成功状态、
+  `EXPORT_RETENTION_DAYS`（默认 7 天）、路径边界和实体存在性。
+
+### 批次 7：生命周期清理
+
+应用启动时立即清理一次，此后由单线程周期 worker 执行；每次真实运行写入一条
+`BackgroundJob(job_type=cleanup)` 成功或失败记录，并以进程内非阻塞锁防止重叠。该 worker 与
+媒体/导出 executor 一样只支持当前**单应用进程**部署，不可让多个进程共享任务库和数据目录。
+原视频永不自动删除；有效 DB 引用的 Clip/缩略图长期保留；导出 ZIP 仅在对应 export job
+到期（`expires_at <= now`）后删除。程序已知的 `.part`、export staging/tmp 及无有效未过期
+export job 引用的程序命名孤儿 ZIP 保留 24h，无结果路径的 terminal job 保留 30d。
+`DATA_DIR` 是可由管理员配置并解析的可信 anchor，但 `videos/clips/thumbnails/exports` 子根及其
+anchor 后的任何组件只要是 symlink，该 lane 就整体拒绝；删除前还会复核实体类型和 lstat 身份。
+
+过期 ZIP 使用 file-first、逐 job 短事务：文件删除后立即清空该 job 的 `result_path` 并提交；若
+提交失败，DB 引用与审计记录仍保留，下轮会把“文件已不存在”视为可自愈并再次清空引用。
+terminal 非 export、失败 export、非法/越界结果路径不会永久保护 ZIP：先安全清空脏引用，满
+30 天后再删除任务。清理异常 JSONL 只是审计与重试线索，不能授权删除；补偿删除只接受正式
+`clip_{annotation_id}_rev{revision}.mp4/.jpg`，并再次校验可信根、Clip 无引用及当前视频修订。
+
+手工检查或执行同一套规则：
+
+```bash
+.venv\Scripts\python scripts\cleanup_retention.py --dry-run
+.venv\Scripts\python scripts\cleanup_retention.py
+```
+
+`--dry-run` 对 ZIP、临时文件、`result_path`、异常日志和后台任务均为零副作用；脚本仍会先运行
+`ensure_schema`，因此数据库迁移/建表不属于 dry-run 保证范围。
 
 ### 标注
 
@@ -402,6 +499,12 @@ Clip 行与实体文件删除、仅影响本视频 Clip、Review 历史保留、
 pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状态门、media-status 与 job 查询
 成员权限、进度与部分失败保留成功片段、重试只处理 failed、重启恢复 running 重排/判失败、
 修订失效竞态取消且不复活 Clip、文件原子性与半成品清理、输入源路径安全、实际 DB 迁移 0004），
+批次 5 片段库（仅审核通过且视频 approved 才入库、pending/rejected 与失效残留隔离、
+非 ready Clip 路径为 null、ready 路径与批次 4 产物一致、分页默认 20/上限 100/稳定排序、
+category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类别统计、成员权限、
+ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
+排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
+missing 自动补生成与失败不发布、真实 ZIP/annotations、下载过期/越界/缺文件、重跑保留历史），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
 0002 与 0003 已版本化库到 0004 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -418,4 +521,5 @@ dedupe_key 唯一约束防重复任务）。
 - 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
-- `cleanup-issues.log` 补偿清理任务（孤儿文件清理）留待批次 7；类别停用/删除管理界面留待后续批次。
+- 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；
+  类别停用/删除管理界面留待后续批次。

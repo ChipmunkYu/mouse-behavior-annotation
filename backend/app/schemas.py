@@ -194,3 +194,63 @@ class MediaStatusOut(BaseModel):
     failed: int
     pending: int
     latest_job: Optional[JobOut] = None
+
+
+# ---------- 跨视频片段库（批次 5） ----------
+class ClipItem(BaseModel):
+    """库中的一条审核通过标注，含对应 ready Clip 的相对路径（非 ready 为 null）。"""
+
+    annotation_id: int
+    video_id: int
+    video_filename: str
+    category_id: int
+    category_name: str
+    start_time: float
+    end_time: float
+    start_frame: int
+    end_frame: int
+    confidence: str
+    clip_path: Optional[str] = None
+    thumbnail_path: Optional[str] = None
+    annotator_name: str
+    review_status: str
+    created_at: datetime
+
+
+class ClipPageOut(BaseModel):
+    items: list[ClipItem]
+    total: int
+    pages: int
+
+
+class ClipCategoryCount(BaseModel):
+    """分类筛选 chip：类别 + 审核通过片段计数。"""
+
+    category_id: int
+    category_name: str
+    count: int
+
+
+# ---------- 全项目分类导出（批次 6） ----------
+class ExportRequest(BaseModel):
+    """导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。"""
+
+    category_ids: Optional[list[int]] = None
+
+
+class MissingClipOut(BaseModel):
+    """状态接口中缺失（未 ready）片段的标注信息。"""
+
+    annotation_id: int
+    category_name: str
+    video_filename: str
+
+
+class ExportStatusOut(BaseModel):
+    """导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。"""
+
+    latest_job: Optional[JobOut] = None
+    exportable_count: int
+    ready_count: int
+    missing_count: int
+    missing_clips: list[MissingClipOut]

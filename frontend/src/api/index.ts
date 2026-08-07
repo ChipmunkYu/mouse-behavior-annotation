@@ -7,7 +7,12 @@ import type {
   AnnotationCreateInput,
   AnnotationPatchInput,
   Category,
+  ClipCategoryCount,
+  ClipListParams,
+  ClipListResponse,
   ExportEvent,
+  ExportRequestInput,
+  ExportStatus,
   Job,
   LoginResponse,
   MediaStatus,
@@ -218,4 +223,124 @@ export function getJob(projectId: number | string, jobId: number | string): Prom
   return apiFetch<Job>(`/projects/${projectId}/jobs/${jobId}`);
 }
 
+// ---------- 片段库（批次 5） ----------
+
+/**
+ * 片段列表（分页 + 类别/视频筛选 + 关键词搜索）：
+ * GET /api/projects/:pid/clips?category_id=&video_id=&search=&page=&page_size= -> ClipListResponse。
+ * 仅发送已声明的查询参数，过滤参数与分页全部类型化（ClipListParams）。
+ * 注：片段库只含审核通过（review_status=approved）的标注；search 由服务端匹配类别名/视频文件名。
+ */
+export function listClips(projectId: number | string, params: ClipListParams): Promise<ClipListResponse> {
+  const qs = new URLSearchParams();
+  if (params.category_id != null) qs.set("category_id", String(params.category_id));
+  if (params.video_id != null) qs.set("video_id", String(params.video_id));
+  if (params.search && params.search.trim().length > 0) qs.set("search", params.search.trim());
+  qs.set("page", String(params.page));
+  qs.set("page_size", String(params.page_size));
+  return apiFetch<ClipListResponse>(`/projects/${projectId}/clips?${qs.toString()}`);
+}
+
+/** 片段类别计数：GET /api/projects/:pid/clips/categories -> ClipCategoryCount[]。 */
+export function listClipCategories(projectId: number | string): Promise<ClipCategoryCount[]> {
+  return apiFetch<ClipCategoryCount[]>(`/projects/${projectId}/clips/categories`);
+}
+
+/**
+ * 片段缩略图（批次 5）：thumbnail_path 为 thumbnails_dir 内相对文件名，
+ * 经 /thumbnails/{name} 以 Bearer 拉取 blob 并生成 object URL（普通 <img> 无法携带
+ * 认证请求头，与视频流同理）。缩略图路由尚不存在或拉取失败时返回 null，
+ * 由调用方回退到 SVG 占位图——绝不用损坏的图片打断界面。
+ */
+export async function fetchClipThumbnailUrl(thumbnailPath: string): Promise<string | null> {
+  try {
+    const res = await apiRaw(`/thumbnails/${encodeURIComponent(thumbnailPath)}`);
+    if (res.status === 401) {
+      handleUnauthorized();
+      return null;
+    }
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (blob.size === 0) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
 export type { User };
+
+// ---------- 导出（批次 6） ----------
+
+/**
+ * 发起导出任务：POST /api/projects/:pid/export -> Job。
+ * body 传 ExportRequestInput（category_ids 为空 / 缺省 = 导出全部类别）。
+ * 409 表示上一个导出仍在进行中，由调用方提示「上一个导出仍在进行中」。
+ */
+export function createExport(
+  projectId: number | string,
+  input: ExportRequestInput
+): Promise<Job> {
+  return apiFetch<Job>(`/projects/${projectId}/export`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/**
+ * 导出状态汇总：GET /api/projects/:pid/export/status -> ExportStatus。
+ * 含最近任务（latest_job）与可导出 / 就绪 / 缺失计数，导出中按任务状态轮询本接口。
+ */
+export function getExportStatus(projectId: number | string): Promise<ExportStatus> {
+  return apiFetch<ExportStatus>(`/projects/${projectId}/export/status`);
+}
+
+/** 从 Content-Disposition 解析文件名（优先 RFC 5987 filename*，其次 filename=）。 */
+function parseContentDisposition(value: string | null): string | null {
+  if (!value) return null;
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(value);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      // 解码失败回退到普通 filename
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(value);
+  return plain ? plain[1] : null;
+}
+
+/**
+ * 导出包下载：GET /api/projects/:pid/export/download -> blob ZIP。
+ * ZIP 需要 Bearer 认证，与视频流同理用带 token 的请求拉取 blob 并生成 object URL；
+ * 文件名以后端 Content-Disposition 为准，缺失时回退到默认名（供下载提示）。
+ */
+export async function fetchExportDownload(
+  projectId: number | string
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await apiRaw(`/projects/${projectId}/export/download`);
+  if (res.status === 401) {
+    // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面停留
+    handleUnauthorized();
+    throw new ApiError(401, "登录已过期，请重新登录");
+  }
+  if (!res.ok) {
+    let detail = `导出包下载失败（HTTP ${res.status}）`;
+    try {
+      const data: unknown = await res.json();
+      const d = data && typeof data === "object" ? (data as { detail?: unknown }).detail : null;
+      if (typeof d === "string" && d.length > 0) detail = d;
+    } catch {
+      // 响应体不是 JSON，保留默认错误信息
+    }
+    throw new ApiError(res.status, detail);
+  }
+  const blob = await res.blob();
+  if (blob.size === 0) {
+    throw new ApiError(404, "导出包文件为空或已过期，请重新发起导出");
+  }
+  const filename =
+    parseContentDisposition(res.headers.get("Content-Disposition")) ??
+    `project-${projectId}-export.zip`;
+  return { blob, filename };
+}
