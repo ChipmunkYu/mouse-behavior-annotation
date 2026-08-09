@@ -30,7 +30,8 @@ backend/
 │ ├── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
 │ ├── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
 │ ├── 0005_detection_import_foundation.py # YOLO 导入、修正后 track、IdentityEdit/抑制及多修订模型
-│ └── 0006_detection_import_batch_paths.py # 三文件批次及导入文件路径
+│ ├── 0006_detection_import_batch_paths.py # 三文件批次及导入文件路径
+│ └── 0007_detection_import_source_relative.py # DetectionImport.source_relative 前向迁移
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -83,7 +84,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0006），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0007），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -112,9 +113,9 @@ baseline（0001）再升级到 head（0006），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键，0005～0007 增加检测导入、track 修正及批次路径兼容）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0005 已版本化库 → 增量 `upgrade head` 到 0006，既有数据按迁移规则保留。
+- 0002～0006 已版本化库 → 增量 `upgrade head` 到 0007，既有数据按迁移规则保留。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -244,10 +245,13 @@ baseline（0001）再升级到 head（0006），**不删除任何已有数据**�
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询可审计 track 修正历史 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 撤销 track 修正并生成新修订 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 整轨检测抑制：忽略整个 track；提交时冻结当前未抑制 detection 集合，原始检测保持不可变 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 仅列当前 active import 中尚未撤销的 suppression；页面刷新后可恢复整轨撤销入口 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 撤销检测抑制 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | 导出 `tracks.corrected.jsonl` 与 manifest |
 
-`metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。原始 YOLO 文件与 RawDetection 保持不可变。
+`metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。`source_relative` 按 basename 与视频文件名匹配。新视频成功导入时同步 FPS、宽、高和 `duration=frame_count/fps`；已有视频替换时校验 source basename、FPS、宽、高和当前导入 `frame_count`。预览及失败均清理候选文件，只有 `confirm=true` 成功才保留。原始 YOLO 文件与 RawDetection 保持不可变。
+
+Split、Merge、对应撤销、整轨 suppression 及其撤销都会重校验视频内全部 Annotation：有效项推进 detection import/track 修正修订，无效项进入 `needs_mouse_ids`。仅实际受影响且原为 `approved` 的单条标注改为 `pending`；视频仅在 `submitted/approved` 时退回 `draft`。整轨 suppression 的 active 列表可跨刷新恢复；旧 import suppression 撤销返回 409。Split/Merge 撤销仍限当前页面会话，统一按时间撤销仍未实现。当前只创建整轨 `corrected_track` scope，历史 `scope=detection` 仅兼容。
 
 ### 真实视频上传（批次 2）
 
@@ -438,7 +442,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 |---|---|---|
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/annotations` | 视频标注列表 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/annotations` | 新建标注（标注者须为项目成员） |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/annotations/export` | 统一事件 JSON 列表 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/annotations/export` | 完整 ExportEvent JSON 列表；含 `annotation_id`、`mouse_ids`、修订和 `clip_file`（可为 null） |
 | `PATCH` | `/api/projects/{project_id}/videos/{video_id}/annotations/{annotation_id}` | 更新标注（标注者本人或 owner/admin） |
 | `DELETE` | `/api/projects/{project_id}/videos/{video_id}/annotations/{annotation_id}` | 删除标注（同上权限） |
 
@@ -492,20 +496,21 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 
 ## 导出格式
 
-`GET .../annotations/export` 返回独立的行为事件 JSON 列表，字段符合 `../需求文档.md` §2.3。该独立 API 不要求 `clip_file`；项目 ZIP 根目录的 `annotations.json` 是另一份集中索引契约，其中每条行为事件必须包含 `clip_file` 并与 `clips/<group>/<category>/...` 下一个实际 MP4 一一对应：
+`GET .../annotations/export` 返回完整 ExportEvent 列表，字段符合 `../需求文档.md` §2.3；其中 `clip_file` 在没有 ready Clip 时可为 `null`。项目 ZIP 根目录的 `annotations.json` 使用同一事件字段，但每条行为事件的 `clip_file` 必须是安全非空路径，并与 `clips/<group>/<category>/...` 下一个实际 MP4 一一对应：
 
 ```json
 {
- "annotation_id": 123,
+  "annotation_id": 123,
   "video_id": "video_1",
   "start_time": 12.4,
   "end_time": 14.84,
   "start_frame": 310,
   "end_frame": 371,
   "behavior": "攻击行为",
- "mouse_ids": [8, 20],
- "detection_import_revision": 1,
- "identity_revision": 7,
+  "mouse_ids": [8, 20],
+  "detection_import_revision": 1,
+  "identity_revision": 7,
+  "clip_file": null,
   "crop_region": null,
   "confidence": "certain",
   "annotator": "demo",
@@ -522,10 +527,10 @@ cd backend
 pytest -q
 ```
 
-当前全量结果：`283 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过；本地 `/api/health` 与前端页面均返回 HTTP 200。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
+当前全量结果：`298 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
-三文件导入批次/替换与真实 metadata 别名、逐帧查询、`mouse_ids` 数量与覆盖校验、Split/Merge、抑制/撤销、并发修订冲突、三类审核修订失效、修正后 track 结果和 `clip_file` ZIP 完整性，
+三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、完整单视频 ExportEvent 和 `clip_file` ZIP 完整性，
 视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
 写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
 批次 3 提交与审核（提交角色/状态门/至少一条标注/标注审核字段重置、队列角色与 submitted 过滤、
@@ -544,7 +549,7 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、真实 ZIP/annotations、下载过期/越界/缺文件、重跑保留历史），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-0002～0005 已版本化库到 0006 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
+0002～0006 已版本化库到 0007 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
 被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束 /
 dedupe_key 唯一约束防重复任务）。

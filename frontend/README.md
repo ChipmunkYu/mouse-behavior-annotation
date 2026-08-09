@@ -17,22 +17,23 @@
     - 状态：待上传 → 上传中（进度条）→ 成功 / 失败 / 已取消；成功后自动刷新视频列表并可进入标注。
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
-  - 搜索 + 状态筛选；列表卡片显示时长 / 帧率 / 分辨率 / 状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
+  - 搜索 + 视频工作流状态筛选；筛选字段严格为 `workflow_status`，不是媒体 `status` 或单条 `Annotation.review_status`。列表卡片显示时长 / 帧率 / 分辨率 / 媒体状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
   - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
   - **审核入口**：owner / admin / reviewer 角色显示「✓ 审核工作台」入口（角色来自 `listProjects`）。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
   - OverlayLayer 按当前帧显示 YOLO 检测框与修正后 track ID，并可切换关键点和骨架；叠加坐标随播放器缩放映射。
-  - 点击检测框或 track ID 列表选择参与对象，按对象数量范围保存到行为标注 `mouse_ids`；track 修正模式支持 Split、Merge、“忽略整个 track”、撤销和历史查看。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变。
+  - 点击检测框或 track ID 列表选择参与对象，按对象数量范围保存到行为标注 `mouse_ids`；没有 detection import 时仍可创建 `needs_mouse_ids` 草稿，前端省略 `mouse_ids` 和检测结果导入/track 修正修订，导入后补选，补齐前不能提交审核或进入正式导出。
+  - track 修正模式支持 Split、Merge 和“忽略整个 track”。整轨 suppression 通过 `GET .../detection-suppressions` 加载当前 active import 未撤销项，刷新后仍可撤销；旧 import 项不展示且撤销返回 409。Split/Merge 撤销仍限当前页面会话；跨三类操作按时间统一撤销尚未实现。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变；当前不提供单框创建能力，历史 `scope=detection` 仅兼容。
   - 行为类别按 `group` 动态分组展示（绝不硬编码类别），类别颜色仅用于区分。
   - 选择类别后按 **S** / 按钮设起点，**D** / 按钮设终点并 POST 保存。
   - **Space** 播放/暂停，**←/→** 步进一帧（输入框聚焦时不触发）。
   - 时间轴按 duration 显示彩色标注区间，点击 / 键盘可跳转。
   - 行为标注列表支持 PATCH 类别/时间、DELETE 删除。
-  - 导出 GET `.../annotations/export` 并下载统一事件 JSON。
+  - 导出 GET `.../annotations/export` 并下载完整 ExportEvent JSON，包含 `annotation_id`、`mouse_ids`、检测结果导入/track 修正修订和 `clip_file`；没有 ready Clip 时 `clip_file` 为 `null`。
   - 保存中 / 已保存 / 失败状态提示。
-  - **批次 3 审核工作流**：顶部清晰显示视频工作流状态与行为标注版本（草稿 / 待审核 / 已通过 / 已退回，即 `draft/submitted/approved/rejected`，以及提交/通过时间）；`draft/rejected` 可「提交审核」（至少一条标注，有确认），`submitted` 显示「等待审核」，`approved` 显示「已通过」。单条行为标注的 `review_status` 是独立的 `pending/approved/rejected`，不得与视频工作流混用。对非草稿视频执行新增 / 编辑 / 删除行为标注前有明确确认（将退回草稿、审核结果失效、已有视频片段失效并清理），成功后刷新视频工作流状态。
+  - **批次 3 审核工作流**：顶部清晰显示视频工作流状态与行为标注版本（草稿 / 待审核 / 已通过 / 已退回，即 `draft/submitted/approved/rejected`，以及提交/通过时间）；`draft/rejected` 可「提交审核」（至少一条标注、有 detection import、无 `needs_mouse_ids`，有确认），`submitted` 显示「等待审核」，`approved` 显示「已通过」。单条行为标注的 `review_status` 是独立的 `pending/approved/rejected`，不得与视频工作流混用。标注 CRUD 的非草稿失效与 track 修正的细粒度失效范围不同：track 修正后全部 Annotation 被重校验，有效项推进修订，无效项 `needs_mouse_ids`；仅实际受影响的 approved 单条标注改 pending，视频仅在 submitted/approved 时退回 draft，不声称全部审核状态重置。
   - **批次 4 媒体状态**：approved 视频在侧栏只读展示「媒体片段生成」面板（总数/就绪/处理中/待处理/失败、aria 进度条、最近任务状态；无生成 / 重试按钮），仅在任务进行中轮询，任务落定或离开页面即停止。
 - **审核工作台** `/projects/:projectId/review`：
   - 待审队列（仅元数据，避免一次加载全部视频的标注与流）；选中后按需加载标注 / 类别 / 审核历史 / 视频流。
@@ -52,7 +53,7 @@
 - **导出** `/projects/:projectId/export`（**批次 6**，owner / admin 可见）：
   - **统计摘要**：可导出总数（审核通过行为标注）/ 就绪视频片段 / 缺失视频片段 + 就绪进度条（aria progressbar）；缺失明细显示类别、视频文件名和标注 ID。导出页面本身只创建并监控后台任务，不同步调用 ffmpeg；项目导出 worker 会在打包前尝试补生成缺失的已通过视频片段，任一补生成失败则不发布 ZIP。
   - **导出范围**：按类别多选 chips（复用 `GET .../clips/categories` 计数 + `GET .../categories` 取色；「全部」= 不传 `category_ids`）；「开始导出 ZIP」按钮仅 owner / admin 可见，非导出角色显示角色提示。
-  - **导出内容预览**：待生成目录结构树（集中 `annotations.json`、`clips/<group>/<category>/...`、修正后 track 结果/manifest）及字段摘要；ZIP 行为事件展示 `mouse_ids`、三类审核修订和必填 `clip_file`，明确其为待生成预览，不声称 ffmpeg 已执行。
+  - **导出内容预览**：待生成目录结构树（集中 `annotations.json`、`clips/<group>/<category>/...`、修正后 track 结果/manifest）及字段摘要；ZIP 行为事件展示 `annotation_id`、`mouse_ids`、三类审核修订和安全非空的必填 `clip_file`。修正后 track 结果保留 `0..frame_count-1` 全部帧，空帧为 `detection_count=0`、`detections=[]`，可重新导入。预览不声称 ffmpeg 已执行。
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。

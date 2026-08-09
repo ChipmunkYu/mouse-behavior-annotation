@@ -1,19 +1,22 @@
 # 数据标注网站（标注网站/）
 
-多小鼠社会行为在线标注网站，替代 BORIS 桌面单机方案，为行为识别阶段提供多人在线协作标注能力。当前 `feature/backend-expansion` 为**生产扩展分支**：已形成从真实视频上传、标注提交与审核、精确片段生成、跨视频片段库到分类导出和生命周期清理的后端闭环；尚未部署，也未完成真实 ffmpeg 媒体和浏览器人工验收。
+多小鼠社会行为在线标注网站，替代 BORIS 桌面单机方案，为行为识别阶段提供多人在线协作标注能力。当前 `feature/spatial-annotation` 已在生产扩展闭环上完成检测结果导入、叠加、参与对象标注、track 修正、三类修订审核与修正后 track 结果/项目 ZIP 导出；尚待真实视频端到端人工验收、生产部署及合并到 `main`。
 
 > 对应工作项：WI-20260805-22 ｜ 需求与边界：`需求文档.md`
+>
+> 当前项目的权威术语与写作规则见 `项目术语表.md`；其他文档与其冲突时以术语表为准。
 
 ## 目录
 
 ```
 标注网站/
-├── backend/          # FastAPI + SQLite 后端（含 tests/、scripts/seed_demo.py）
-├── frontend/         # React + TypeScript + Vite 前端
-├── 参考文档/          # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
-├── 需求文档.md        # 需求文档（v0.5）
-├── README.md         # 本文件
-└── boris-9.13.0-win64-setup.exe   # BORIS 桌面版安装包（参考用）
+├── backend/ # FastAPI + SQLite 后端（含 tests/、scripts/seed_demo.py）
+├── frontend/ # React + TypeScript + Vite 前端
+├── 参考文档/ # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
+├── 需求文档.md # 需求文档（v0.6）
+├── 项目术语表.md # 当前项目权威术语基线
+├── README.md # 本文件
+└── boris-9.13.0-win64-setup.exe # BORIS 桌面版安装包（参考用）
 ```
 
 > `backend/data/`（数据库、演示视频、导出片段）为 gitignored 运行时数据，不作为资产登记。
@@ -100,13 +103,13 @@ cd /d D:\lab\行为识别\标注网站\backend
 ```bat
 cd /d D:\lab\行为识别\标注网站\backend
 .venv\Scripts\activate
-pytest -q            :: 当前 190 passed, 3 skipped
+pytest -q :: 当前 298 passed, 3 skipped, 1 warning
 
 cd /d D:\lab\行为识别\标注网站\frontend
-npm run build        :: 生产构建验证
+npm run build :: 生产构建验证
 ```
 
-当前验证结果：后端 `190 passed, 3 skipped`；3 项跳过均因 Windows 当前账户无 symlink 创建权限，相关静态安全 Gate 已复核通过。前端 `npm run build` 通过。
+当前验证结果：后端全量 `298 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
 
 ## 生命周期清理
 
@@ -122,16 +125,17 @@ cd /d D:\lab\行为识别\标注网站\backend
 
 ## 当前能力与边界
 
-**已实现**：登录与项目角色；北医 12 类初始化；真实视频分块流式上传；视频流与区间标注；提交、审核队列、裁决和修订失效；仅审核通过视频的 H.264 MP4 精确片段与 JPG 缩略图任务；跨视频片段库及筛选统计；按类别导出 ZIP 与 `annotations.json`；过期导出、临时文件、任务日志和清理异常的保留清理。P1 Mock 视频元数据接口和统一事件 JSON 导出仍保留。
+**已实现**：登录与项目角色、12 类初始化、行为标注、审核、视频片段与缩略图、片段库、分类 ZIP 和生命周期清理；原始视频/`tracks.jsonl`/`metadata.json` 三文件导入批次与替换、框/track ID/关键点/骨架叠加、参与对象 `mouse_ids`、Split、Merge、检测抑制与撤销、三类修订审核、修正后 track 结果 `tracks.corrected.jsonl`，以及 `clip_file` 集中 ZIP 索引均已实现。单视频事件 API 返回完整事件字段（`clip_file` 可为 `null`），ZIP 中 `clip_file` 必须是安全非空路径；修正后 track 结果保留全部帧，空帧写为 `detection_count=0`、`detections=[]`，可重新导入。原始检测始终不可变。
 
-**本地 / 生产边界**：当前仍是未部署分支，不声称完成真实 ffmpeg 编码、浏览器人工流程或生产部署验收。生产使用前须配置强密钥、账号、CORS、持久化 `DATA_DIR`、数据库备份和 ffmpeg/ffprobe，并以真实媒体走完整上传、审核、生成、导出和清理验收。类别管理界面及 YOLO / 画框不在本分支范围。
+**本地 / 生产边界**：当前仍是未部署、未合并分支，不声称完成真实 ffmpeg 编码、真实长视频浏览器流程或生产部署验收。正式输入应使用原始 `社交-攻击1.mov`；已上传的 `社交-攻击1_all_ids.mp4` 是烧录调试视频。生产使用前还须完成完整人工流程并配置强密钥、账号、CORS、持久化 `DATA_DIR`、数据库备份和 ffmpeg/ffprobe。
 
 **进程边界**：媒体、导出与周期清理共用当前应用内的单进程 executor/worker 设计，不得直接让多个应用进程共享同一任务库和数据目录。多进程部署前除显式执行数据库迁移外，还必须为任务领取增加持久化 lease/owner、heartbeat 与过期回收机制。
 
-`demo/frontend-showcase` 是独立录屏分支，不再维护。空间标注在 `feature/spatial-annotation`（基线 `1739d0a`）另行继续，已有 YOLO 样例不属于本次后端扩展交付。
+`demo/frontend-showcase` 是独立录屏分支，不再维护。当前交付位于 `feature/spatial-annotation`，待人工验收后再决定提交、推送与合并。
 
 ## 详见
 
 - 后端启动、配置、API 一览与测试：`backend/README.md`
 - 前端功能与技术要点：`frontend/README.md`
 - 需求、数据模型与 P1/P2 边界：`需求文档.md`
+- 权威术语、状态与修订定义：`项目术语表.md`
