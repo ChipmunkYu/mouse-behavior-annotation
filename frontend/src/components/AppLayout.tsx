@@ -59,7 +59,7 @@ export default function AppLayout() {
 
   const routeLabel = (): string => {
     const p = location.pathname;
-    if (p.includes("/annotate/")) return "标注工作台";
+    if (p.includes("/annotate/")) return "行为标注工作台";
     if (p.includes("/review")) return "审核工作台";
     if (p.includes("/export")) return "导出";
     if (p.includes("/clips")) return "片段库";

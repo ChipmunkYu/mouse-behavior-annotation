@@ -53,7 +53,7 @@ export default function LoginPage() {
         <div className="card-body">
           <div className="login-brand">
             <h1>行为标注平台</h1>
-            <p>多小鼠社会行为事件标注 · 登录</p>
+            <p>多目标行为事件标注 · 登录</p>
           </div>
 
           <div className="demo-hint">

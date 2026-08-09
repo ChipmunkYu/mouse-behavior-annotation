@@ -1,11 +1,11 @@
 /**
  * 导出工作台 /projects/:projectId/export（批次 6）：
  * - 统计摘要：可导出总数 / 就绪数 / 缺失数 + aria 进度条；缺失片段明细列表
- *   （缺失 = 剪辑文件未生成，仅提示去审核工作台生成，本页不补生成、不调用 ffmpeg）
+ *   （缺失 = 视频片段尚未生成；导出任务的后台 worker 可在打包前补生成）
  * - 导出范围：按类别多选 chips（复用片段库 categories 计数接口 + 类别 API 取色），
  *   全部 = 不传 category_ids；「开始导出 ZIP」按钮仅 owner / admin 可见
- * - 导出内容预览：待生成目录结构树 + annotations.json 字段摘要；明确标注为
- *   「待生成预览」，绝不声称 ffmpeg 已执行，缺失片段不会自动补齐
+ * - 导出内容预览：目标目录结构树 + annotations.json 字段摘要；本页只发起并监控
+ *   后台导出任务，不在浏览器请求内同步调用 ffmpeg
  * - 导出任务：发起后轮询 export/status 直至任务落定（与媒体面板同规则，4s 一次），
  *   处理中显示 Job 进度 / 状态；成功提供下载入口 + 7 天保留提醒；409 冲突提示
  *   「上一个导出仍在进行中」
@@ -66,10 +66,10 @@ function SummaryCard({
   let tone = "muted";
   if (exportable_count > 0) {
     if (missing_count === 0) {
-      headline = "全部片段已就绪，可导出完整包";
+      headline = "全部视频片段已就绪，可导出完整包";
       tone = "ok";
     } else {
-      headline = `部分片段缺失（${missing_count}），导出包将不包含缺失片段`;
+      headline = `部分视频片段待生成（${missing_count}），导出任务将在后台尝试补齐`;
       tone = "warn";
     }
   }
@@ -79,15 +79,15 @@ function SummaryCard({
       <div className="export-stats">
         <div className="export-stat total">
           <span className="export-stat-num mono">{exportable_count}</span>
-          <span className="export-stat-label">可导出总数（审核通过标注）</span>
+          <span className="export-stat-label">可导出总数（审核通过的行为标注）</span>
         </div>
         <div className="export-stat ok">
           <span className="export-stat-num mono">{ready_count}</span>
-          <span className="export-stat-label">就绪片段（可打包）</span>
+          <span className="export-stat-label">就绪视频片段（可打包）</span>
         </div>
         <div className={missing_count > 0 ? "export-stat danger" : "export-stat"}>
           <span className="export-stat-num mono">{missing_count}</span>
-          <span className="export-stat-label">缺失片段（待生成）</span>
+          <span className="export-stat-label">缺失视频片段（待生成）</span>
         </div>
       </div>
 
@@ -108,13 +108,13 @@ function SummaryCard({
       </div>
       <div className="media-meta" style={{ marginTop: 6 }}>
         <span className="mono">{percent}% 就绪</span>
-        <span>就绪片段占可导出标注的比例</span>
+        <span>就绪视频片段占可导出行为标注的比例</span>
       </div>
 
       {missing_count > 0 && missing_clips.length > 0 ? (
         <div className="export-missing">
-          <div className="export-missing-head">缺失片段（{missing_count}）</div>
-          <div className="export-missing-list" aria-label="缺失片段列表">
+          <div className="export-missing-head">缺失视频片段（{missing_count}）</div>
+          <div className="export-missing-list" aria-label="缺失视频片段列表">
             {missing_clips.map((m) => (
               <div key={m.annotation_id} className="export-missing-row">
                 <span
@@ -127,13 +127,13 @@ function SummaryCard({
                 <span className="video" title={m.video_filename}>
                   {m.video_filename}
                 </span>
-                <span className="aid mono">标注 #{m.annotation_id}</span>
+                <span className="aid mono">行为标注 #{m.annotation_id}</span>
               </div>
             ))}
           </div>
           <div className="export-missing-hint">
-            这些片段的剪辑文件尚未生成。本页面不会自动补生成（也不调用 ffmpeg）：请先在
-            「审核工作台」对对应视频完成片段生成，再重新发起导出。
+            这些视频片段尚未生成。发起导出后，后台任务会尝试补齐缺失的审核通过视频片段；
+            本页面只创建并监控任务，不会同步调用 ffmpeg。
           </div>
         </div>
       ) : null}
@@ -173,7 +173,7 @@ function ScopeCard({
   const scopeLabel =
     selected.length === 0
       ? "全部类别"
-      : `已选 ${selected.length} 个类别（覆盖 ${selectedCount} 条标注）`;
+      : `已选 ${selected.length} 个类别（覆盖 ${selectedCount} 条行为标注）`;
 
   return (
     <Card
@@ -188,7 +188,7 @@ function ScopeCard({
           aria-pressed={selected.length === 0}
           title="导出全部类别"
         >
-          全部
+          全部类别
         </button>
         {counts.map((cc) => {
           const active = selected.includes(cc.category_id);
@@ -199,7 +199,7 @@ function ScopeCard({
               className={active ? "chip active" : "chip"}
               onClick={() => onToggle(cc.category_id)}
               aria-pressed={active}
-              title={`${cc.category_name}：${cc.count} 条审核通过标注，点击切换是否导出`}
+              title={`${cc.category_name}：${cc.count} 条审核通过的行为标注，点击切换是否导出`}
             >
               <span
                 className="swatch"
@@ -219,14 +219,14 @@ function ScopeCard({
             className="btn btn-primary"
             disabled={exporting || busy}
             onClick={onExport}
-            title={busy ? "已有导出任务进行中，请等待完成" : "打包所选类别的就绪片段与 annotations.json"}
+            title={busy ? "已有导出任务进行中，请等待完成" : "在后台补齐并打包所选类别的审核通过视频片段与 annotations.json"}
           >
             {exporting ? "发起中…" : busy ? "导出进行中…" : "开始导出 ZIP"}
           </button>
         ) : (
           <span className="export-role-note">
-            仅项目 owner / admin 可发起导出；你当前角色为「
-            {project ? (ROLE_LABELS[project.role] ?? project.role) : "—"}」。
+            仅项目所有者和管理员可发起导出；你当前角色为「
+            {project ? (ROLE_LABELS[project.role] ?? "未知角色") : "—"}」。
           </span>
         )}
         {busy ? (
@@ -247,14 +247,19 @@ function ScopeCard({
 
 /** annotations.json 字段摘要（与标注工作台单视频统一事件 JSON 格式一致）。 */
 const ANNOTATIONS_JSON_FIELDS: Array<{ key: string; desc: string }> = [
+  { key: "annotation_id", desc: "行为事件唯一 ID" },
   { key: "video_id", desc: "源视频 ID" },
-  { key: "video_filename", desc: "源视频文件名" },
-  { key: "category_id / category_name", desc: "行为类别 ID 与名称" },
+  { key: "clip_file", desc: "对应视频片段在 ZIP 内的相对路径（必填）" },
+  { key: "behavior", desc: "行为类别名称" },
+  { key: "mouse_ids", desc: "参与对象对应的 track ID 数组" },
   { key: "start_time / end_time", desc: "起止时间（秒）" },
   { key: "start_frame / end_frame", desc: "起止帧号" },
   { key: "confidence", desc: "可信度" },
   { key: "review_status", desc: "标注审核状态（approved）" },
   { key: "annotator", desc: "标注者用户名" },
+  { key: "reviewer", desc: "审核者用户名" },
+  { key: "detection_import_revision", desc: "检测导入版本快照" },
+  { key: "identity_revision", desc: "track 修正版本快照" },
   { key: "crop_region", desc: "空间标注区域（若有）" },
 ];
 
@@ -274,13 +279,14 @@ function PreviewCard({
 
   const treeLines = [
     `${rootName}/`,
-    `├── annotations.json             # ${exportable} 条审核通过标注元数据`,
-    `├── clips/                       # 就绪片段按视频分目录`,
-    `│   ├── {视频文件名}/`,
-    `│   │   ├── {annotation_id}_{start}-{end}.mp4`,
-    `│   │   └── …  共 ${ready} 个就绪片段`,
-    `│   └── …`,
-    `└── README.txt                   # 导出说明与统计`,
+    `├── annotations.json             # ${exportable} 条审核通过的行为事件元数据`,
+    `├── clips/                       # 按分组 / 类别组织的 ${ready} 个视频片段`,
+    `│   └── {分组}/{类别}/clip_{annotation_id}.mp4`,
+    `├── corrected_tracks/`,
+    `│   ├── manifest.json`,
+    `│   └── video_{id}/import_{revision}/identity_{revision}/`,
+    `│       └── tracks.corrected.jsonl`,
+    `└── README.txt                   # 导出说明与固定版本统计`,
   ];
 
   return (
@@ -289,9 +295,9 @@ function PreviewCard({
         {treeLines.join("\n")}
       </pre>
       <div className="export-tree-note">
-        <b>待生成预览：</b>本页面不执行 ffmpeg 剪辑，仅打包当前已就绪的片段与
-        annotations.json；{missing > 0 ? `缺失的 ${missing} 个片段不会自动补齐，` : ""}
-        请在审核工作台先生成片段，再重新导出。「{'{…}'}」为占位符，实际文件名由后端按标注生成。
+        <b>目标内容预览：</b>导出任务会打包审核通过的行为标注、视频片段与修正后 track 结果；
+        {missing > 0 ? `后台 worker 可在打包前尝试补齐当前缺失的 ${missing} 个视频片段。` : "当前视频片段均已就绪。"}
+        本页面只创建并监控任务，不会同步调用 ffmpeg。「{'{…}'}」为占位符，实际文件名由后端按行为标注生成。
       </div>
 
       <div className="export-fields-head">
@@ -305,7 +311,7 @@ function PreviewCard({
           </div>
         ))}
       </div>
-      <div className="export-tree-note">字段以统一事件 JSON 格式为准，与标注工作台单视频导出保持一致。</div>
+      <div className="export-tree-note">字段以统一行为事件 JSON 格式为准，与行为标注工作台的单视频导出保持一致。</div>
     </Card>
   );
 }
@@ -360,7 +366,7 @@ function JobPanel({
       <>
         <div className="media-head">
           <span className="media-loading">
-            <span className="spinner" aria-hidden="true" /> 导出打包中…
+            <span className="spinner" aria-hidden="true" /> 导出处理中…
           </span>
           <span className="flex-spacer" />
           <span className={`media-job ${job.status}`}>
@@ -394,7 +400,7 @@ function JobPanel({
     return (
       <>
         <div className="ok-box" role="status">
-          ✓ 导出完成：片段与 annotations.json 已打包为 ZIP。
+          ✓ 导出完成：视频片段与 annotations.json 已打包为 ZIP。
         </div>
         <div className="export-download-actions">
           <button
@@ -602,7 +608,7 @@ export default function ExportPage() {
           </div>
           <h1>导出</h1>
           <div className="sub">
-            将审核通过的标注与已就绪片段打包为 ZIP 下载；仅 owner / admin 可发起，导出包保留 7 天
+            后台补齐并打包审核通过的行为标注与视频片段；仅项目所有者和管理员可发起，导出包保留 7 天
           </div>
         </div>
         <div className="page-header-actions">

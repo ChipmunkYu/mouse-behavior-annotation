@@ -41,6 +41,8 @@ export interface Category {
   color: string | null;
   sort_order: number;
   is_active: boolean;
+  mouse_count_min: number;
+  mouse_count_max: number | null;
 }
 
 // ---------- 视频 ----------
@@ -57,6 +59,8 @@ export interface Video {
   // 审核工作流字段（批次 3）
   workflow_status: string;
   annotation_revision: number;
+  detection_import_revision?: number;
+  identity_revision?: number;
   submitted_at: string | null;
   approved_at: string | null;
   approved_by: number | null;
@@ -86,6 +90,10 @@ export interface Annotation {
   confidence: string;
   review_status: string;
   crop_region: unknown;
+  mouse_ids: number[];
+  mouse_id_status: "valid" | "needs_mouse_ids";
+  detection_import_revision: number;
+  identity_revision: number;
   created_at: string;
   updated_at: string;
   /** 便捷字段：标注者用户名 / 类别名（后端返回） */
@@ -101,6 +109,9 @@ export interface AnnotationCreateInput {
   end_frame: number;
   confidence?: string;
   crop_region?: unknown;
+  mouse_ids?: number[];
+  detection_import_revision?: number;
+  identity_revision?: number;
 }
 
 export interface AnnotationPatchInput {
@@ -110,6 +121,10 @@ export interface AnnotationPatchInput {
   start_frame?: number;
   end_frame?: number;
   confidence?: string;
+  crop_region?: unknown;
+  mouse_ids?: number[];
+  detection_import_revision?: number;
+  identity_revision?: number;
 }
 
 // ---------- 审核工作流 ----------
@@ -124,6 +139,8 @@ export interface Review {
   result: "approved" | "rejected";
   comment: string | null;
   annotation_revision: number;
+  detection_import_revision: number;
+  identity_revision: number;
   created_at: string;
   /** 便捷字段：审核人用户名（后端返回时显示） */
   reviewer: string | null;
@@ -168,7 +185,7 @@ export interface Job {
 /** 单个视频的媒体（片段）生成状态汇总（GET /media-status）。 */
 export interface MediaStatus {
   video_id: number;
-  annotation_revision: number;
+  revision: number;
   workflow_status: string;
   /** 片段总数 */
   total: number;
@@ -190,17 +207,178 @@ export const JOB_LABELS: Record<string, string> = {
 
 // ---------- 导出 ----------
 export interface ExportEvent {
+  annotation_id: number;
   video_id: string;
+  clip_file: string | null;
   start_time: number;
   end_time: number;
   start_frame: number;
   end_frame: number;
   behavior: string | null;
+  mouse_ids: number[];
+  detection_import_revision: number;
+  identity_revision: number;
   crop_region: unknown;
   confidence: string;
   annotator: string | null;
-  reviewer: null;
+  reviewer: string | null;
   review_status: string;
+}
+
+// ---------- 检测结果导入与 track 修正 ----------
+export type ImportFileRole = "video" | "tracks" | "metadata";
+
+export interface VideoImportBatch {
+  id: number;
+  project_id: number;
+  status: string;
+  video_upload_state: string;
+  tracks_upload_state: string;
+  metadata_upload_state: string;
+  video_path?: string | null;
+  video_filename?: string | null;
+  tracks_path?: string | null;
+  metadata_path?: string | null;
+  created_video_id: number | null;
+  validation_errors: Record<string, unknown> | null;
+  created_at?: string;
+}
+
+export interface DetectionImport {
+  id: number;
+  video_id?: number;
+  revision: number;
+  schema_version: string;
+  model?: string | null;
+  tracker?: string | null;
+  frame_range: Record<string, unknown> | null;
+  detection_count: number | null;
+  status: string;
+  fps: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+export interface Keypoint {
+  x_px?: number;
+  y_px?: number;
+  x?: number;
+  y?: number;
+  confidence?: number;
+}
+
+export interface DetectionWithTrack {
+  detection_id: number;
+  frame_index: number;
+  raw_track_id: number;
+  display_track_id: number;
+  box_xyxy_px: number[] | null;
+  keypoints: Keypoint[] | null;
+  confidence?: number | null;
+  import_revision: number;
+  identity_revision: number;
+}
+
+export interface DetectionsResponse { detections: DetectionWithTrack[]; total: number }
+
+export interface CorrectedTrackSummary {
+  display_track_id: number;
+  first_frame: number | null;
+  last_frame: number | null;
+  detection_count: number;
+  visible_in_current_frame: boolean | null;
+}
+
+export interface CorrectedTracksResponse {
+  items: CorrectedTrackSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
+export interface CorrectedTracksParams {
+  current_frame?: number;
+  search?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface IdentityEditCheckRequest {
+  operation: "split" | "merge";
+  track_ids: number[];
+  frame?: number | null;
+  base_identity_revision: number;
+  base_detection_import_revision: number;
+}
+
+export interface IdentityEditCheckResponse {
+  operation: "split" | "merge";
+  old_display_track_id?: number;
+  new_display_track_id?: number;
+  split_frame?: number;
+  detections_before?: number;
+  detections_after?: number;
+  retained_display_track_id?: number;
+  merged_display_track_ids?: number[];
+  affected_detection_count?: number;
+  affected_annotation_count: number;
+  conflict_frames?: number[];
+}
+
+export type IdentityEditCommitRequest = IdentityEditCheckRequest;
+
+export interface IdentityEditResult {
+  edit_id?: number;
+  identity_revision: number;
+  new_display_track_id?: number;
+  retained_display_track_id?: number;
+  affected_detection_count?: number;
+  affected_annotation_count?: number;
+  needs_mouse_ids_annotation_ids?: number[];
+}
+
+export interface IdentityEdit {
+  id: number;
+  video_id: number;
+  detection_import_id: number;
+  operation: string;
+  base_identity_revision: number;
+  result_identity_revision: number;
+  params: Record<string, unknown> | null;
+  affected_detections: unknown[] | null;
+  affected_annotations: unknown[] | null;
+  operator_id: number | null;
+  created_at: string;
+  reverted_edit_id: number | null;
+}
+
+export interface SuppressionCreateRequest {
+  scope: "corrected_track";
+  track_id: number;
+  base_identity_revision: number;
+  base_detection_import_revision: number;
+}
+
+export interface SuppressionResult {
+  suppression_id?: number;
+  identity_revision: number;
+  frozen_detection_count?: number;
+  freed_detection_count?: number;
+  affected_track_ids?: number[];
+}
+
+export interface DetectionSuppression {
+  id: number;
+  scope: string;
+  result_identity_revision: number;
+  created_at: string;
+  frozen_detection_count: number;
+}
+
+export interface CorrectedTracksExport {
+  tracks_corrected: string[];
+  manifest: Record<string, unknown>;
 }
 
 // ---------- 导出（批次 6） ----------

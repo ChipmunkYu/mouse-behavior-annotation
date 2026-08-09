@@ -13,6 +13,7 @@ import type {
   ExportEvent,
   ExportRequestInput,
   ExportStatus,
+  IdentityEdit as IdentityEditRecord,
   Job,
   LoginResponse,
   MediaStatus,
@@ -23,6 +24,20 @@ import type {
   User,
   Video,
   VideoCreateInput,
+  CorrectedTracksExport,
+  CorrectedTracksParams,
+  CorrectedTracksResponse,
+  DetectionImport,
+  DetectionSuppression,
+  DetectionsResponse,
+  IdentityEditCheckRequest,
+  IdentityEditCheckResponse,
+  IdentityEditCommitRequest,
+  IdentityEditResult,
+  ImportFileRole,
+  SuppressionCreateRequest,
+  SuppressionResult,
+  VideoImportBatch,
 } from "./types";
 
 // ---------- 认证 ----------
@@ -79,6 +94,90 @@ export function uploadVideo(
     onProgress: options.onProgress,
     signal: options.signal,
   });
+}
+
+// ---------- YOLO 三文件导入 ----------
+export function createImportBatch(projectId: number | string): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches`, { method: "POST" });
+}
+
+export function uploadBatchFile(
+  projectId: number | string,
+  batchId: number,
+  role: ImportFileRole,
+  file: File,
+  options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {}
+): Promise<VideoImportBatch> {
+  return uploadFile<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/files/${role}`, file, {
+    ...options, method: "PUT", field: "file", filename: file.name,
+  });
+}
+
+export function completeImportBatch(projectId: number | string, batchId: number): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete`, { method: "POST" });
+}
+
+export function getImportBatch(projectId: number | string, batchId: number): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}`);
+}
+
+export function replaceDetectionImport(
+  projectId: number | string, videoId: number | string, tracks: File, metadata: File, confirm = false
+): Promise<Record<string, unknown>> {
+  const form = new FormData();
+  form.append("tracks_file", tracks, tracks.name);
+  form.append("metadata_file", metadata, metadata.name);
+  return apiRaw(`/projects/${projectId}/videos/${videoId}/detection-imports?confirm=${confirm}`, { method: "POST", body: form })
+    .then(async (res) => {
+      if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({})) as { detail?: string }).detail ?? "替换检测数据失败");
+      return res.json() as Promise<Record<string, unknown>>;
+    });
+}
+
+export function getCurrentDetectionImport(projectId: number | string, videoId: number | string): Promise<DetectionImport> {
+  return apiFetch<DetectionImport>(`/projects/${projectId}/videos/${videoId}/detection-imports/current`);
+}
+
+export function getDetections(projectId: number | string, videoId: number | string, startFrame: number, endFrame: number): Promise<DetectionsResponse> {
+  return apiFetch<DetectionsResponse>(`/projects/${projectId}/videos/${videoId}/detections?start_frame=${startFrame}&end_frame=${endFrame}`);
+}
+
+export function getCorrectedTracks(projectId: number | string, videoId: number | string, params: CorrectedTracksParams = {}): Promise<CorrectedTracksResponse> {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => { if (value != null && value !== "") qs.set(key, String(value)); });
+  return apiFetch<CorrectedTracksResponse>(`/projects/${projectId}/videos/${videoId}/corrected-tracks${qs.size ? `?${qs}` : ""}`);
+}
+
+export function checkIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCheckRequest): Promise<IdentityEditCheckResponse> {
+  return apiFetch<IdentityEditCheckResponse>(`/projects/${projectId}/videos/${videoId}/identity-edits/check`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function commitIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCommitRequest): Promise<IdentityEditResult> {
+  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function revertIdentityEdit(projectId: number | string, videoId: number | string, editId: number, base: { base_identity_revision: number; base_detection_import_revision: number }): Promise<IdentityEditResult> {
+  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits/${editId}/revert`, { method: "POST", body: JSON.stringify(base) });
+}
+
+export function getIdentityEditHistory(projectId: number | string, videoId: number | string, limit = 1): Promise<IdentityEditRecord[]> {
+  return apiFetch<IdentityEditRecord[]>(`/projects/${projectId}/videos/${videoId}/identity-edits/history?limit=${limit}`);
+}
+
+export function createSuppression(projectId: number | string, videoId: number | string, input: SuppressionCreateRequest): Promise<SuppressionResult> {
+  return apiFetch<SuppressionResult>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function listDetectionSuppressions(projectId: number | string, videoId: number | string): Promise<DetectionSuppression[]> {
+  return apiFetch<DetectionSuppression[]>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`);
+}
+
+export function revertSuppression(projectId: number | string, videoId: number | string, suppressionId: number, base: { base_identity_revision: number; base_detection_import_revision: number }): Promise<SuppressionResult> {
+  return apiFetch<SuppressionResult>(`/projects/${projectId}/videos/${videoId}/detection-suppressions/${suppressionId}/revert`, { method: "POST", body: JSON.stringify(base) });
+}
+
+export function getCorrectedTracksExport(projectId: number | string, videoId: number | string): Promise<CorrectedTracksExport> {
+  return apiFetch<CorrectedTracksExport>(`/projects/${projectId}/videos/${videoId}/detections/export`);
 }
 
 /**

@@ -77,7 +77,7 @@ export default function ProjectsPage() {
                 id="project-name"
                 className="input"
                 value={name}
-                placeholder="例如：顶视群养小鼠行为标注"
+                placeholder="例如：顶视群体社会行为标注"
                 onChange={(e) => setName(e.target.value)}
               />
             </div>

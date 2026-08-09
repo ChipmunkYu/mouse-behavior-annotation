@@ -66,7 +66,7 @@ export function useConfirm(): [ReactNode, (options: ConfirmOptions) => Promise<b
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={() => close(false)} autoFocus>
-            {options.cancelLabel ?? "取消"}
+            {options.cancelLabel ?? "取消"} (Esc)
           </button>
           <button
             type="button"

@@ -22,10 +22,11 @@ import {
 import { ApiError } from "../api/client";
 import type { Annotation, Category, Project, Review, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
-import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
+import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge, statusLabel } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
+import DetectionOverlay from "../components/DetectionOverlay";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 
 type StreamState = "idle" | "loading" | "ok" | "empty" | "error";
@@ -40,7 +41,7 @@ function ReadOnlyAnnotationList({
 }) {
   if (annotations.length === 0) {
     return (
-      <EmptyState compact title="暂无标注" hint="该视频尚未添加标注，无法通过" />
+      <EmptyState compact title="暂无行为标注" hint="该视频尚未添加行为标注，无法通过" />
     );
   }
   return (
@@ -66,7 +67,9 @@ function ReadOnlyAnnotationList({
               <span>·</span>
               <span>标注者 {a.annotator ?? `#${a.annotator_id}`}</span>
               <span>·</span>
-              <span>可信度 {a.confidence}</span>
+              <span>可信度 {statusLabel(a.confidence)}</span>
+              <span>·</span><span className="mouse-id-readout">参与对象 {a.mouse_ids.length ? a.mouse_ids.map((id) => `track ID ${id}`).join("、") : "未补选"}</span>
+              <span>· 检测导入版本 {a.detection_import_revision} / track 修正版本 {a.identity_revision}</span>
             </div>
           </div>
         );
@@ -90,7 +93,7 @@ function ReviewHistory({ reviews }: { reviews: Review[] }) {
         <div key={r.id} className="review-row">
           <div className="review-row-top">
             <StatusBadge value={r.result} tone={r.result === "approved" ? "ok" : "danger"} />
-            <span className="review-rev mono">修订 v{r.annotation_revision}</span>
+            <span className="review-rev mono">行为标注版本 v{r.annotation_revision} · 检测导入版本 {r.detection_import_revision} · track 修正版本 {r.identity_revision}</span>
             <span className="flex-spacer" />
             <span className="review-date">{formatDate(r.created_at)}</span>
           </div>
@@ -126,6 +129,8 @@ export default function ReviewPage() {
 
   const [comment, setComment] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewDisabled, setReviewDisabled] = useState(true);
+  const selectGenRef = useRef(0);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -140,6 +145,7 @@ export default function ReviewPage() {
     elementDuration > 0 ? elementDuration : selectedVideo?.duration && selectedVideo.duration > 0 ? selectedVideo.duration : null;
 
   const canReview = project ? ["owner", "admin", "reviewer"].includes(project.role) : true;
+  const activeMouseIds = annotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time)?.mouse_ids ?? [];
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
@@ -182,25 +188,33 @@ export default function ReviewPage() {
       setElementDuration(0);
       setCurrentTime(0);
       setPlaying(false);
+      setReviewDisabled(true);
       return;
     }
     let cancelled = false;
     let url: string | null = null;
     const vid = selectedId;
+    const gen = ++selectGenRef.current;
 
     setNotice(null);
     setErrorMsg(null);
     setStreamState("loading");
+    setReviewDisabled(true);
+    setAnnotations([]);
+    setCategories([]);
+    setReviews([]);
 
     Promise.all([listAnnotations(pid, vid), listCategories(pid), listVideoReviews(pid, vid)])
       .then(([anns, cats, revs]) => {
-        if (cancelled) return;
+        if (cancelled || gen !== selectGenRef.current) return;
         setAnnotations(anns);
         setCategories(cats);
         setReviews(revs);
+        setReviewDisabled(false);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setErrorMsg(err instanceof Error ? err.message : "加载审核数据失败");
+        if (cancelled || gen !== selectGenRef.current) return;
+        setErrorMsg(err instanceof Error ? err.message : "加载审核数据失败");
       });
 
     fetchVideoStreamUrl(vid)
@@ -302,11 +316,11 @@ export default function ReviewPage() {
       message:
         result === "approved" ? (
           <>
-            通过后该视频审核完成、标注将被锁定，系统将自动开始<b>生成媒体（片段）</b>，
+            通过后该视频审核完成、行为标注将被锁定，系统将自动开始<b>生成视频片段</b>，
             任务会<b>排队 / 处理中</b>，可在下方查看进度；生成失败时可重试。
           </>
         ) : (
-          <>退回后该视频将返回标注者修改，本次审核意见将保留在历史记录中。标注者的修改将使其回到草稿并需要重新提交。</>
+          <>退回后该视频将返回标注者修改，本次审核意见将保留在历史记录中。修改行为标注将使其回到草稿并需要重新提交。</>
         ),
       confirmLabel: result === "approved" ? "确认通过" : "确认退回",
       danger: result === "rejected",
@@ -330,7 +344,7 @@ export default function ReviewPage() {
       }
       setNotice(
         result === "approved"
-          ? `已通过：${selectedVideo.filename}。片段生成已排队 / 处理中，可在下方查看进度。`
+          ? `已通过：${selectedVideo.filename}。视频片段生成已排队 / 处理中，可在下方查看进度。`
           : `已退回：${selectedVideo.filename}，标注者将收到意见并修改。`
       );
       setComment("");
@@ -360,7 +374,7 @@ export default function ReviewPage() {
         </h1>
         {project ? (
           <div className="workflow-chip">
-            <span className="workflow-meta">我的角色：{ROLE_LABELS[project.role] ?? project.role}</span>
+            <span className="workflow-meta">我的角色：{ROLE_LABELS[project.role] ?? "未知角色"}</span>
           </div>
         ) : null}
         <div className="actions">
@@ -380,7 +394,7 @@ export default function ReviewPage() {
         <Card>
           <EmptyState
             title="当前角色无法审核"
-            hint={`你在该项目中的角色为「${ROLE_LABELS[project.role] ?? project.role}」，仅 owner / admin / reviewer 可访问审核工作台。`}
+            hint={`你在该项目中的角色为「${ROLE_LABELS[project.role] ?? "未知角色"}」，仅项目所有者、管理员和审核者可访问审核工作台。`}
           />
         </Card>
       ) : (
@@ -429,7 +443,7 @@ export default function ReviewPage() {
               <Card>
                 <EmptyState
                   title="请选择要审核的视频"
-                  hint="从左侧队列选择视频后，将加载其播放器、标注与审核历史。每处理一个视频都会从队列移除。"
+                  hint="从左侧队列选择视频后，将加载其播放器、行为标注与审核历史。每处理一个视频都会从队列移除。"
                 />
               </Card>
             ) : (
@@ -444,13 +458,14 @@ export default function ReviewPage() {
                           ref={videoRef}
                           src={streamUrl}
                           onClick={togglePlay}
-                          title="点击播放 / 暂停（或按 Space）"
+                          title="点击播放 / 暂停 (Space)"
                           onLoadedMetadata={(e) => setElementDuration(e.currentTarget.duration)}
                           onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                           onPlay={() => setPlaying(true)}
                           onPause={() => setPlaying(false)}
                           playsInline
                         />
+                        <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} />
                       </div>
                       <div className="player-controls">
                         <button
@@ -461,7 +476,7 @@ export default function ReviewPage() {
                             togglePlay();
                           }}
                         >
-                          {playing ? "⏸ 暂停" : "▶ 播放"}
+                          {playing ? "⏸ 暂停 (Space)" : "▶ 播放 (Space)"}
                         </button>
                         <button
                           type="button"
@@ -471,7 +486,7 @@ export default function ReviewPage() {
                             step(-1);
                           }}
                         >
-                          ⟨ 退一帧
+                          ⟨ 退一帧 (←)
                         </button>
                         <button
                           type="button"
@@ -481,12 +496,13 @@ export default function ReviewPage() {
                             step(1);
                           }}
                         >
-                          进一帧 ⟩
+                          进一帧 (→) ⟩
                         </button>
                         <span className="time-display">
                           <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}
                         </span>
                         <span className="flex-spacer" />
+                        {annotations[0] ? <span className="revision-context mono">检测导入版本 {annotations[0].detection_import_revision} · track 修正版本 {annotations[0].identity_revision}</span> : null}
                         <WorkflowBadge value={selectedVideo?.workflow_status ?? "draft"} revision={selectedVideo?.annotation_revision} />
                       </div>
                       {timelineDuration && timelineDuration > 0 ? (
@@ -513,7 +529,7 @@ export default function ReviewPage() {
                   )}
                 </div>
 
-                <Card title="媒体片段生成" className="media-card">
+                <Card title="视频片段生成" className="media-card">
                   <MediaStatusPanel
                     projectId={pid}
                     videoId={selectedId}
@@ -523,7 +539,7 @@ export default function ReviewPage() {
                 </Card>
 
                 <div className="review-detail">
-                  <Card title={`标注（${annotations.length}）· 只读`} className="review-anns">
+                  <Card title={`行为标注（${annotations.length}）· 只读`} className="review-anns">
                     <ReadOnlyAnnotationList annotations={annotations} categoryById={categoryById} />
                   </Card>
 
@@ -540,7 +556,7 @@ export default function ReviewPage() {
                           className="textarea"
                           rows={4}
                           value={comment}
-                          placeholder="例如：第 2 条标注起点偏晚，请重新校准后再提交"
+                          placeholder="例如：第 2 条行为标注起点偏晚，请重新校准后再提交"
                           onChange={(e) => setComment(e.target.value)}
                         />
                       </div>
@@ -548,7 +564,7 @@ export default function ReviewPage() {
                         <button
                           type="button"
                           className="btn btn-danger"
-                          disabled={reviewBusy}
+                          disabled={reviewBusy || reviewDisabled}
                           onClick={() => void handleReview("rejected")}
                         >
                           {reviewBusy ? "提交中…" : "退回"}
@@ -556,8 +572,8 @@ export default function ReviewPage() {
                         <button
                           type="button"
                           className="btn btn-primary"
-                          disabled={reviewBusy || annotations.length === 0}
-                          title={annotations.length === 0 ? "该视频暂无标注，无法通过" : "通过该视频"}
+                          disabled={reviewBusy || reviewDisabled || annotations.length === 0}
+                          title={annotations.length === 0 ? "该视频暂无行为标注，无法通过" : reviewDisabled ? "检测数据加载中" : "通过该视频"}
                           onClick={() => void handleReview("approved")}
                         >
                           {reviewBusy ? "提交中…" : "通过"}
@@ -565,7 +581,7 @@ export default function ReviewPage() {
                       </div>
                       {annotations.length === 0 ? (
                         <div className="frame-preview" style={{ marginTop: 8 }}>
-                          该视频暂无标注，不能通过；可退回或等待标注者补充。
+                          该视频暂无行为标注，不能通过；可退回或等待标注者补充。
                         </div>
                       ) : null}
                     </Card>

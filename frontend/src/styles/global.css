@@ -757,6 +757,93 @@ a:focus-visible,
   pointer-events: none;
 }
 
+/* ============ YOLO 检测叠加与 track 修正 ============ */
+.detection-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.detection-overlay.interactive { pointer-events: auto; cursor: crosshair; }
+
+.overlay-toolbar {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 6px;
+  background: rgba(15,18,24,.82);
+  color: #fff;
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  box-shadow: 0 3px 16px rgba(0,0,0,.3);
+}
+
+.toggle-control { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer; }
+.toggle-control input { margin: 0; accent-color: #ffd43b; }
+.batch-indicator { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 999px; background: var(--bg-inset); color: var(--text-2); font: 11px var(--mono); }
+.overlay-toolbar .batch-indicator { background: rgba(255,255,255,.14); color: rgba(255,255,255,.78); }
+.batch-indicator.ready::before, .batch-indicator.completed::before, .batch-indicator.success::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #54d67a; }
+.batch-indicator.error::before, .batch-indicator.validation_failed::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #ff7168; }
+
+.workspace-tabs, .segmented, .upload-mode-tabs { display: inline-flex; padding: 2px; border-radius: var(--radius); background: var(--bg-inset); border: 1px solid var(--border); }
+.workspace-tabs button, .segmented button, .upload-mode-tabs button { border: 0; border-radius: 4px; padding: 3px 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.workspace-tabs button.active, .segmented button.active, .upload-mode-tabs button.active { background: var(--bg-elev); color: var(--accent); box-shadow: var(--shadow); font-weight: 700; }
+
+.mouse-ids-panel .card-body, .identity-panel .card-body { display: flex; flex-direction: column; gap: 8px; }
+.mouse-count { color: var(--danger); font: 11px var(--mono); }
+.mouse-count.valid { color: var(--ok); }
+.selected-mice { min-height: 32px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--text-3); font-size: 11px; }
+.mouse-chip { border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-weak); color: var(--accent); padding: 2px 8px; font: 600 11px var(--mono); }
+.mouse-id-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; max-height: 150px; overflow: auto; }
+.mouse-id-item { display: flex; flex-direction: column; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text); }
+.mouse-id-item span { font-size: 10px; color: var(--text-3); }
+.mouse-id-item.selected { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
+.mouse-rule-warning, .mouse-warning-banner { padding: 7px 10px; border: 1px solid var(--warn); border-radius: var(--radius); background: var(--warn-weak); color: var(--warn); font-size: 11px; }
+.mouse-status.warning { color: var(--warn); font-weight: 700; }
+
+.identity-filter { display: grid; grid-template-columns: auto 1fr; gap: 6px; }
+.identity-filter .input { min-width: 0; }
+.identity-track-list { display: flex; flex-direction: column; gap: 4px; max-height: 270px; overflow: auto; }
+.identity-track { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text-2); text-align: left; font-size: 11px; }
+.identity-track .track-id { color: var(--text); font-weight: 800; font-size: 13px; }
+.identity-track.selected { border-color: var(--accent); background: var(--accent-weak); }
+.identity-actions, .identity-danger-zone { display: flex; gap: 6px; flex-wrap: wrap; }
+.identity-actions .btn { flex: 1; }
+.identity-danger-zone { padding-top: 8px; border-top: 1px dashed var(--border-strong); }
+.identity-frame, .revision-context, .mouse-id-readout { color: var(--text-3); font-size: 11px; }
+
+/* ============ 三文件批次上传 ============ */
+.upload-mode-tabs { align-self: flex-start; }
+.batch-drop { padding: 10px; text-align: center; border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--text-3); background: var(--bg-inset); }
+.batch-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.batch-slot { min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); }
+.batch-slot.success { border-color: var(--ok); }
+.batch-slot.error { border-color: var(--danger); }
+.batch-slot-head, .batch-slot-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
+.batch-slot-actions { margin: 7px 0 0; justify-content: flex-start; }
+.batch-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.batch-slot.uploading .batch-status-dot { background: var(--warn); animation: pulse-dot 1s ease-in-out infinite; }
+.batch-slot.success .batch-status-dot { background: var(--ok); }
+.batch-slot.error .batch-status-dot { background: var(--danger); }
+.batch-slot .upload-progress { margin-top: 6px; }
+.slot-error { margin-top: 5px; color: var(--danger); font-size: 10px; word-break: break-word; }
+.validation-errors { max-height: 180px; overflow: auto; margin: 0; padding: 9px; border: 1px solid var(--danger); border-radius: var(--radius); background: var(--danger-weak); color: var(--danger); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
+@keyframes pulse-dot { 50% { opacity: .3; } }
+
+@media (max-width: 700px) {
+  .batch-slots { grid-template-columns: 1fr; }
+  .overlay-toolbar { left: 6px; right: 6px; top: 6px; flex-wrap: wrap; }
+}
+
 .player-controls {
   display: flex;
   align-items: center;

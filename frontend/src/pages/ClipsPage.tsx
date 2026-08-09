@@ -44,7 +44,7 @@ function ClipStatusChip({ clipPath }: { clipPath: string | null }) {
   const ready = Boolean(clipPath);
   return (
     <span className={ready ? "badge badge-ok" : "badge badge-muted"}>
-      {ready ? "片段已生成" : "片段待生成"}
+      {ready ? "视频片段已生成" : "视频片段待生成"}
     </span>
   );
 }
@@ -153,12 +153,12 @@ function ClipRangeBar({
       className="clip-range"
       role="slider"
       tabIndex={0}
-      aria-label="片段时间范围"
+      aria-label="标注区间"
       aria-valuemin={0}
       aria-valuemax={Math.max(0, Math.round(duration))}
       aria-valuenow={Math.round(Math.min(currentTime, duration))}
       aria-valuetext={formatTimeShort(currentTime)}
-      title="点击跳转（←/→ 步进 1 秒）"
+      title="点击跳转 (←/→ 步进 1 秒)"
       onClick={(e) => {
         const rect = e.currentTarget.getBoundingClientRect();
         const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
@@ -493,9 +493,9 @@ export default function ClipsPage() {
               <Link
                 className="btn btn-sm btn-primary"
                 to={`/projects/${pid}/annotate/${selected.video_id}?t=${selected.start_time}`}
-                title="回到标注工作台并定位到该片段起点"
+                title="回到行为标注工作台并定位到该标注区间起点"
               >
-                跳转到标注 →
+                跳转到行为标注 →
               </Link>
               <button type="button" className="btn btn-sm" onClick={() => setSelected(null)}>
                 关闭预览
@@ -566,7 +566,7 @@ export default function ClipsPage() {
               </span>
               <span className="flex-spacer" />
               <span className={`range-hint ${inRange ? "in" : ""}`} role="status">
-                {rangeMsg ?? (inRange ? "片段区间内播放" : "区间外（自由浏览，到点自动停止）")}
+                {rangeMsg ?? (inRange ? "标注区间内播放" : "标注区间外（自由浏览，到点自动停止）")}
               </span>
             </div>
 
@@ -589,7 +589,7 @@ export default function ClipsPage() {
           <EmptyState
             compact
             title="选择片段预览"
-            hint="点击下方任意片段，在预览区加载源视频并定位到对应时间区间；一次只播放一个"
+            hint="点击下方任意片段，在预览区加载源视频并定位到对应标注区间；一次只播放一个"
           />
         </Card>
       )}
@@ -606,7 +606,7 @@ export default function ClipsPage() {
             }}
             aria-pressed={categoryFilter == null}
           >
-            全部 <span className="chip-count">{total}</span>
+            全部类别 <span className="chip-count">{total}</span>
           </button>
           {counts.map((cc) => (
             <button
@@ -677,7 +677,7 @@ export default function ClipsPage() {
         <Card>
           <EmptyState
             title="暂无片段"
-            hint="视频审核通过后会自动生成片段，可前往审核工作台或标注工作台查看生成进度"
+            hint="视频审核通过后会自动生成视频片段，可前往审核工作台或行为标注工作台查看生成进度"
           />
         </Card>
       ) : (items ?? []).length === 0 ? (

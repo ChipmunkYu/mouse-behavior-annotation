@@ -3,12 +3,15 @@
 多小鼠社会行为标注网站的前端实现：Vite + React 18 + TypeScript + React Router。
 对应后端 `../backend`（FastAPI，接口见 `../backend/README.md`）。
 
+> 当前界面与文档术语遵循 `../项目术语表.md`。
+
 ## 功能
 
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
 - **项目列表** `/projects`：展示当前用户成员项目及项目内角色，支持创建项目（自动初始化 12 类行为类别）。
 - **视频库** `/projects/:projectId/videos`：
-  - **上传视频**（主操作）：`POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
+  - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
+  - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
     - 支持 mp4 / mov / avi / mkv / webm / m4v / wmv / mpeg / mpg；不设前端大小上限，实际受服务器磁盘空间约束。
     - XMLHttpRequest 真实上传进度（百分比 + 已传/总大小）、可取消（`xhr.abort`）；401 行为与全局 client 一致。
     - 状态：待上传 → 上传中（进度条）→ 成功 / 失败 / 已取消；成功后自动刷新视频列表并可进入标注。
@@ -20,15 +23,16 @@
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
-  - OverlayLayer 透明叠加层（P1 空层，预留 YOLO 框/空间标注）。
+  - OverlayLayer 按当前帧显示 YOLO 检测框与修正后 track ID，并可切换关键点和骨架；叠加坐标随播放器缩放映射。
+  - 点击检测框或 track ID 列表选择参与对象，按对象数量范围保存到行为标注 `mouse_ids`；track 修正模式支持 Split、Merge、“忽略整个 track”、撤销和历史查看。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变。
   - 行为类别按 `group` 动态分组展示（绝不硬编码类别），类别颜色仅用于区分。
   - 选择类别后按 **S** / 按钮设起点，**D** / 按钮设终点并 POST 保存。
   - **Space** 播放/暂停，**←/→** 步进一帧（输入框聚焦时不触发）。
   - 时间轴按 duration 显示彩色标注区间，点击 / 键盘可跳转。
-  - 标注段列表支持 PATCH 类别/时间、DELETE 删除。
+  - 行为标注列表支持 PATCH 类别/时间、DELETE 删除。
   - 导出 GET `.../annotations/export` 并下载统一事件 JSON。
   - 保存中 / 已保存 / 失败状态提示。
-  - **批次 3 审核工作流**：顶部清晰显示工作流状态与修订号（草稿 / 待审核 / 已通过 / 已退回 + 提交/通过时间）；draft / rejected 可「提交审核」（至少一条标注，有确认），submitted 显示「等待审核」，approved 显示「已通过」；对已提交 / 已通过 / 已退回的视频执行新增 / 编辑 / 删除标注前有明确确认（将退回草稿、审核结果失效、已有片段删除），成功后刷新视频工作流状态。
+  - **批次 3 审核工作流**：顶部清晰显示视频工作流状态与行为标注版本（草稿 / 待审核 / 已通过 / 已退回，即 `draft/submitted/approved/rejected`，以及提交/通过时间）；`draft/rejected` 可「提交审核」（至少一条标注，有确认），`submitted` 显示「等待审核」，`approved` 显示「已通过」。单条行为标注的 `review_status` 是独立的 `pending/approved/rejected`，不得与视频工作流混用。对非草稿视频执行新增 / 编辑 / 删除行为标注前有明确确认（将退回草稿、审核结果失效、已有视频片段失效并清理），成功后刷新视频工作流状态。
   - **批次 4 媒体状态**：approved 视频在侧栏只读展示「媒体片段生成」面板（总数/就绪/处理中/待处理/失败、aria 进度条、最近任务状态；无生成 / 重试按钮），仅在任务进行中轮询，任务落定或离开页面即停止。
 - **审核工作台** `/projects/:projectId/review`：
   - 待审队列（仅元数据，避免一次加载全部视频的标注与流）；选中后按需加载标注 / 类别 / 审核历史 / 视频流。
@@ -36,6 +40,7 @@
   - 意见输入 + 「通过 / 退回」（退回须填意见，均有确认）。通过后不再写「后续功能提供」：展示「审核已通过，片段生成已排队 / 处理中」，详情中的媒体状态面板开始轮询 `media-status` 直至任务落定；生成失败时显示错误摘要并提供「重试生成」，任务状态文案区分排队 / 处理中 / 已完成 / 失败 / 已取消，失败绝不误称完成。
   - 媒体面板仅 approved 显示统计，非 approved 显示「审核通过后将自动开始生成片段」；刷新 / 离开页面 / 切换视频即停止轮询；401 / 403 沿用全局 client 处理。
   - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）。
+  - 审核时只读展示 `mouse_ids`、修正后叠加层及 annotation/detection import/identity 三类修订，避免审核旧身份结果。
 - **片段库** `/projects/:projectId/clips`（**批次 5**，owner / admin / annotator / reviewer 均可见）：
   - 数据来自 `GET /api/projects/:pid/clips`（分页 + 类别/视频筛选 + 关键词搜索）与 `GET /api/projects/:pid/clips/categories`（类别计数 chips）；库内仅含「标注 approved 且视频 approved」的有效片段。
   - **类别计数 chips 筛选**（全部 + 各类别计数，颜色来自类别 API）+ **搜索框**（按文件名 / 类别名，服务端过滤，300ms 防抖，输入限长 128 与后端一致）+ **视频选择器**；分页默认 20 条/页（可切 50 / 100），筛选 / 搜索变化自动回到第 1 页，页码超出实际页数时自动回落。
@@ -45,9 +50,9 @@
   - **轮询**：仅当当前页存在「待生成」片段时每 5s 静默刷新（不闪 loading），任务落定或离开页面 / 切换筛选即停止。
   - 空态（暂无片段 / 筛选无结果）、加载、错误态齐全；卡片为按钮（Enter / Space 选择预览），全部控件原生可聚焦。
 - **导出** `/projects/:projectId/export`（**批次 6**，owner / admin 可见）：
-  - **统计摘要**：可导出总数（审核通过标注）/ 就绪片段 / 缺失片段 + 就绪进度条（aria progressbar）；缺失片段明细列表（类别色块 + 类别 + 视频文件名 + 标注 ID），提示「先到审核工作台生成片段再重新导出」，本页不补生成、不调用 ffmpeg。
+  - **统计摘要**：可导出总数（审核通过行为标注）/ 就绪视频片段 / 缺失视频片段 + 就绪进度条（aria progressbar）；缺失明细显示类别、视频文件名和标注 ID。导出页面本身只创建并监控后台任务，不同步调用 ffmpeg；项目导出 worker 会在打包前尝试补生成缺失的已通过视频片段，任一补生成失败则不发布 ZIP。
   - **导出范围**：按类别多选 chips（复用 `GET .../clips/categories` 计数 + `GET .../categories` 取色；「全部」= 不传 `category_ids`）；「开始导出 ZIP」按钮仅 owner / admin 可见，非导出角色显示角色提示。
-  - **导出内容预览**：待生成目录结构树（annotations.json + clips/{视频}/片段 + README.txt）+ annotations.json 字段摘要；明确标注「待生成预览」，绝不声称 ffmpeg 已执行，缺失片段不会自动补齐。
+  - **导出内容预览**：待生成目录结构树（集中 `annotations.json`、`clips/<group>/<category>/...`、修正后 track 结果/manifest）及字段摘要；ZIP 行为事件展示 `mouse_ids`、三类审核修订和必填 `clip_file`，明确其为待生成预览，不声称 ffmpeg 已执行。
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
@@ -85,6 +90,8 @@ npm run build
 npm run preview
 ```
 
+当前验证：`npm run build` 通过；本地前端页面 HTTP 200。三文件导入批次的真实长视频、浏览器完整操作、真实 ffmpeg 和生产部署仍待人工验收。
+
 ## 目录结构
 
 ```
@@ -97,10 +104,10 @@ frontend/
 ├── README.md
 └── src/
     ├── main.tsx / App.tsx / vite-env.d.ts
-    ├── api/            # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
-    ├── auth/           # AuthContext / ProtectedRoute / storage / 401 事件
-    ├── components/     # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
-    ├── pages/          # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
+ ├── api/ # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
+ ├── auth/ # AuthContext / ProtectedRoute / storage / 401 事件
+ ├── components/ # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
+ ├── pages/ # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化
 ```

@@ -101,7 +101,7 @@ export function MediaStatusPanel({
       idlePollsRef.current = 0;
       setRefreshTick((t) => t + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "触发片段生成失败");
+      setError(err instanceof Error ? err.message : "触发视频片段生成失败");
     } finally {
       setGenerating(false);
     }
@@ -111,7 +111,7 @@ export function MediaStatusPanel({
   if (!approved) {
     return (
       <div className="media-note" role="status">
-        ◌ 该视频审核通过后会自动开始生成媒体片段，届时在此查看生成进度与结果。
+        ◌ 该视频审核通过后会自动开始生成视频片段，届时在此查看生成进度与结果。
       </div>
     );
   }
@@ -125,31 +125,31 @@ export function MediaStatusPanel({
   const percent =
     total > 0 ? Math.round((ready / total) * 100) : Math.max(0, Math.min(100, job?.progress ?? 0));
 
-  let headline = "片段生成完成";
+  let headline = "视频片段生成完成";
   let headlineTone = "ok";
   if (status != null) {
     const busy = isBusy(status);
     if (failed > 0) {
-      headline = `部分片段生成失败（${failed}）`;
+      headline = `部分视频片段生成失败（${failed}）`;
       headlineTone = "danger";
     } else if (busy) {
-      headline = "片段生成已排队 / 处理中";
+      headline = "视频片段生成已排队 / 处理中";
       headlineTone = "warn";
     } else if (total === 0 && job == null) {
-      headline = "暂无片段生成记录";
+      headline = "暂无视频片段生成记录";
       headlineTone = "muted";
     } else if (ready < total) {
-      headline = "片段生成进行中";
+      headline = "视频片段生成进行中";
       headlineTone = "warn";
     } else {
-      headline = "片段生成完成";
+      headline = "视频片段生成完成";
       headlineTone = "ok";
     }
   }
 
   let failedError: string | null = null;
   if (failed > 0) {
-    const base = `${failed} 个片段生成失败`;
+    const base = `${failed} 个视频片段生成失败`;
     failedError =
       job?.error && job.error.length > 0
         ? `${base}：${job.error}`
@@ -208,7 +208,7 @@ export function MediaStatusPanel({
           <div
             className="media-progress"
             role="progressbar"
-            aria-label="片段生成进度"
+            aria-label="视频片段生成进度"
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={percent}
@@ -284,16 +284,16 @@ export function MediaStatusSummary({
 
   const { total, ready, processing, pending, failed } = status;
   let cls = "ok";
-  let label = `片段：就绪 ${ready}/${total}`;
+  let label = `视频片段：就绪 ${ready}/${total}`;
   if (failed > 0) {
     cls = "danger";
-    label = `片段：失败 ${failed} · 就绪 ${ready}/${total}`;
+    label = `视频片段：失败 ${failed} · 就绪 ${ready}/${total}`;
   } else if (processing > 0 || pending > 0) {
     cls = "warn";
-    label = `片段：处理中 ${processing + pending} · 就绪 ${ready}/${total}`;
+    label = `视频片段：处理中 ${processing + pending} · 就绪 ${ready}/${total}`;
   }
   return (
-    <span className={`media-summary ${cls}`} title="详情请进入审核工作台或标注工作台查看">
+    <span className={`media-summary ${cls}`} title="详情请进入审核工作台或行为标注工作台查看">
       {label}
     </span>
   );

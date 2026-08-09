@@ -114,6 +114,8 @@ export interface UploadProgress {
 }
 
 export interface UploadFileOptions {
+  /** HTTP 方法；批次文件槽使用 PUT，其余上传默认 POST。 */
+  method?: "POST" | "PUT";
   /** multipart 字段名，默认 "file" */
   field?: string;
   /** 服务端保存的文件名，默认取 File.name */
@@ -134,7 +136,7 @@ export interface UploadFileOptions {
 export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptions = {}): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE}${path}`);
+    xhr.open(options.method ?? "POST", `${API_BASE}${path}`);
 
     const token = getToken();
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);

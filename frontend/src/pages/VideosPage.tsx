@@ -3,7 +3,16 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { createVideo, listProjects, listVideos } from "../api";
 import type { Project, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
-import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
+import {
+  Card,
+  EmptyState,
+  ErrorBox,
+  Loading,
+  StatusBadge,
+  WorkflowBadge,
+  statusLabel,
+  workflowStatusLabel,
+} from "../components/ui";
 import { MediaStatusSummary } from "../components/MediaStatusPanel";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { formatDate, formatDuration } from "../utils/format";
@@ -46,7 +55,7 @@ export default function VideosPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [workflowStatusFilter, setWorkflowStatusFilter] = useState("");
 
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -73,20 +82,20 @@ export default function VideosPage() {
     void load();
   }, [load]);
 
-  // 状态筛选选项完全来自当前数据（不硬编码状态枚举）
-  const statusOptions = useMemo(() => {
-    const set = new Set<string>((videos ?? []).map((v) => v.status));
+  // 审核状态筛选选项完全来自当前数据（不硬编码状态枚举）
+  const workflowStatusOptions = useMemo(() => {
+    const set = new Set<string>((videos ?? []).map((v) => v.workflow_status));
     return [...set].sort();
   }, [videos]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (videos ?? []).filter((v) => {
-      if (statusFilter && v.status !== statusFilter) return false;
+      if (workflowStatusFilter && v.workflow_status !== workflowStatusFilter) return false;
       if (q && !v.filename.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [videos, query, statusFilter]);
+  }, [videos, query, workflowStatusFilter]);
 
   const handleUploaded = useCallback(async () => {
     await load();
@@ -168,7 +177,7 @@ export default function VideosPage() {
         <div>
           <div style={{ fontSize: 12, color: "var(--text-3)", marginBottom: 2 }}>
             <Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}
-            {project ? <span> · 角色：{ROLE_LABELS[project.role] ?? project.role}</span> : null}
+            {project ? <span> · 角色：{ROLE_LABELS[project.role] ?? "未知角色"}</span> : null}
           </div>
           <h1>视频库</h1>
           <div className="sub">共 {videos?.length ?? 0} 个视频 · 展示 {filtered.length} 个</div>
@@ -210,13 +219,13 @@ export default function VideosPage() {
         <select
           className="select"
           style={{ width: 150 }}
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          value={workflowStatusFilter}
+          onChange={(e) => setWorkflowStatusFilter(e.target.value)}
         >
-          <option value="">全部状态</option>
-          {statusOptions.map((s) => (
+          <option value="">全部审核状态</option>
+          {workflowStatusOptions.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {workflowStatusLabel(s)}
             </option>
           ))}
         </select>
@@ -235,7 +244,7 @@ export default function VideosPage() {
             hint={
               videos.length === 0
                 ? "点击右上角「上传视频」上传真实视频文件；开发调试可展开页面底部「开发用」区域录入 Mock 元数据"
-                : "调整搜索关键词或状态筛选"
+                : "调整搜索关键词或审核状态筛选"
             }
           />
         </Card>
@@ -265,7 +274,7 @@ export default function VideosPage() {
                   分辨率 <b>{v.width && v.height ? `${v.width}×${v.height}` : "—"}</b>
                 </span>
                 <span>
-                  状态 <b>{v.status}</b>
+                  状态 <b>{statusLabel(v.status)}</b>
                 </span>
               </div>
               <div className="workflow-line">
@@ -323,7 +332,7 @@ export default function VideosPage() {
                     className="btn btn-sm"
                     style={{ width: "100%" }}
                     disabled
-                    title="视频待转码，转码完成后可进入标注"
+                    title="视频待转码，转码完成后可进入行为标注"
                   >
                     待转码 · 暂不可标注
                   </button>
@@ -336,7 +345,7 @@ export default function VideosPage() {
                     style={{ width: "100%" }}
                     onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}
                   >
-                    进入标注 →
+                    进入行为标注 →
                   </button>
                 </div>
               )}

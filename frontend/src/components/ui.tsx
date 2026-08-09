@@ -16,7 +16,7 @@ const BADGE_TONE: Record<string, string> = {
   archived: "badge badge-muted",
 };
 
-/** 常见枚举值 → 中文显示。 */
+/** 常见媒体、导入与行为标注审核枚举值 → 中文显示。 */
 const STATUS_LABELS: Record<string, string> = {
   ok: "正常",
   active: "进行中",
@@ -27,28 +27,50 @@ const STATUS_LABELS: Record<string, string> = {
   needs_transcode: "待转码",
   error: "异常",
   archived: "已归档",
-  pending: "待审核",
-  approved: "已通过",
-  rejected: "已退回",
   certain: "确定",
   uncertain: "不确定",
   occluded: "被遮挡",
+  owner: "所有者",
+  admin: "管理员",
+  annotator: "标注者",
+  reviewer: "审核者",
+};
+
+/** 行为标注审核状态独立于视频工作流。 */
+const ANNOTATION_REVIEW_STATUS_LABELS: Record<string, string> = {
+  pending: "待审核",
+  approved: "已通过",
+  rejected: "已退回",
+};
+
+/** 视频工作流状态单独维护，避免混用两套业务语义。 */
+const WORKFLOW_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   submitted: "待审核",
+  approved: "审核通过",
+  rejected: "已驳回",
 };
+
+export function workflowStatusLabel(value: string): string {
+  return WORKFLOW_STATUS_LABELS[value] ?? "未知状态";
+}
+
+export function statusLabel(value: string): string {
+  return ANNOTATION_REVIEW_STATUS_LABELS[value] ?? STATUS_LABELS[value] ?? "未知状态";
+}
 
 export function StatusBadge({ value, tone }: { value: string; tone?: string }) {
   const cls = tone ? (BADGE_TONE[tone] ?? "badge badge-muted") : (BADGE_TONE[value] ?? "badge badge-muted");
-  return <span className={cls}>{STATUS_LABELS[value] ?? value}</span>;
+  return <span className={cls}>{statusLabel(value)}</span>;
 }
 
-/** 审核工作流徽标：状态 + 修订号（draft/submitted/approved/rejected 着色）。 */
+/** 视频审核工作流徽标：状态 + 行为标注版本。 */
 export function WorkflowBadge({ value, revision }: { value: string; revision?: number | null }) {
   return (
-    <span className="workflow-badge" data-status={value ?? "draft"} title={`修订 v${revision ?? 1}`}>
+    <span className="workflow-badge" data-status={value ?? "draft"} title={`行为标注版本 v${revision ?? 1}`}>
       <span className="workflow-dot" aria-hidden="true" />
-      {STATUS_LABELS[value] ?? value ?? "草稿"}
-      {revision != null ? <span className="workflow-rev mono">v{revision}</span> : null}
+      {workflowStatusLabel(value)}
+      {revision != null ? <span className="workflow-rev mono">行为标注版本 v{revision}</span> : null}
     </span>
   );
 }
