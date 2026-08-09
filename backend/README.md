@@ -1,6 +1,8 @@
-# 标注网站后端（P1 + 批次 2 视频上传 + 批次 3 提交与审核闭环 + 批次 4 精确片段与缩略图 + 批次 5 生产跨视频片段库）
+# 标注网站后端（生产闭环 + YOLO 检测结果导入与 track 修正）
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
+
+> 当前技术文档术语遵循 `../项目术语表.md`；代码/API 标识符保持不变。
 
 - 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
@@ -12,39 +14,42 @@
 - 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
   含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
+- YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核、修正后 track 结果与带 `clip_file` 的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
 
 ## 目录结构
 
 ```
 backend/
-├── alembic.ini            # Alembic 配置（迁移目录为 migrations/）
-├── migrations/            # Alembic 迁移脚本（版本号只存在于 scripts/versions 内）
-│   ├── env.py             # 迁移环境（SQLite 批处理模式，复用 app 模型元数据）
-│   ├── script.py.mako
-│   └── versions/
-│       ├── 0001_baseline_p1.py       # baseline：P1 原版 6 张表
-│       ├── 0002_review_clip_job.py   # 增量：Video 工作流字段 + Review/Clip/BackgroundJob
-│       ├── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
-│       └── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
+├── alembic.ini # Alembic 配置（迁移目录为 migrations/）
+├── migrations/ # Alembic 迁移脚本（版本号只存在于 scripts/versions 内）
+│ ├── env.py # 迁移环境（SQLite 批处理模式，复用 app 模型元数据）
+│ ├── script.py.mako
+│ └── versions/
+│ ├── 0001_baseline_p1.py # baseline：P1 原版 6 张表
+│ ├── 0002_review_clip_job.py # 增量：Video 工作流字段 + Review/Clip/BackgroundJob
+│ ├── 0003_fk_ondelete_explicit.py # 增量：users 外键 ON DELETE 策略显式化（SET NULL / RESTRICT）
+│ ├── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
+│ ├── 0005_detection_import_foundation.py # YOLO 导入、修正后 track、IdentityEdit/抑制及多修订模型
+│ └── 0006_detection_import_batch_paths.py # 三文件批次及导入文件路径
 ├── app/
-│   ├── main.py            # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
-│   ├── config.py          # 环境变量配置
-│   ├── database.py        # SQLAlchemy 引擎 / Session / ensure_schema
-│   ├── migration.py       # 程序化 Alembic 入口（启动自动迁移 / CLI 共用）
-│   ├── models.py          # User / Project / ProjectMembership / BehaviorCategory / Video / Annotation / Review / Clip / BackgroundJob
-│   ├── schemas.py         # Pydantic 请求/响应模型
-│   ├── auth.py            # 密码哈希（PBKDF2）+ JWT
-│   ├── seed.py            # 北医 12 类初始化 + demo 账号
-│   ├── deps.py            # 项目成员权限依赖
-│   ├── media.py           # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
-│   ├── media_jobs.py      # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
-│   ├── export_jobs.py     # 项目分类导出：缺失片段补生成、ZIP 打包、任务恢复
-│   └── routers/           # health / auth / projects / categories / videos / annotations / reviews / clips / media / exports
-├── scripts/               # 本地工具脚本（仅开发，不注册到应用）
-│   ├── migrate.py         # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
-│   └── seed_demo.py       # 幂等演示数据脚本（第一阶段本地演示）
-├── tests/                 # pytest 聚焦测试
-├── data/                  # 运行时数据（数据库/视频/导出，已 gitignore）
+│ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
+│ ├── config.py # 环境变量配置
+│ ├── database.py # SQLAlchemy 引擎 / Session / ensure_schema
+│ ├── migration.py # 程序化 Alembic 入口（启动自动迁移 / CLI 共用）
+│ ├── models.py # 业务、审核/媒体、YOLO 检测结果导入与 track 修正模型
+│ ├── schemas.py # Pydantic 请求/响应模型
+│ ├── auth.py # 密码哈希（PBKDF2）+ JWT
+│ ├── seed.py # 北医 12 类初始化 + demo 账号
+│ ├── deps.py # 项目成员权限依赖
+│ ├── media.py # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
+│ ├── media_jobs.py # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
+│ ├── export_jobs.py # 项目分类导出：缺失片段补生成、ZIP 打包、任务恢复
+│ └── routers/ # health / auth / projects / categories / videos / annotations / reviews / clips / media / exports
+├── scripts/ # 本地工具脚本（仅开发，不注册到应用）
+│ ├── migrate.py # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
+│ └── seed_demo.py # 幂等演示数据脚本（第一阶段本地演示）
+├── tests/ # pytest 聚焦测试
+├── data/ # 运行时数据（数据库/视频/导出，已 gitignore）
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -57,8 +62,8 @@ cd backend
 
 # 1. 创建隔离环境
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/macOS
+.venv\Scripts\activate # Windows
+# source .venv/bin/activate # Linux/macOS
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -78,7 +83,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0004），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0006），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -109,7 +114,7 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 
 - 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0003 已版本化库 → 增量 `upgrade head` 到 0004（新增列 + 唯一索引，数据原样保留）。
+- 0002～0005 已版本化库 → 增量 `upgrade head` 到 0006，既有数据按迁移规则保留。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -150,7 +155,7 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 只复用现有配置、模型与 seed 逻辑，不修改任何接口。从 `backend` 目录运行：
 
 ```bash
-.venv\Scripts\python scripts\seed_demo.py                      # 仅 Mock 元数据
+.venv\Scripts\python scripts\seed_demo.py # 仅 Mock 元数据
 .venv\Scripts\python scripts\seed_demo.py --video-source C:/path/to/demo.mov
 .venv\Scripts\python scripts\seed_demo.py --duration 5 --fps 30
 ```
@@ -222,6 +227,28 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 | `POST` | `/api/projects/{project_id}/videos/upload` | 真实视频流式上传（multipart 字段 `file`）→ 201 |
 | `GET` | `/api/videos/{video_id}/stream` | 若 `storage_path` 解析到配置视频目录内且文件存在则 `FileResponse`，否则 404 |
 
+### YOLO 检测结果导入与 track 修正
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/projects/{project_id}/video-import-batches` | 创建三文件导入批次（原始视频 + `tracks.jsonl` + `metadata.json`） |
+| `PUT` | `/api/projects/{project_id}/video-import-batches/{batch_id}/files/{role}` | 独立上传 `video` / `tracks` / `metadata` |
+| `POST` | `/api/projects/{project_id}/video-import-batches/{batch_id}/complete` | 完成配对校验并创建视频/DetectionImport |
+| `GET` | `/api/projects/{project_id}/video-import-batches/{batch_id}` | 查询槽位、校验错误和导入状态 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-imports` | 为已有视频补传或确认替换 tracks/metadata |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-imports/current` | 当前导入、统计和修订 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detections` | 按帧区间读取有效检测及 import/identity revision |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/corrected-tracks` | 查询修正后 track 摘要、搜索和当前帧可见性 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/check` | 预检 Split/Merge 冲突及影响范围 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits` | 提交 Split/Merge 操作 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询可审计 track 修正历史 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 撤销 track 修正并生成新修订 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 整轨检测抑制：忽略整个 track；提交时冻结当前未抑制 detection 集合，原始检测保持不可变 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 撤销检测抑制 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | 导出 `tracks.corrected.jsonl` 与 manifest |
+
+`metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。原始 YOLO 文件与 RawDetection 保持不可变。
+
 ### 真实视频上传（批次 2）
 
 - 仅 **active 项目成员** 可上传（非成员 403、项目不存在 404、未登录 401）。
@@ -241,6 +268,8 @@ baseline（0001）再升级到 head（0004），**不删除任何已有数据**�
 ### 提交与审核（批次 3）
 
 审核工作流状态机：`draft → submitted → approved / rejected`（`rejected` 可重新提交）。
+
+这是视频 `workflow_status` 的工作流，对应界面“草稿/待审核/已通过/已退回”。单条行为标注的 `Annotation.review_status` 是独立的 `pending/approved/rejected`，不含 `draft/submitted`；提交视频时标注置为 `pending`，裁决后再置为 `approved` 或 `rejected`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -369,8 +398,8 @@ annotator_name, review_status, created_at`。
   过期时间；项目 active 导出通过 queued/running 查询排他。
 - 状态统计以最近任务的类别范围为准；ready 必须同时满足当前修订、`Clip.status=ready`、
   `clip_path` 位于 `DATA_DIR/clips` 内且实体文件存在，否则列入 missing。
-- worker 对 missing Clip 复用注入的 `MediaProcessor` 同步补生成；任一片段失败则任务失败，
-  不发布新 ZIP。成功包按 `{group}/{category}/{安全文件名}.mp4` 组织，根目录包含
+- 项目导出 worker 对 missing Clip 复用注入的 `MediaProcessor` 在后台任务内补生成；Export 页面/API 请求线程本身不直接同步调用 ffmpeg。任一视频片段失败则任务失败，
+  不发布新 ZIP。成功包按 `clips/{group}/{category}/{安全文件名}.mp4` 组织，根目录包含
   `annotations.json`。
 - ZIP 先在 `DATA_DIR/exports` 生成任务专属临时 archive，再原子替换为
   `export_project_{project_id}_{job_id}.zip`；每次结果文件唯一。下载同时校验成功状态、
@@ -424,6 +453,8 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 - `User`：独立登录账号，**无全局角色**。
 - `ProjectMembership`：`user_id + project_id` 唯一，`role ∈ {owner, admin, annotator, reviewer}`。
 - `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；创建项目时初始化北医 12 类。
+- `DetectionImport` / `RawDetection` / `CorrectedTrack` / `CorrectedDetectionAssignment`：保存不可变导入、逐帧原始检测和当前修正身份视图。
+- `IdentityEdit` / `DetectionSuppression`：记录 Split/Merge、抑制与撤销审计；操作以 identity revision 并发校验。
 - `Video`：项目级元数据（filename/duration/fps/width/height/storage_path/status）。
   - 媒体 `status ∈ {metadata, uploaded, needs_transcode}`：`metadata` 为 P1 Mock 创建；
     批次 2 真实上传按扩展名映射为 `uploaded`（mp4/webm/mov/m4v）或 `needs_transcode`（avi/mkv/wmv/mpeg/mpg）。
@@ -461,16 +492,20 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 
 ## 导出格式
 
-`GET .../annotations/export` 返回事件 JSON 列表，字段符合 `../需求文档.md` §2.3：
+`GET .../annotations/export` 返回独立的行为事件 JSON 列表，字段符合 `../需求文档.md` §2.3。该独立 API 不要求 `clip_file`；项目 ZIP 根目录的 `annotations.json` 是另一份集中索引契约，其中每条行为事件必须包含 `clip_file` 并与 `clips/<group>/<category>/...` 下一个实际 MP4 一一对应：
 
 ```json
 {
+ "annotation_id": 123,
   "video_id": "video_1",
   "start_time": 12.4,
   "end_time": 14.84,
   "start_frame": 310,
   "end_frame": 371,
   "behavior": "攻击行为",
+ "mouse_ids": [8, 20],
+ "detection_import_revision": 1,
+ "identity_revision": 7,
   "crop_region": null,
   "confidence": "certain",
   "annotator": "demo",
@@ -487,7 +522,10 @@ cd backend
 pytest -q
 ```
 
+当前全量结果：`283 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过；本地 `/api/health` 与前端页面均返回 HTTP 200。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
+
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
+三文件导入批次/替换与真实 metadata 别名、逐帧查询、`mouse_ids` 数量与覆盖校验、Split/Merge、抑制/撤销、并发修订冲突、三类审核修订失效、修正后 track 结果和 `clip_file` ZIP 完整性，
 视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
 写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
 批次 3 提交与审核（提交角色/状态门/至少一条标注/标注审核字段重置、队列角色与 submitted 过滤、
@@ -506,7 +544,7 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、真实 ZIP/annotations、下载过期/越界/缺文件、重跑保留历史），
 以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-0002 与 0003 已版本化库到 0004 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
+0002～0005 已版本化库到 0006 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
 被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束 /
 dedupe_key 唯一约束防重复任务）。

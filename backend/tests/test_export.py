@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 EXPECTED_FIELDS = {
+    "annotation_id",
     "video_id",
+    "clip_file",
     "start_time",
     "end_time",
     "start_frame",
     "end_frame",
     "behavior",
+    "mouse_ids",
+    "detection_import_revision",
+    "identity_revision",
     "crop_region",
     "confidence",
     "annotator",
@@ -45,12 +50,17 @@ def test_export_event_fields_and_behavior_name(ctx):
     ev = events[0]
 
     assert set(ev.keys()) == EXPECTED_FIELDS
+    assert ev["annotation_id"] == created.json()["id"]
     assert ev["video_id"] == f"video_{video['id']}"
+    assert ev["clip_file"] is None
     assert ev["start_time"] == 5.0
     assert ev["end_time"] == 8.5
     assert ev["start_frame"] == 125
     assert ev["end_frame"] == 212
     assert ev["behavior"] == "奔跑"  # 类别名
+    assert ev["mouse_ids"] == []
+    assert ev["detection_import_revision"] == 0
+    assert ev["identity_revision"] == 0
     assert ev["crop_region"] == {"x": 10, "y": 20, "w": 50, "h": 30}
     assert ev["confidence"] == "certain"
     assert ev["annotator"] == "demo"

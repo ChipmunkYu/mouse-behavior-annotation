@@ -59,7 +59,7 @@ def media_status(
 ) -> MediaStatusOut:
     """项目成员可读：当前修订的片段生成进度与该视频对应任务。"""
     video = _get_video_in_project(db, project_id, video_id)
-    revision = video.annotation_revision
+    revision = video.media_revision
     clips = (
         db.query(Clip)
         .join(Annotation, Annotation.id == Clip.annotation_id)

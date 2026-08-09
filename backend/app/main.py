@@ -15,7 +15,7 @@ from .cleanup import RetentionCleaner
 from .export_jobs import ExportWorker
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
-from .routers import annotations, auth, categories, clips, exports, health, media, projects, reviews, videos
+from .routers import annotations, auth, categories, clips, detection_imports, exports, health, identity_edits, media, projects, reviews, suppressions, videos
 
 
 def _default_media_processor(settings: Settings) -> MediaProcessor:
@@ -48,6 +48,8 @@ def create_app(
         s.exports_dir,
         s.clips_dir,
         s.thumbnails_dir,
+        s.import_batches_dir,
+        s.detection_imports_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -112,6 +114,9 @@ def create_app(
     app.include_router(clips.router)
     app.include_router(exports.router)
     app.include_router(media.router)
+    app.include_router(detection_imports.router)
+    app.include_router(identity_edits.router)
+    app.include_router(suppressions.router)
     return app
 
 

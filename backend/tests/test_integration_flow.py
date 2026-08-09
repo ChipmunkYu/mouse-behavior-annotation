@@ -10,12 +10,17 @@ demo 登录 → 项目列表 → 创建项目（12 类别）→ 视频列表/创
 from __future__ import annotations
 
 EXPECTED_FIELDS = {
+    "annotation_id",
     "video_id",
+    "clip_file",
     "start_time",
     "end_time",
     "start_frame",
     "end_frame",
     "behavior",
+    "mouse_ids",
+    "detection_import_revision",
+    "identity_revision",
     "crop_region",
     "confidence",
     "annotator",
@@ -124,8 +129,13 @@ def test_main_flow_end_to_end(ctx, login_headers):
     events = resp.json()
     assert len(events) == 1
     assert set(events[0].keys()) == EXPECTED_FIELDS
+    assert events[0]["annotation_id"] == ann_id
     assert events[0]["behavior"] == cat["name"]
     assert events[0]["video_id"] == f"video_{vid}"
+    assert events[0]["clip_file"] is None
+    assert events[0]["mouse_ids"] == []
+    assert events[0]["detection_import_revision"] == 0
+    assert events[0]["identity_revision"] == 0
 
     # 12. DELETE → 204 空响应体（前端 handleResponse 按 204 处理）
     resp = client.delete(f"{base}/{ann_id}", headers=headers)

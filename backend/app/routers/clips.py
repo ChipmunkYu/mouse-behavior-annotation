@@ -149,7 +149,7 @@ def list_clips(
             Clip,
             and_(
                 Clip.annotation_id == Annotation.id,
-                Clip.source_revision == Video.annotation_revision,
+                Clip.source_revision == Video.media_revision,
             ),
         )
         .filter(Annotation.id.in_(ids))

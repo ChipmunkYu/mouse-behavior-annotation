@@ -53,6 +53,9 @@ class CategoryOut(BaseModel):
     color: Optional[str] = None
     sort_order: int
     is_active: bool
+    # v0.6：参与小鼠数量范围（max 为 None 表示无固定上限）
+    mouse_count_min: int = 1
+    mouse_count_max: Optional[int] = None
 
 
 # ---------- 视频 ----------
@@ -81,6 +84,8 @@ class VideoOut(BaseModel):
     # 审核工作流字段（新增；旧数据迁移后由 DB 默认值填充）
     workflow_status: str = "draft"
     annotation_revision: int = 1
+    detection_import_revision: int = 0
+    identity_revision: int = 0
     submitted_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     approved_by: Optional[int] = None
@@ -96,6 +101,10 @@ class AnnotationCreate(BaseModel):
     end_frame: int = Field(ge=0)
     confidence: str = "certain"
     crop_region: Optional[dict[str, Any]] = None
+    # v0.6：参与小鼠 ID + 修订号
+    mouse_ids: Optional[list[int]] = None
+    detection_import_revision: Optional[int] = None
+    identity_revision: Optional[int] = None
     # review_status 不作为有效输入：创建固定 pending；显式传入非 pending 值 → 422
     review_status: Optional[str] = None
 
@@ -117,6 +126,10 @@ class AnnotationUpdate(BaseModel):
     end_frame: Optional[int] = Field(default=None, ge=0)
     confidence: Optional[str] = None
     crop_region: Optional[dict[str, Any]] = None
+    # v0.6：参与小鼠 ID + 修订号
+    mouse_ids: Optional[list[int]] = None
+    detection_import_revision: Optional[int] = None
+    identity_revision: Optional[int] = None
     # 禁止用户直接写 review_status：审核状态只能通过审核 API（review）流转
     review_status: Optional[str] = None
 
@@ -140,6 +153,11 @@ class AnnotationOut(BaseModel):
     confidence: str
     review_status: str
     crop_region: Optional[dict[str, Any]] = None
+    # v0.6：参与小鼠 ID 与状态
+    mouse_ids: list[int] = []
+    mouse_id_status: str = "needs_mouse_ids"
+    detection_import_revision: int = 0
+    identity_revision: int = 0
     created_at: datetime
     updated_at: datetime
     # 便捷字段：标注者用户名 / 类别名
@@ -161,6 +179,8 @@ class ReviewOut(BaseModel):
     result: str
     comment: Optional[str] = None
     annotation_revision: int
+    detection_import_revision: int = 0
+    identity_revision: int = 0
     created_at: datetime
     # 便捷字段：审核人用户名
     reviewer: Optional[str] = None
@@ -254,3 +274,232 @@ class ExportStatusOut(BaseModel):
     ready_count: int
     missing_count: int
     missing_clips: list[MissingClipOut]
+
+
+# ---------- 身份编辑（Phase 2） ----------
+
+class IdentityEditCheckRequest(BaseModel):
+    operation: Literal["split", "merge"]
+    track_ids: list[int] = Field(min_length=1)
+    frame: Optional[int] = None
+    base_identity_revision: int = Field(ge=0)
+    base_detection_import_revision: int = Field(ge=1)
+
+
+class IdentityEditCommitRequest(BaseModel):
+    operation: Literal["split", "merge"]
+    track_ids: list[int] = Field(min_length=1)
+    frame: Optional[int] = None
+    base_identity_revision: int = Field(ge=0)
+    base_detection_import_revision: int = Field(ge=1)
+
+
+class IdentityEditRevertRequest(BaseModel):
+    base_identity_revision: int = Field(ge=0)
+    base_detection_import_revision: int = Field(ge=1)
+
+
+# ---------- 检测抑制（Phase 2） ----------
+
+class SuppressionCreateRequest(BaseModel):
+    scope: Literal["corrected_track"]
+    track_id: int
+    base_identity_revision: int = Field(ge=0)
+    base_detection_import_revision: int = Field(ge=1)
+
+
+class SuppressionRevertRequest(BaseModel):
+    base_identity_revision: int = Field(ge=0)
+    base_detection_import_revision: int = Field(ge=1)
+
+
+# ---------- 检测导入与身份修正（Phase 1A 占位，未接入任何路由） ----------
+class VideoImportBatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    status: str
+    validation_errors: Optional[Any] = None
+    video_upload_state: str
+    tracks_upload_state: str
+    metadata_upload_state: str
+    video_path: Optional[str] = None
+    video_filename: Optional[str] = None
+    tracks_path: Optional[str] = None
+    metadata_path: Optional[str] = None
+    created_video_id: Optional[int] = None
+    created_at: datetime
+
+
+class DetectionImportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    video_id: int
+    revision: int
+    schema_version: str
+    tracks_path: Optional[str] = None
+    tracks_sha256: Optional[str] = None
+    metadata_path: Optional[str] = None
+    metadata_sha256: Optional[str] = None
+    model: Optional[str] = Field(default=None, validation_alias="model_name")
+    model_weights_sha256: Optional[str] = None
+    tracker: Optional[str] = Field(default=None, validation_alias="tracker_name")
+    tracker_params: Optional[dict[str, Any]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    frame_count: Optional[int] = None
+    frame_range: Optional[dict[str, Any]] = None
+    detection_count: Optional[int] = None
+    source_relative: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    active: bool
+    created_by: Optional[int] = None
+    created_at: datetime
+
+
+class RawDetectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    detection_import_id: int
+    frame_index: int
+    frame_detection_index: int
+    raw_track_id: int
+    box: Optional[dict[str, Any]] = None
+    keypoints: Optional[list[Any]] = None
+    confidence: Optional[float] = Field(default=None, validation_alias="detection_confidence")
+    class_id: Optional[int] = None
+
+
+class CorrectedTrackOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    detection_import_id: int
+    display_track_id: int
+    first_frame: Optional[int] = None
+    last_frame: Optional[int] = None
+    effective_detection_count: int
+    created_identity_revision: int
+    active: bool
+    merged_into_id: Optional[int] = None
+
+
+class CorrectedDetectionAssignmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    raw_detection_id: int
+    corrected_track_id: int
+    identity_revision: int
+
+
+class IdentityEditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    video_id: int
+    detection_import_id: int
+    operation: str
+    base_identity_revision: int
+    result_identity_revision: int
+    params: Optional[dict[str, Any]] = None
+    affected_detections: Optional[list[Any]] = None
+    affected_annotations: Optional[list[Any]] = None
+    operator_id: Optional[int] = None
+    created_at: datetime
+    reverted_edit_id: Optional[int] = None
+
+
+class DetectionSuppressionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    video_id: int
+    detection_import_id: int
+    base_identity_revision: int
+    result_identity_revision: int
+    scope: str
+    operator_id: Optional[int] = None
+    created_at: datetime
+    reverted_suppression_id: Optional[int] = None
+
+
+# ---------- 检测导入 Phase 1B 响应模型 ----------
+
+class BatchStatusOut(BaseModel):
+    """批次状态（含文件上传状态与已创建视频 ID）。"""
+    id: int
+    project_id: int
+    status: str
+    validation_errors: Optional[Any] = None
+    video_upload_state: str
+    tracks_upload_state: str
+    metadata_upload_state: str
+    video_path: Optional[str] = None
+    video_filename: Optional[str] = None
+    tracks_path: Optional[str] = None
+    metadata_path: Optional[str] = None
+    created_video_id: Optional[int] = None
+    created_at: datetime
+
+
+class DetectionImportCurrentOut(BaseModel):
+    """当前活动 DetectionImport 摘要。"""
+    id: int
+    revision: int
+    schema_version: str
+    model: Optional[str] = Field(default=None, validation_alias="model_name")
+    tracker: Optional[str] = Field(default=None, validation_alias="tracker_name")
+    frame_range: Optional[dict[str, Any]] = None
+    detection_count: Optional[int] = None
+    status: str
+    fps: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
+class DetectionWithTrackOut(BaseModel):
+    """detections 端点：带 display_track_id 与修订号的检测条目。"""
+    detection_id: int
+    frame_index: int
+    raw_track_id: int
+    display_track_id: int
+    box_xyxy_px: Optional[list[float]] = None
+    keypoints: Optional[list[Any]] = None
+    confidence: Optional[float] = None
+    import_revision: int
+    identity_revision: int
+
+
+class CorrectedTrackSummaryOut(BaseModel):
+    """corrected-tracks 端点：轨迹摘要与当前帧可见性。"""
+    display_track_id: int
+    first_frame: Optional[int] = None
+    last_frame: Optional[int] = None
+    detection_count: int
+    visible_in_current_frame: Optional[bool] = None
+
+
+class DetectionImportReplaceOut(BaseModel):
+    """替换导入后的受影响摘要。"""
+    id: int
+    video_id: int
+    revision: int
+    detection_count: int
+    track_count: int
+    status: str
+    message: str
+
+
+class PageOut(BaseModel):
+    """通用分页包装。"""
+    items: list[Any]
+    total: int
+    page: int
+    page_size: int
+    pages: int

@@ -10,19 +10,139 @@
 """
 from __future__ import annotations
 
+import json
+
 from app.models import Annotation, Review, Video
 
 
-def _annotate(ctx, headers, project, video, category_id, start_time=1.0):
+_SAMPLE_METADATA = {
+    "schema_version": "1.0",
+    "video_id": "test-mouse-video",
+    "width": 1280,
+    "height": 720,
+    "fps": 25.0,
+    "frame_count": 5,
+    "model_name": "yolov8s-pose",
+    "model_weights_sha256": "a" * 64,
+    "tracker_name": "botsort",
+    "tracker_params": {"track_high_thresh": 0.5},
+    "keypoint_names": ["nose", "left_ear", "right_ear"],
+    "skeleton_edges": [[0, 1], [0, 2]],
+}
+
+
+def _det(track_id: int, x1=100, y1=200, x2=180, y2=310, confidence=0.85) -> dict:
+    return {
+        "track_id": track_id,
+        "box_xyxy_px": [x1, y1, x2, y2],
+        "box_xywhn": [0.25, 0.35, 0.04, 0.10],
+        "area_n": 0.004,
+        "detection_confidence": confidence,
+        "class_id": 0,
+        "keypoints": [
+            {"x_px": 140.0, "y_px": 250.0, "confidence": 0.95},
+            {"x_px": 150.0, "y_px": 260.0, "confidence": 0.88},
+            {"x_px": 130.0, "y_px": 240.0, "confidence": 0.91},
+        ],
+    }
+
+
+def _make_frame_line(frame_index: int, detections: list[dict]) -> str:
+    return json.dumps({
+        "schema_version": "1.0",
+        "video_id": "test-mouse-video",
+        "frame_index": frame_index,
+        "timestamp_sec": frame_index / 25.0,
+        "detection_count": len(detections),
+        "detections": detections,
+    })
+
+
+def _make_tracks_jsonl() -> str:
+    lines = [
+        _make_frame_line(0, [_det(1), _det(2)]),
+        _make_frame_line(1, [_det(1), _det(2), _det(3)]),
+        _make_frame_line(2, [_det(1), _det(3)]),
+        _make_frame_line(3, [_det(2), _det(3)]),
+        _make_frame_line(4, [_det(1), _det(2), _det(3)]),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _make_metadata_json() -> str:
+    return json.dumps(_SAMPLE_METADATA)
+
+
+def _setup_video_with_import(ctx, login_headers):
+    """Helper: creates project + detection import video. Returns (headers, project, categories, video)."""
+    headers = login_headers()
+    project = ctx.client.post(
+        "/api/projects", json={"name": "Review测试项目", "description": "test"}, headers=headers
+    ).json()
+    pid = project["id"]
+
+    batch = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches", headers=headers
+    )
+    assert batch.status_code == 201, batch.text
+    bid = batch.json()["id"]
+
+    ctx.client.put(
+        f"/api/projects/{pid}/video-import-batches/{bid}/files/video",
+        files={"file": ("clip.mp4", b"FAKE-MP4")},
+        headers=headers,
+    )
+    ctx.client.put(
+        f"/api/projects/{pid}/video-import-batches/{bid}/files/tracks",
+        files={"file": ("tracks.jsonl", _make_tracks_jsonl().encode())},
+        headers=headers,
+    )
+    ctx.client.put(
+        f"/api/projects/{pid}/video-import-batches/{bid}/files/metadata",
+        files={"file": ("metadata.json", _make_metadata_json().encode())},
+        headers=headers,
+    )
+    resp = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{bid}/complete",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    vid = resp.json()["video_id"]
+
+    cats = ctx.client.get(f"/api/projects/{pid}/categories", headers=headers).json()
+    return headers, project, cats, {"id": vid}
+
+
+def _annotate(ctx, headers, project, video, category_id, start_time=0.0):
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
             "category_id": category_id,
             "start_time": start_time,
-            "end_time": start_time + 2.0,
+            "end_time": start_time + 0.04,
             "start_frame": int(start_time * 25),
-            "end_frame": int((start_time + 2.0) * 25),
+            "end_frame": int((start_time + 0.04) * 25),
         },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _annotate_with_mouse(ctx, headers, project, video, category_id, start_time=0.0, mouse_ids=None):
+    """Create annotation with optional mouse_ids for review tests that need valid mouse_ids."""
+    payload = {
+        "category_id": category_id,
+        "start_time": start_time,
+        "end_time": start_time + 0.04,
+        "start_frame": int(start_time * 25),
+        "end_frame": int((start_time + 0.04) * 25),
+    }
+    if mouse_ids is not None:
+        payload["mouse_ids"] = mouse_ids
+    resp = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
+        json=payload,
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
@@ -85,26 +205,32 @@ def _annotation_review_fields(ctx, video_id) -> list[tuple[str, int | None]]:
 # ---------- submit ----------
 
 
-def test_submit_requires_at_least_one_annotation(ctx):
-    setup = ctx.make_project_with_video()
-    headers, project, video = setup["headers"], setup["project"], setup["video"]
+def test_submit_requires_at_least_one_annotation(ctx, login_headers):
+    headers, project, _categories, video = _setup_video_with_import(ctx, login_headers)
     resp = _submit(ctx, headers, project, video)
     assert resp.status_code == 400
     assert "at least one annotation" in resp.json()["detail"].lower()
 
 
-def test_submit_success_sets_submitted_and_resets_annotations(ctx):
+def test_submit_requires_detection_import(ctx):
+    """提交需要检测导入：无检测导入的视频应返回 400。"""
     setup = ctx.make_project_with_video()
     headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
     )
     _annotate(ctx, headers, project, video, categories[0]["id"])
+    resp = _submit(ctx, headers, project, video)
+    assert resp.status_code == 400
+    assert "no detection import" in resp.json()["detail"].lower()
+
+
+def test_submit_success_sets_submitted_and_resets_annotations(ctx, login_headers):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
 
     resp = _submit(ctx, headers, project, video)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["workflow_status"] == "submitted"
     assert body["submitted_at"] is not None
@@ -115,37 +241,35 @@ def test_submit_success_sets_submitted_and_resets_annotations(ctx):
     assert state["workflow_status"] == "submitted"
     assert state["annotation_revision"] == 1
     assert state["submitted_at"] is not None
-    # 提交后标注全部 pending、reviewer 清空
     assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
 
 
-def test_submit_roles(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
+def test_submit_rejects_needs_mouse_ids(ctx, login_headers):
+    """有检测导入但标注缺少 mouse_ids 时提交应被拒绝。"""
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     _annotate(ctx, headers, project, video, categories[0]["id"])
+    resp = _submit(ctx, headers, project, video)
+    assert resp.status_code == 400
 
-    # reviewer 不可提交
+
+def test_submit_roles(ctx, login_headers):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+
     reviewer_id = _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
     assert _submit(ctx, reviewer_headers, project, video).status_code == 403
 
-    # 非成员不可提交
     outsider_id = ctx.create_user("outsider")
     outsider_headers = login_headers(username="outsider", password="pw123")
     assert _submit(ctx, outsider_headers, project, video).status_code == 403
 
-    # annotator 可提交
     annotator_id = ctx.create_user("annot1")
     ctx.add_member(project["id"], annotator_id, role="annotator")
     annotator_headers = login_headers(username="annot1", password="pw123")
     assert _submit(ctx, annotator_headers, project, video).status_code == 200
 
-    # admin 可提交（先退回 rejected 再验证）
     _review(ctx, reviewer_headers, project, video, "rejected")
     admin_id = ctx.create_user("admin1")
     ctx.add_member(project["id"], admin_id, role="admin")
@@ -154,66 +278,45 @@ def test_submit_roles(ctx, login_headers):
 
 
 def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
-    # draft → 可提交（上面已证明）；提交后再提交 → 400
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 400
 
-    # rejected → 可重新提交；提交中再提交 → 400
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "rejected"
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 400
 
-    # approved → 拒绝提交
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "approved"
     assert _submit(ctx, headers, project, video).status_code == 400
 
 
 def test_submit_resubmit_resets_annotation_review_fields(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    ann = _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
-    # 审核后标注为 rejected 且 reviewer 已记录
     with ctx.session_factory() as db:
         a = db.get(Annotation, ann["id"])
         assert a.review_status == "rejected"
         assert a.reviewer_id is not None
 
-    # 重新提交 → 标注回到 pending、reviewer 清空
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
 
 
-def test_submit_cross_project_video_404(ctx):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
+def test_submit_cross_project_video_404(ctx, login_headers):
+    headers, project, _categories, video = _setup_video_with_import(ctx, login_headers)
     other = ctx.client.post("/api/projects", json={"name": "别的项目"}, headers=headers).json()
     resp = _submit(ctx, headers, other, video)
     assert resp.status_code == 404
@@ -223,26 +326,19 @@ def test_submit_cross_project_video_404(ctx):
 
 
 def test_queue_roles_and_submitted_only(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
 
+    # Create a second video in the same project, without detection import
     video2 = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
         json={"filename": "s2.mp4"},
         headers=headers,
     ).json()
-    _annotate(ctx, headers, project, video2, categories[1]["id"], start_time=5.0)
 
-    # 提交一个、另一个保持 draft
     assert _submit(ctx, headers, project, video).status_code == 200
 
-    # 非成员 403、annotator 403
     ctx.create_user("outsider")
     outsider_headers = login_headers(username="outsider", password="pw123")
     assert _queue(ctx, outsider_headers, project).status_code == 403
@@ -251,15 +347,13 @@ def test_queue_roles_and_submitted_only(ctx, login_headers):
     annot_headers = login_headers(username="annot2", password="pw123")
     assert _queue(ctx, annot_headers, project).status_code == 403
 
-    # owner / reviewer / admin 可见，且只含 submitted
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
     queue = _queue(ctx, headers, project)
     assert queue.status_code == 200
     ids = [v["id"] for v in queue.json()]
-    assert ids == [video["id"]]  # draft 的 video2 不在队列
+    assert ids == [video["id"]]
 
-    # reviewer 视角一致
     assert [v["id"] for v in _queue(ctx, reviewer_headers, project).json()] == ids
 
     admin_id = ctx.create_user("admin3")
@@ -269,47 +363,60 @@ def test_queue_roles_and_submitted_only(ctx, login_headers):
 
 
 def test_queue_excludes_rejected_and_approved(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
     assert _submit(ctx, headers, project, video).status_code == 200
-    assert _queue(ctx, headers, project).json()  # submitted 在队列
+    assert _queue(ctx, headers, project).json()
 
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
-    assert _queue(ctx, headers, project).json() == []  # rejected 不在队列
+    assert _queue(ctx, headers, project).json() == []
 
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
-    assert _queue(ctx, headers, project).json() == []  # approved 不在队列
+    assert _queue(ctx, headers, project).json() == []
 
 
 def test_queue_cross_project_isolation(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    other = ctx.client.post("/api/projects", json={"name": "隔离项目"}, headers=headers).json()
-    other_video = ctx.client.post(
-        f"/api/projects/{other['id']}/videos", json={"filename": "o.mp4"}, headers=headers
-    ).json()
-    other_cat = ctx.client.get(
-        f"/api/projects/{other['id']}/categories", headers=headers
-    ).json()[0]
-    _annotate(ctx, headers, other, other_video, other_cat["id"])
-    assert _submit(ctx, headers, other, other_video).status_code == 200
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
 
-    # A 项目的队列看不到 B 项目的 submitted 视频
+    # Create another project with detection import and submit a video there
+    other_headers = login_headers()
+    other_project = ctx.client.post(
+        "/api/projects", json={"name": "隔离项目"}, headers=other_headers
+    ).json()
+    other_pid = other_project["id"]
+
+    obatch = ctx.client.post(f"/api/projects/{other_pid}/video-import-batches", headers=other_headers)
+    assert obatch.status_code == 201
+    obid = obatch.json()["id"]
+
+    ctx.client.put(
+        f"/api/projects/{other_pid}/video-import-batches/{obid}/files/video",
+        files={"file": ("o.mp4", b"FAKE-MP4")}, headers=other_headers,
+    )
+    ctx.client.put(
+        f"/api/projects/{other_pid}/video-import-batches/{obid}/files/tracks",
+        files={"file": ("tracks.jsonl", _make_tracks_jsonl().encode())}, headers=other_headers,
+    )
+    ctx.client.put(
+        f"/api/projects/{other_pid}/video-import-batches/{obid}/files/metadata",
+        files={"file": ("metadata.json", _make_metadata_json().encode())}, headers=other_headers,
+    )
+    oresp = ctx.client.post(f"/api/projects/{other_pid}/video-import-batches/{obid}/complete", headers=other_headers)
+    assert oresp.status_code == 200
+    other_vid = oresp.json()["video_id"]
+
+    other_cats = ctx.client.get(f"/api/projects/{other_pid}/categories", headers=other_headers).json()
+    ocat = next((c for c in other_cats if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), other_cats[0])
+    other_video = {"id": other_vid}
+    _annotate_with_mouse(ctx, other_headers, other_project, other_video, ocat["id"], mouse_ids=[1])
+    assert _submit(ctx, other_headers, other_project, other_video).status_code == 200
+
+    # Project A's queue should not see project B's submitted video
     assert _queue(ctx, headers, project).json() == []
 
 
@@ -317,14 +424,9 @@ def test_queue_cross_project_isolation(ctx, login_headers):
 
 
 def test_review_history_member_readable_and_order(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
@@ -342,13 +444,11 @@ def test_review_history_member_readable_and_order(ctx, login_headers):
     assert rows[0]["annotation_revision"] == 1
     assert rows[0]["reviewer"] == "reviewer1"
 
-    # 成员（annotator）也可读历史
     annot_id = ctx.create_user("annot4")
     ctx.add_member(project["id"], annot_id, role="annotator")
     annot_headers = login_headers(username="annot4", password="pw123")
     assert _history(ctx, annot_headers, project, video).status_code == 200
 
-    # 非成员 403；跨项目 404
     ctx.create_user("outsider")
     outsider_headers = login_headers(username="outsider", password="pw123")
     assert _history(ctx, outsider_headers, project, video).status_code == 403
@@ -357,31 +457,23 @@ def test_review_history_member_readable_and_order(ctx, login_headers):
 
 
 def test_review_history_accumulates_across_revisions(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    ann = _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
-    # 第一轮：提交 → 驳回（revision 1）
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
 
-    # 修改标注 → 视频失效回 draft、revision 2
     patch = ctx.client.patch(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations/{ann['id']}",
-        json={"end_time": 9.0},
+        json={"end_time": 0.12, "end_frame": 3},
         headers=headers,
     )
     assert patch.status_code == 200
     assert _video_state(ctx, video["id"])["annotation_revision"] == 2
 
-    # 第二轮：重新提交 → 通过（revision 2）
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
 
@@ -395,14 +487,9 @@ def test_review_history_accumulates_across_revisions(ctx, login_headers):
 
 
 def test_review_approve_syncs_video_and_annotations(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    ann = _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     reviewer_id = _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
@@ -428,14 +515,9 @@ def test_review_approve_syncs_video_and_annotations(ctx, login_headers):
 
 
 def test_review_reject_syncs_video_and_annotations(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    ann = _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     reviewer_id = _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
@@ -455,36 +537,26 @@ def test_review_reject_syncs_video_and_annotations(ctx, login_headers):
 
 
 def test_review_roles_and_state_gate(ctx, login_headers):
-    setup = ctx.make_project_with_video()
-    headers, project, categories, video = (
-        setup["headers"],
-        setup["project"],
-        setup["categories"],
-        setup["video"],
-    )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
+    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
-    # 非成员 403
     ctx.create_user("outsider")
     outsider_headers = login_headers(username="outsider", password="pw123")
     assert _review(ctx, outsider_headers, project, video, "approved").status_code == 403
 
-    # annotator 不可审核
     annot_id = ctx.create_user("annot5")
     ctx.add_member(project["id"], annot_id, role="annotator")
     annot_headers = login_headers(username="annot5", password="pw123")
     assert _review(ctx, annot_headers, project, video, "approved").status_code == 403
 
-    # 未提交（draft）不可审核
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 400
 
-    # 提交后审核 → 通过；再审核 → 400（已非 submitted）
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 400
 
-    # 跨项目视频 404（owner 同时是两项目成员 → 通过项目权限后按视频归属返回 404）
     other = ctx.client.post("/api/projects", json={"name": "别的"}, headers=headers).json()
     assert _review(ctx, headers, other, video, "approved").status_code == 404

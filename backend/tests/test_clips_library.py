@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models import Annotation, Clip, User, Video
+from app.models import Annotation, Clip, Video
 
 from .conftest import auth_headers
 
@@ -96,24 +96,26 @@ def _add_clip(ctx, project_id, annotation_id, status="ready", rev=1) -> None:
 
 
 def _approve(ctx, project, video) -> None:
-    """提交并 approve（media_ctx 同步 worker 自动生成 ready clips）。"""
+    """直接设置 approved 并入队媒体任务；本测试不覆盖 YOLO 提交前置条件。"""
     with ctx.session_factory() as db:
-        n = db.query(User).count()
-    name = f"rev{n}"
-    user_id = ctx.create_user(name)
-    ctx.add_member(project["id"], user_id, role="reviewer")
-    rev_headers = auth_headers(ctx.client, name, "pw123")
-    sub = ctx.client.post(
-        f"/api/projects/{project['id']}/videos/{video['id']}/submit",
-        headers=auth_headers(ctx.client),
-    )
-    assert sub.status_code == 200, sub.text
-    resp = ctx.client.post(
-        f"/api/projects/{project['id']}/videos/{video['id']}/review",
-        json={"result": "approved", "comment": "ok"},
-        headers=rev_headers,
-    )
-    assert resp.status_code == 200, resp.text
+        v = db.get(Video, video["id"])
+        v.workflow_status = "approved"
+        v.submitted_at = datetime.utcnow()
+        v.approved_at = datetime.utcnow()
+        v.approved_by = 1
+        for ann in db.query(Annotation).filter(Annotation.video_id == video["id"]).all():
+            ann.review_status = "approved"
+            ann.mouse_ids = ann.mouse_ids or [1]
+            ann.mouse_id_status = "valid"
+        db.commit()
+
+    with ctx.session_factory() as db:
+        from app.media_jobs import enqueue_media_job
+
+        job = enqueue_media_job(db, db.get(Video, video["id"]), ctx.app.state.settings)
+        job_id = job.id if job is not None else None
+    if job_id is not None:
+        ctx.app.state.media_worker.start(recover=False)
 
 
 # ---------- 隔离：审核状态 / 视频状态 ----------

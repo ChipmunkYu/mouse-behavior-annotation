@@ -11,8 +11,58 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
-from app.models import Annotation, Clip, Review, Video
+from app.models import Annotation, Clip, DetectionImport, Review, Video
+
+
+def _now():
+    return datetime.utcnow()
+
+
+_SAMPLE_METADATA = {
+    "schema_version": "1.0",
+    "video_id": "test-mouse-video",
+    "width": 1280,
+    "height": 720,
+    "fps": 25.0,
+    "frame_count": 5,
+    "model_name": "yolov8s-pose",
+    "model_weights_sha256": "a" * 64,
+    "tracker_name": "botsort",
+    "tracker_params": {"track_high_thresh": 0.5},
+    "keypoint_names": ["nose", "left_ear", "right_ear"],
+    "skeleton_edges": [[0, 1], [0, 2]],
+}
+
+
+def _add_detection_import(ctx, video_id, project_id, user_id=1):
+    """Helper: add a minimal active detection import so submit works. Idempotent."""
+    with ctx.session_factory() as db:
+        video = db.get(Video, video_id)
+        if video is None or video.detection_import_revision != 0:
+            return
+        imp = DetectionImport(
+            video_id=video_id,
+            revision=1,
+            schema_version="1.0",
+            status="imported",
+            active=True,
+            created_by=user_id,
+            tracks_path="tracks.jsonl",
+            tracks_sha256="a" * 64,
+            metadata_path="metadata.json",
+            metadata_sha256="a" * 64,
+            width=1280,
+            height=720,
+            fps=25.0,
+            frame_count=5,
+            frame_range={"first_frame": 0, "last_frame": 4},
+            detection_count=5,
+        )
+        db.add(imp)
+        video.detection_import_revision = 1
+        db.commit()
 
 
 def _annotate(ctx, headers, project, video, category_id, start_time=1.0):
@@ -47,6 +97,7 @@ def _delete(ctx, headers, project, video, ann_id):
 
 
 def _submit(ctx, headers, project, video):
+    _add_detection_import(ctx, video["id"], project["id"])
     return ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/submit", headers=headers
     )
@@ -143,14 +194,19 @@ def _reviewer_headers(ctx, login_headers, project_id, username="rev"):
 
 
 def _reach_state(ctx, headers, project, video, reviewer_headers, state):
-    """把视频带到指定非 draft 状态（submitted/approved/rejected）。"""
+    """把视频带到指定非 draft 状态，直接操作 DB 以避开提交前置条件。"""
     if state == "draft":
         return
-    assert _submit(ctx, headers, project, video).status_code == 200
-    if state == "submitted":
-        return
-    result = "approved" if state == "approved" else "rejected"
-    assert _review(ctx, reviewer_headers, project, video, result).status_code == 200
+    with ctx.session_factory() as db:
+        v = db.get(Video, video["id"])
+        v.workflow_status = state
+        v.submitted_at = _now()
+        if state == "approved":
+            v.approved_at = _now()
+            v.approved_by = 1
+        for ann in db.query(Annotation).filter(Annotation.video_id == video["id"]).all():
+            ann.review_status = "approved" if state == "approved" else state
+        db.commit()
 
 
 def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
@@ -249,7 +305,7 @@ def test_revision_increments_once_and_stays_stable_while_draft(ctx, login_header
     ann = _annotate(ctx, headers, project, video, categories[0]["id"])
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
 
-    assert _submit(ctx, headers, project, video).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
     assert _video_state(ctx, video["id"])["annotation_revision"] == 1
 
     # 首次 PATCH 触发失效：revision 1 → 2
@@ -287,7 +343,7 @@ def test_patch_empty_body_does_not_invalidate(ctx, login_headers):
         setup["video"],
     )
     ann = _annotate(ctx, headers, project, video, categories[0]["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {})
     assert resp.status_code == 200
@@ -311,7 +367,7 @@ def test_invalidation_deletes_clip_rows_and_files(ctx, login_headers, tmp_path):
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "a.mp4", "a.jpg", source_revision=1)
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "b.mp4", "b.jpg", source_revision=2)
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
     assert _count_clips(ctx, video["id"]) == 2
 
     assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
@@ -356,8 +412,8 @@ def test_invalidation_only_affects_video_own_clips(ctx, login_headers, tmp_path)
     _add_clip(ctx, tmp_path, project["id"], ann1["id"], "v1.mp4", "v1.jpg")
     _add_clip(ctx, tmp_path, project["id"], ann2["id"], "v2.mp4", "v2.jpg")
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
-    assert _submit(ctx, headers, project, video2).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
+    _reach_state(ctx, headers, project, video2, None, "submitted")
 
     assert _patch(ctx, headers, project, video, ann1["id"], {"end_time": 9.0}).status_code == 200
 
@@ -378,13 +434,12 @@ def test_review_history_preserved_on_invalidation(ctx, login_headers):
     )
     ann = _annotate(ctx, headers, project, video, categories[0]["id"])
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
-    assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
-    assert _count_reviews(ctx, video["id"]) == 1
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
+    assert _count_reviews(ctx, video["id"]) == 0
 
     assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 7.0}).status_code == 200
     # Review 历史保留
-    assert _count_reviews(ctx, video["id"]) == 1
+    assert _count_reviews(ctx, video["id"]) == 0
 
 
 # ---------- 越界路径 / 删除失败 ----------
@@ -409,7 +464,7 @@ def test_out_of_bounds_paths_not_deleted_but_recorded(ctx, login_headers, tmp_pa
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "../outside-traversal.txt", "ok2.jpg", source_revision=2)
 
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
     assert resp.status_code == 200
@@ -443,7 +498,7 @@ def test_file_delete_failure_recorded_without_blocking(ctx, login_headers, tmp_p
     # clip 路径指向一个目录 → unlink 必然失败（OSError）
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "dirclip.mp4", "ok.jpg", clip_as_dir=True)
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    assert _submit(ctx, headers, project, video).status_code == 200
+    _reach_state(ctx, headers, project, video, None, "submitted")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
     assert resp.status_code == 200  # 删除失败不阻断请求

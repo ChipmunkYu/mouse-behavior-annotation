@@ -48,6 +48,8 @@ def _setup(ctx, *, count: int = 2, ready: int = 0):
         for index, annotation_id in enumerate(annotation_ids):
             annotation = db.get(Annotation, annotation_id)
             annotation.review_status = "approved"
+            annotation.mouse_id_status = "valid"
+            annotation.mouse_ids = [1]
             if index < ready:
                 name = f"existing_{annotation_id}.mp4"
                 thumb_name = f"existing_{annotation_id}.jpg"
@@ -91,12 +93,15 @@ def test_first_export_generates_real_zip_annotations_and_download(media_ctx):
         assert sum(name.endswith(".mp4") for name in names) == 2
         for category in categories:
             assert any(
-                name.startswith(f"{category['group']}/{category['name']}/") for name in names
+                name.startswith(f"clips/{category['group']}/{category['name']}/") for name in names
             )
         events = json.loads(zf.read("annotations.json"))
         assert len(events) == 2
         assert {event["behavior"] for event in events} == {c["name"] for c in categories}
         assert all(event["review_status"] == "approved" for event in events)
+        assert all(event.get("clip_file") and event["clip_file"].startswith("clips/") for event in events)
+        assert all(event["annotation_id"] in annotation_ids for event in events)
+        assert all("mouse_ids" in event for event in events)
 
     status = ctx.client.get(
         f"/api/projects/{project['id']}/export/status", headers=headers

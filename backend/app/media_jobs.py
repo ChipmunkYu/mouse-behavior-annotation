@@ -62,11 +62,11 @@ def _upsert_media_job(db: Session, video: Video, *, force_requeue: bool = False)
     - 已有 queued/running/succeeded → 原样返回（幂等，不重复调度）。
     - 已有 failed/cancelled → 重置回 queued（重试；attempts 清零，保留同一行）。
     """
-    dedupe_key = media_dedupe_key(video.id, video.annotation_revision)
+    dedupe_key = media_dedupe_key(video.id, video.media_revision)
     payload = {
         "video_id": video.id,
         "project_id": video.project_id,
-        "revision": video.annotation_revision,
+        "revision": video.media_revision,
     }
     try:
         db.execute(
@@ -293,7 +293,8 @@ def ensure_pending_clips(db: Session, video: Video) -> int:
             stmt.values(
                 project_id=video.project_id,
                 annotation_id=ann.id,
-                source_revision=video.annotation_revision,
+                source_revision=video.media_revision,
+                media_revision=video.media_revision,
                 status="pending",
             ).on_conflict_do_nothing(index_elements=["annotation_id", "source_revision"])
         )
@@ -309,7 +310,7 @@ def reset_missing_ready_clips(db: Session, video: Video, settings) -> bool:
         .join(Annotation, Annotation.id == Clip.annotation_id)
         .filter(
             Annotation.video_id == video.id,
-            Clip.source_revision == video.annotation_revision,
+            Clip.source_revision == video.media_revision,
             Clip.status == "ready",
         )
         .all()
@@ -348,7 +349,7 @@ def reset_interrupted_job_clips(db: Session, job: BackgroundJob) -> int:
         video_id = payload.get("video_id")
         revision = payload.get("revision")
         video = db.get(Video, video_id) if video_id else None
-        if video is not None and video.annotation_revision == revision:
+        if video is not None and video.media_revision == revision:
             candidates = (
                 db.query(Clip)
                 .join(Annotation, Annotation.id == Clip.annotation_id)
@@ -373,7 +374,7 @@ def reset_interrupted_job_clips(db: Session, job: BackgroundJob) -> int:
                 .filter(
                     Annotation.id.in_(annotation_ids),
                     Clip.status == "processing",
-                    Clip.source_revision == Video.annotation_revision,
+                    Clip.source_revision == Video.media_revision,
                 )
                 .all()
             )
@@ -552,10 +553,10 @@ class MediaWorker:
             return "video no longer exists"
         if video.workflow_status != "approved":
             return f"video workflow is {video.workflow_status!r}, not 'approved'"
-        if video.annotation_revision != revision:
+        if video.media_revision != revision:
             return (
                 f"revision mismatch (job revision {revision}, "
-                f"video revision {video.annotation_revision})"
+                f"video revision {video.media_revision})"
             )
         return None
 

@@ -1,4 +1,4 @@
-"""标注接口：增删改查 + 审核工作流联动 + 统一事件 JSON 导出。
+"""标注接口：增删改查 + 审核工作流联动 + 统一事件 JSON 导出 + 参与小鼠 ID（v0.6）。
 
 审核工作流联动（批次 3）：
 - 标注写入（创建/修改/删除）仅 owner/admin/annotator 角色可执行；reviewer 只审核不可改标注。
@@ -26,7 +26,18 @@ from ..config import Settings
 from ..cleanup_io import append_cleanup_issues, remove_checked, safe_path
 from ..database import get_db
 from ..deps import project_access
-from ..models import Annotation, BehaviorCategory, Clip, Video
+from ..export_jobs import _event_record
+from ..models import (
+    Annotation,
+    BehaviorCategory,
+    Clip,
+    CorrectedDetectionAssignment,
+    CorrectedTrack,
+    DetectionImport,
+    RawDetection,
+    SuppressionDetection,
+    Video,
+)
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
 
 router = APIRouter(tags=["annotations"])
@@ -35,7 +46,7 @@ VALID_CONFIDENCE = {"certain", "uncertain", "occluded"}
 _OWNER_ADMIN = {"owner", "admin"}
 # 标注写入角色：reviewer 只审核不可改标注
 _EDITOR_ROLES = {"owner", "admin", "annotator"}
-# PATCH 中属于“实际用户可编辑字段”的字段；任一出现即视为修改尝试
+# PATCH 中属于"实际用户可编辑字段"的字段；任一出现即视为修改尝试
 EDITABLE_FIELDS = (
     "category_id",
     "start_time",
@@ -44,6 +55,9 @@ EDITABLE_FIELDS = (
     "end_frame",
     "confidence",
     "crop_region",
+    "mouse_ids",
+    "detection_import_revision",
+    "identity_revision",
 )
 
 
@@ -75,6 +89,95 @@ def _get_category_in_project(db: Session, project_id: int, category_id: int) -> 
     if category is None or category.project_id != project_id:
         raise HTTPException(status_code=400, detail="Category does not belong to this project")
     return category
+
+
+def _get_active_import(db: Session, video_id: int) -> DetectionImport | None:
+    return (
+        db.query(DetectionImport)
+        .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)
+        .first()
+    )
+
+
+def _has_unsuppressed_detections(
+    db: Session,
+    imp_id: int,
+    display_track_id: int,
+    start_frame: int,
+    end_frame: int,
+    identity_revision: int,
+) -> bool:
+    count = (
+        db.query(RawDetection)
+        .join(
+            CorrectedDetectionAssignment,
+            CorrectedDetectionAssignment.raw_detection_id == RawDetection.id,
+        )
+        .join(
+            CorrectedTrack,
+            CorrectedTrack.id == CorrectedDetectionAssignment.corrected_track_id,
+        )
+        .outerjoin(
+            SuppressionDetection,
+            SuppressionDetection.raw_detection_id == RawDetection.id,
+        )
+        .filter(
+            RawDetection.detection_import_id == imp_id,
+            CorrectedTrack.active == True,
+            CorrectedTrack.display_track_id == display_track_id,
+            RawDetection.frame_index >= start_frame,
+            RawDetection.frame_index <= end_frame,
+            SuppressionDetection.raw_detection_id == None,
+            CorrectedDetectionAssignment.identity_revision == identity_revision,
+        )
+        .count()
+    )
+    return count > 0
+
+
+def _validate_mouse_ids(
+    db: Session,
+    imp: DetectionImport,
+    mouse_ids: list[int],
+    start_frame: int,
+    end_frame: int,
+    category: BehaviorCategory,
+    identity_revision: int,
+) -> None:
+    normalized = sorted(set(mouse_ids))
+    count = len(normalized)
+    if count < category.mouse_count_min:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Category '{category.name}' requires at least {category.mouse_count_min} mouse; got {count}",
+        )
+    if category.mouse_count_max is not None and count > category.mouse_count_max:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Category '{category.name}' allows at most {category.mouse_count_max} mice; got {count}",
+        )
+
+    for tid in normalized:
+        track = (
+            db.query(CorrectedTrack)
+            .filter(
+                CorrectedTrack.detection_import_id == imp.id,
+                CorrectedTrack.display_track_id == tid,
+                CorrectedTrack.active == True,
+            )
+            .first()
+        )
+        if track is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Track ID {tid} is not an active corrected track in the current detection import",
+            )
+
+        if not _has_unsuppressed_detections(db, imp.id, tid, start_frame, end_frame, identity_revision):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Track ID {tid} has no unsuppressed detections in frame range [{start_frame}, {end_frame}]",
+            )
 
 
 def _get_annotation_in_video(db: Session, video_id: int, annotation_id: int) -> Annotation:
@@ -119,11 +222,14 @@ def _resolve_stored_file(
     return safe_path(stored, root_dir, data_dir)
 
 
-def _invalidate_video(db: Session, video: Video, settings: Settings) -> _InvalidationPlan:
+def _invalidate_video(db: Session, video: Video, settings: Settings, *, increment_media: bool = True) -> _InvalidationPlan:
     """视频非 draft 时的失效处理（与标注写入同一事务，由调用方统一 commit）。
 
     - 使视频回到 draft；annotation_revision +1；清空 submitted/approved 字段。
-    - 删除该视频所有 Clip 记录（批次 4 才生成 Clip，本批不生成）。
+    - 若 `increment_media=True`（时间/帧/crop_region 变化）：递增 media_revision，
+      删除该视频所有 Clip 记录（批次 4 才生成 Clip，本批不生成）。
+    - 若 `increment_media=False`（类别/mouse_ids/检测导入/身份变化）：
+      仅递增 annotation_revision，不删除现有 Clip（它们仍然有效）。
     - 返回实体文件清理计划：位于 clips_dir/thumbnails_dir 内的文件待删除；
       越界路径进入 `issues` 只记录不删除。
     - Review 历史保留（不删除任何 Review 行）。
@@ -132,44 +238,46 @@ def _invalidate_video(db: Session, video: Video, settings: Settings) -> _Invalid
     plan = _InvalidationPlan()
     if video.workflow_status == "draft":
         return plan
-    clips = (
-        db.query(Clip)
-        .join(Annotation, Annotation.id == Clip.annotation_id)
-        .filter(Annotation.video_id == video.id)
-        .all()
-    )
-    for clip in clips:
-        for stored, root, media_kind in (
-            (clip.clip_path, settings.clips_dir, "clip"),
-            (clip.thumbnail_path, settings.thumbnails_dir, "thumbnail"),
-        ):
-            path, reason = _resolve_stored_file(stored, root, settings.data_dir)
-            if path is not None:
-                plan.files.append(
-                    {
-                        "path": path,
-                        "annotation_id": clip.annotation_id,
-                        "revision": clip.source_revision,
-                        "media_kind": media_kind,
-                        "root": root.name,
-                    }
-                )
-            elif reason is not None:
-                plan.issues.append(
-                    {
-                        "kind": "out-of-bounds",
-                        "path": stored,
-                        "clip_id": clip.id,
-                        "annotation_id": clip.annotation_id,
-                        "revision": clip.source_revision,
-                        "media_kind": media_kind,
-                        "video_id": video.id,
-                        "stored": stored,
-                        "root": root.name,
-                        "message": "stored path resolved outside the allowed root; file NOT deleted",
-                    }
-                )
-        db.delete(clip)
+    if increment_media:
+        clips = (
+            db.query(Clip)
+            .join(Annotation, Annotation.id == Clip.annotation_id)
+            .filter(Annotation.video_id == video.id)
+            .all()
+        )
+        for clip in clips:
+            for stored, root, media_kind in (
+                (clip.clip_path, settings.clips_dir, "clip"),
+                (clip.thumbnail_path, settings.thumbnails_dir, "thumbnail"),
+            ):
+                path, reason = _resolve_stored_file(stored, root, settings.data_dir)
+                if path is not None:
+                    plan.files.append(
+                        {
+                            "path": path,
+                            "annotation_id": clip.annotation_id,
+                            "revision": clip.source_revision,
+                            "media_kind": media_kind,
+                            "root": root.name,
+                        }
+                    )
+                elif reason is not None:
+                    plan.issues.append(
+                        {
+                            "kind": "out-of-bounds",
+                            "path": stored,
+                            "clip_id": clip.id,
+                            "annotation_id": clip.annotation_id,
+                            "revision": clip.source_revision,
+                            "media_kind": media_kind,
+                            "video_id": video.id,
+                            "stored": stored,
+                            "root": root.name,
+                            "message": "stored path resolved outside the allowed root; file NOT deleted",
+                        }
+                    )
+            db.delete(clip)
+        video.media_revision += 1
     video.workflow_status = "draft"
     video.annotation_revision += 1
     video.submitted_at = None
@@ -232,6 +340,10 @@ def _to_out(annotation: Annotation) -> AnnotationOut:
         confidence=annotation.confidence,
         review_status=annotation.review_status,
         crop_region=annotation.crop_region,
+        mouse_ids=annotation.mouse_ids or [],
+        mouse_id_status=annotation.mouse_id_status,
+        detection_import_revision=annotation.detection_import_revision,
+        identity_revision=annotation.identity_revision,
         created_at=annotation.created_at,
         updated_at=annotation.updated_at,
         annotator=annotation.annotator.username if annotation.annotator else None,
@@ -286,20 +398,40 @@ def create_annotation(
         raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
     _validate_interval(body.start_time, body.end_time, body.start_frame, body.end_frame)
 
-    # 非 draft 视频新增标注：先失效回 draft（修订+1、清 submitted/approved、删 Clip）
-    plan = _invalidate_video(db, video, request.app.state.settings)
+    imp = _get_active_import(db, video_id)
+    mouse_ids: list[int] = []
+    mouse_id_status = "needs_mouse_ids"
+    di_rev = imp.revision if imp else 0
+    id_rev = video.identity_revision
+
+    if body.mouse_ids is not None:
+        if imp is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot specify mouse_ids without an active detection import",
+            )
+        deduped = sorted(set(body.mouse_ids))
+        _validate_mouse_ids(db, imp, deduped, body.start_frame, body.end_frame, category, id_rev)
+        mouse_ids = deduped
+        mouse_id_status = "valid"
+
+    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
 
     annotation = Annotation(
         video_id=video_id,
-        annotator_id=access[1].user_id,  # 标注者为当前登录用户（必须是项目成员，已由依赖保证）
+        annotator_id=access[1].user_id,
         category_id=category.id,
         start_time=body.start_time,
         end_time=body.end_time,
         start_frame=body.start_frame,
         end_frame=body.end_frame,
         confidence=body.confidence,
-        review_status="pending",  # 创建固定 pending；审核状态只能走审核 API
+        review_status="pending",
         crop_region=body.crop_region,
+        mouse_ids=mouse_ids,
+        mouse_id_status=mouse_id_status,
+        detection_import_revision=di_rev,
+        identity_revision=id_rev,
     )
     db.add(annotation)
     db.commit()
@@ -325,21 +457,9 @@ def export_annotations(
     )
     events: list[dict] = []
     for ann in rows:
-        events.append(
-            {
-                "video_id": f"video_{video.id}",
-                "start_time": ann.start_time,
-                "end_time": ann.end_time,
-                "start_frame": ann.start_frame,
-                "end_frame": ann.end_frame,
-                "behavior": ann.category.name if ann.category else None,
-                "crop_region": ann.crop_region,
-                "confidence": ann.confidence,
-                "annotator": ann.annotator.username if ann.annotator else None,
-                "reviewer": ann.reviewer.username if ann.reviewer else None,
-                "review_status": ann.review_status,
-            }
-        )
+        ready_clips = [clip for clip in ann.clips if clip.status == "ready" and clip.clip_path]
+        clip_file = max(ready_clips, key=lambda clip: clip.source_revision).clip_path if ready_clips else None
+        events.append(_event_record(ann, clip_file=clip_file))
     return events
 
 
@@ -357,7 +477,6 @@ def update_annotation(
     db: Session = Depends(get_db),
 ) -> AnnotationOut:
     _require_editor(access[1])
-    # 视频必须属于路径中的项目（防止跨项目通过其它成员关系路径修改标注）
     video = _get_video_in_project(db, project_id, video_id)
     annotation = _get_annotation_in_video(db, video_id, annotation_id)
     if not _can_modify(access[1].role, annotation, access[1].user_id):
@@ -366,6 +485,21 @@ def update_annotation(
             detail="Only the annotator or project owner/admin can modify this annotation",
         )
 
+    # 如果客户端提供了 revisions，与当前 annotation 的存储值比较；
+    # 不匹配则返回 409（乐观锁）
+    if body.detection_import_revision is not None:
+        if body.detection_import_revision != annotation.detection_import_revision:
+            raise HTTPException(
+                status_code=409,
+                detail=f"detection_import_revision mismatch: expected {annotation.detection_import_revision}, got {body.detection_import_revision}",
+            )
+    if body.identity_revision is not None:
+        if body.identity_revision != annotation.identity_revision:
+            raise HTTPException(
+                status_code=409,
+                detail=f"identity_revision mismatch: expected {annotation.identity_revision}, got {body.identity_revision}",
+            )
+
     if body.category_id is not None:
         category = _get_category_in_project(db, project_id, body.category_id)
         if not category.is_active:
@@ -373,10 +507,12 @@ def update_annotation(
     if body.confidence is not None and body.confidence not in VALID_CONFIDENCE:
         raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
 
-    # review_status 已在 Pydantic 层拒绝直接写入；实际用户可编辑字段任一出现即修改尝试，
-    # 非 draft 时先失效回 draft（修订+1、清 submitted/approved、删 Clip）
     has_editable_change = any(getattr(body, field) is not None for field in EDITABLE_FIELDS)
-    plan = _invalidate_video(db, video, request.app.state.settings) if has_editable_change else _InvalidationPlan()
+    media_changed = has_editable_change and any(
+        getattr(body, field) is not None
+        for field in ("start_time", "end_time", "start_frame", "end_frame", "crop_region")
+    )
+    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=media_changed) if has_editable_change else _InvalidationPlan()
 
     if body.category_id is not None:
         annotation.category_id = body.category_id
@@ -397,6 +533,33 @@ def update_annotation(
         annotation.end_frame,
     )
 
+    if body.mouse_ids is not None:
+        imp = _get_active_import(db, video_id)
+        if imp is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot specify mouse_ids without an active detection import",
+            )
+        cat = (
+            db.get(BehaviorCategory, body.category_id)
+            if body.category_id is not None
+            else annotation.category
+        )
+        deduped = sorted(set(body.mouse_ids))
+        _validate_mouse_ids(db, imp, deduped, annotation.start_frame, annotation.end_frame, cat, video.identity_revision)
+        annotation.mouse_ids = deduped
+        annotation.mouse_id_status = "valid"
+        annotation.detection_import_revision = imp.revision
+        annotation.identity_revision = video.identity_revision
+    elif (body.category_id is not None or body.start_frame is not None or body.end_frame is not None) and annotation.mouse_ids:
+        imp = _get_active_import(db, video_id)
+        if imp is not None:
+            cat = db.get(BehaviorCategory, body.category_id) if body.category_id is not None else annotation.category
+            try:
+                _validate_mouse_ids(db, imp, annotation.mouse_ids, annotation.start_frame, annotation.end_frame, cat, video.identity_revision)
+            except HTTPException:
+                annotation.mouse_id_status = "needs_mouse_ids"
+
     db.commit()
     _cleanup_files(plan, request.app.state.settings)
     db.refresh(annotation)
@@ -416,7 +579,6 @@ def delete_annotation(
     db: Session = Depends(get_db),
 ) -> None:
     _require_editor(access[1])
-    # 视频必须属于路径中的项目（与 update 一致）
     video = _get_video_in_project(db, project_id, video_id)
     annotation = _get_annotation_in_video(db, video_id, annotation_id)
     if not _can_modify(access[1].role, annotation, access[1].user_id):
@@ -424,8 +586,7 @@ def delete_annotation(
             status_code=403,
             detail="Only the annotator or project owner/admin can delete this annotation",
         )
-    # 失效与标注删除同一事务提交；提交成功后清理实体文件（失败/越界记日志，不阻断）
-    plan = _invalidate_video(db, video, request.app.state.settings)
+    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
     db.delete(annotation)
     db.commit()
     _cleanup_files(plan, request.app.state.settings)

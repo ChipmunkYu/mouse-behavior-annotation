@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,8 @@ from .media_jobs import (
     reset_interrupted_job_clips,
     resolve_entity_path,
 )
-from .models import Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Video
+from .models import Annotation, BackgroundJob, BehaviorCategory, Clip, DetectionImport, Project, Video
+from .routers.detection_imports import generate_corrected_tracks
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,7 @@ def approved_rows(
     """
     conds = [
         Annotation.review_status == APPROVED,
+        Annotation.mouse_id_status == "valid",
         Video.workflow_status == APPROVED,
         Video.project_id == project_id,
         BehaviorCategory.project_id == project_id,
@@ -133,7 +136,7 @@ def approved_rows(
             Clip,
             and_(
                 Clip.annotation_id == Annotation.id,
-                Clip.source_revision == Video.annotation_revision,
+                Clip.source_revision == Video.media_revision,
             ),
         )
         .filter(*conds)
@@ -179,21 +182,27 @@ def _clip_export_name(annotation: Annotation, used_names: set[str]) -> str:
     return name
 
 
-def _event_record(annotation: Annotation) -> dict:
-    """需求文档 §2.3 统一事件格式（与单视频 export 端点字段完全一致）。"""
-    return {
+def _event_record(annotation: Annotation, clip_file: str | None = None) -> dict:
+    """需求文档 §12 统一事件格式（含 clip_file / mouse_ids / revisions）。"""
+    record = {
+        "annotation_id": annotation.id,
         "video_id": f"video_{annotation.video_id}",
+        "clip_file": clip_file,
         "start_time": annotation.start_time,
         "end_time": annotation.end_time,
         "start_frame": annotation.start_frame,
         "end_frame": annotation.end_frame,
         "behavior": annotation.category.name if annotation.category else None,
+        "mouse_ids": annotation.mouse_ids or [],
+        "detection_import_revision": annotation.detection_import_revision,
+        "identity_revision": annotation.identity_revision,
         "crop_region": annotation.crop_region,
         "confidence": annotation.confidence,
         "annotator": annotation.annotator.username if annotation.annotator else None,
         "reviewer": annotation.reviewer.username if annotation.reviewer else None,
         "review_status": annotation.review_status,
     }
+    return record
 
 
 class ExportWorker:
@@ -408,7 +417,8 @@ class ExportWorker:
             clip = Clip(
                 project_id=video.project_id,
                 annotation_id=annotation.id,
-                source_revision=video.annotation_revision,
+                source_revision=video.media_revision,
+                media_revision=video.media_revision,
                 status="pending",
             )
             db.add(clip)
@@ -466,7 +476,7 @@ class ExportWorker:
                 Clip,
                 and_(
                     Clip.annotation_id == Annotation.id,
-                    Clip.source_revision == Video.annotation_revision,
+                    Clip.source_revision == Video.media_revision,
                 ),
             )
             .filter(Annotation.id == annotation_id, Video.id == video_id)
@@ -510,6 +520,52 @@ class ExportWorker:
                 require_ready=True,
             )
 
+    @staticmethod
+    def _validate_zip_integrity(zip_path: Path, events: list[dict], mp4_paths: list[str]) -> None:
+        """验证 ZIP 内 annotations.json 与 MP4 文件双向一一对应。
+
+        失败则抛出 MediaCommandError，不发布 ZIP。
+        """
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            all_names = zf.namelist()
+            mp4_names = sorted(
+                name for name in all_names
+                if name.startswith("clips/") and name.endswith(".mp4")
+            )
+            clip_files = sorted(
+                event.get("clip_file") or "" for event in events
+            )
+
+        if len(events) != len(mp4_names):
+            raise MediaCommandError(
+                f"ZIP integrity: {len(events)} event records but {len(mp4_names)} MP4 files"
+            )
+
+        if clip_files != mp4_names:
+            raise MediaCommandError(
+                f"ZIP integrity: clip_file entries do not match MP4 paths in archive"
+            )
+
+        if len(mp4_paths) != len(mp4_names):
+            raise MediaCommandError(
+                f"ZIP integrity: {len(mp4_paths)} tracked clip paths but {len(mp4_names)} MP4 files"
+            )
+
+        if set(mp4_paths) != set(mp4_names):
+            raise MediaCommandError(
+                "ZIP integrity: tracked clip paths do not match actual archive paths"
+            )
+
+        for cf in clip_files:
+            if not cf:
+                raise MediaCommandError("ZIP integrity: event record has empty clip_file")
+            if ".." in cf:
+                raise MediaCommandError(f"ZIP integrity: clip_file contains '..': {cf}")
+            if cf.startswith("/") or "\\" in cf:
+                raise MediaCommandError(
+                    f"ZIP integrity: clip_file is absolute or contains backslash: {cf}"
+                )
+
     def _package(
         self,
         db: Session,
@@ -529,36 +585,84 @@ class ExportWorker:
         staging.mkdir(parents=True, exist_ok=True)
         used_names: set[str] = set()
         events: list[dict] = []
+        mp4_paths: list[str] = []
+        zip_src: Path | None = None
         try:
             for annotation, clip_path in ready_items:
                 group = _sanitize_part(annotation.category.group) if annotation.category else "未分类"
                 category = (
                     _sanitize_part(annotation.category.name) if annotation.category else "未分类"
                 )
-                target_dir = staging / group / category
+                target_dir = staging / "clips" / group / category
                 target_dir.mkdir(parents=True, exist_ok=True)
-                target = target_dir / _clip_export_name(annotation, used_names)
+                clip_name = _clip_export_name(annotation, used_names)
+                target = target_dir / clip_name
                 try:
-                    os.link(clip_path, target)  # 硬链接优先（同盘秒级）
+                    os.link(clip_path, target)
                 except OSError:
-                    shutil.copy2(clip_path, target)  # 回退复制
-                events.append(_event_record(annotation))
+                    shutil.copy2(clip_path, target)
+                clip_file = f"clips/{group}/{category}/{clip_name}"
+                mp4_paths.append(clip_file)
+                events.append(_event_record(annotation, clip_file=clip_file))
             events.sort(key=lambda e: (e["start_time"], e["video_id"]))
             with (staging / "annotations.json").open("w", encoding="utf-8") as fh:
                 json.dump(events, fh, ensure_ascii=False, indent=2)
 
-            zip_name = f"export_project_{project.id}_{job.id}.zip"
-            final_zip = settings.exports_dir / zip_name
-            tmp_base = settings.exports_dir / f".export_{project.id}_{job.id}.tmp"
-            shutil.make_archive(str(tmp_base), "zip", root_dir=str(staging))
+            video_groups: dict[int, set[tuple[int, int]]] = {}
+            for ann, _clip_path in ready_items:
+                di_rev = ann.detection_import_revision
+                id_rev = ann.identity_revision
+                video_groups.setdefault(ann.video_id, set()).add((di_rev, id_rev))
+
+            ct_manifest_entries: list[dict] = []
+            ct_staging = staging / "corrected_tracks"
+            ct_staging.mkdir(parents=True, exist_ok=True)
+            for vid, rev_pairs in video_groups.items():
+                video = db.get(Video, vid)
+                if video is None:
+                    continue
+                imp = (
+                    db.query(DetectionImport)
+                    .filter(DetectionImport.video_id == vid, DetectionImport.active == True)
+                    .first()
+                )
+                if imp is None:
+                    continue
+                for di_rev, id_rev in rev_pairs:
+                    result = generate_corrected_tracks(
+                        db, video, imp, id_rev, self.settings.detection_imports_dir
+                    )
+                    if result is None or not result.get("tracks_corrected"):
+                        continue
+                    vid_dir = ct_staging / f"video_{vid}" / f"import_{di_rev}" / f"identity_{id_rev}"
+                    vid_dir.mkdir(parents=True, exist_ok=True)
+                    tracks_path = vid_dir / "tracks.corrected.jsonl"
+                    tracks_path.write_text(result["tracks_corrected_text"], encoding="utf-8")
+                    manifest_entry = result["manifest"]
+                    manifest_entry["file_paths"] = [
+                        f"corrected_tracks/video_{vid}/import_{di_rev}/identity_{id_rev}/tracks.corrected.jsonl",
+                    ]
+                    ct_manifest_entries.append(manifest_entry)
+
+            if ct_manifest_entries:
+                with (ct_staging / "manifest.json").open("w", encoding="utf-8") as fh:
+                    json.dump(ct_manifest_entries, fh, ensure_ascii=False, indent=2)
+
+            shutil.make_archive(str(staging), "zip", root_dir=str(staging))
+            zip_src = Path(str(staging) + ".zip")
+            zip_src.rename(temp_zip)
+
+            self._validate_zip_integrity(temp_zip, events, mp4_paths)
+
             self._validate_snapshot(
                 db, project.id, category_ids, annotation_ids, video_revisions
             )
             if self.before_publish_hook is not None:
                 self.before_publish_hook()
 
-            # Archive creation stays outside the lock. BEGIN IMMEDIATE blocks every
-            # annotation invalidation writer through final validation and publication.
+            zip_name = f"export_project_{project.id}_{job.id}.zip"
+            final_zip = settings.exports_dir / zip_name
+
             db.rollback()
             db.execute(text("BEGIN IMMEDIATE"))
             try:
@@ -585,3 +689,5 @@ class ExportWorker:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
             temp_zip.unlink(missing_ok=True)
+            if zip_src is not None:
+                zip_src.unlink(missing_ok=True)

@@ -30,12 +30,29 @@ CATEGORY_COLORS: list[str] = [
     "#E6BEFF",
 ]
 
+# 参与小鼠数量范围（需求文档 §2.4）：None 表示无固定上限
+CATEGORY_MOUSE_COUNTS: dict[str, tuple[int, int | None]] = {
+    "奔跑": (1, 1),
+    "行走": (1, 1),
+    "静止": (1, 1),
+    "一起": (2, 2),
+    "接近": (2, 2),
+    "追逐": (2, 2),
+    "回避": (2, 2),
+    "攻击行为": (2, 2),
+    "鼻头接触": (2, 2),
+    "鼻尾接触": (2, 2),
+    "扎堆行为": (2, None),
+    "孤立行为": (1, 1),
+}
+
 
 def init_project_categories(db: Session, project_id: int) -> list[BehaviorCategory]:
     """为项目初始化 12 个行为类别（未 commit，由调用方统一提交）。"""
     categories: list[BehaviorCategory] = []
     for order, (group, names) in enumerate(INITIAL_CATEGORIES):
         for name in names:
+            mouse_count_min, mouse_count_max = CATEGORY_MOUSE_COUNTS[name]
             cat = BehaviorCategory(
                 project_id=project_id,
                 name=name,
@@ -43,6 +60,8 @@ def init_project_categories(db: Session, project_id: int) -> list[BehaviorCatego
                 color=CATEGORY_COLORS[len(categories) % len(CATEGORY_COLORS)],
                 sort_order=len(categories),
                 is_active=True,
+                mouse_count_min=mouse_count_min,
+                mouse_count_max=mouse_count_max,
             )
             db.add(cat)
             categories.append(cat)

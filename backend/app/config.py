@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # 导出 ZIP 生成后的保留天数：超过后 `export/download` 拒绝下载（批次 7 清理实体文件）。
     export_retention_days: int = Field(default=7, ge=0)
 
+    # ---- 检测导入限制（v0.6） ----
+    detection_import_max_file_bytes: int = 200 * 1024 * 1024  # 200 MB
+    detection_import_max_frames: int = 100000
+    detection_import_max_detections_per_frame: int = 100
+    detection_import_max_errors: int = 100
+
     # ---- 生命周期清理（批次 7） ----
     cleanup_enabled: bool = True
     cleanup_interval_seconds: int = Field(default=60 * 60, ge=1)
@@ -77,6 +83,16 @@ class Settings(BaseSettings):
     @property
     def thumbnails_dir(self) -> Path:
         return self.data_dir / "thumbnails"
+
+    @property
+    def import_batches_dir(self) -> Path:
+        """三文件（video/tracks/metadata）上传批次暂存目录（v0.6 检测导入）。"""
+        return self.data_dir / "import_batches"
+
+    @property
+    def detection_imports_dir(self) -> Path:
+        """检测导入（tracks.jsonl / metadata.json）持久化目录（v0.6 检测导入）。"""
+        return self.data_dir / "detection_imports"
 
     @property
     def cleanup_log(self) -> Path:

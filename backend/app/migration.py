@@ -32,7 +32,7 @@ SCRIPT_LOCATION = BACKEND_DIR / "migrations"
 VERSION_TABLE = "alembic_version"
 
 # 已知迁移版本（迁移脚本 migrations/versions/ 中的 revision 字面量）
-KNOWN_REVISIONS = frozenset({"0001", "0002", "0003", "0004"})
+KNOWN_REVISIONS = frozenset({"0001", "0002", "0003", "0004", "0005", "0006", "0007"})
 
 # 0001 baseline 建立的 6 张 P1 核心表
 P1_TABLES = frozenset(
@@ -40,6 +40,19 @@ P1_TABLES = frozenset(
 )
 # 0002 增量新增的表
 P2_TABLES = frozenset({"reviews", "clips", "background_jobs"})
+# 0005 增量新增的表（YOLO 检测导入与身份修正基础）
+P3_TABLES = frozenset(
+    {
+        "video_import_batches",
+        "detection_imports",
+        "raw_detections",
+        "corrected_tracks",
+        "corrected_detection_assignments",
+        "identity_edits",
+        "detection_suppressions",
+        "suppression_detections",
+    }
+)
 
 
 class MigrationStateError(RuntimeError):
@@ -117,17 +130,17 @@ def inspect_state(database_url: str) -> str:
         return "versioned"
 
     # ---- 无有效版本行（无版本表或空版本表）----
-    unexpected = tables - P1_TABLES - P2_TABLES - {VERSION_TABLE}
+    unexpected = tables - P1_TABLES - P2_TABLES - P3_TABLES - {VERSION_TABLE}
     if unexpected:
         raise MigrationStateError(
             f"数据库存在非预期表 {sorted(unexpected)}，无法安全判定迁移状态，"
             "拒绝 stamp / 升级（请人工检查后再处理）"
         )
-    has_p2 = bool(P2_TABLES & tables)
-    if has_p2:
-        # 有 0002 增量表却无有效版本行：状态不一致（如 head 库版本行被清空），不可盲 stamp
+    has_post_baseline = bool((P2_TABLES | P3_TABLES) & tables)
+    if has_post_baseline:
+        # 有增量表却无有效版本行：状态不一致（如 head 库版本行被清空），不可盲 stamp
         raise MigrationStateError(
-            f"数据库含 0002 增量表 {sorted(P2_TABLES & tables)} 却无有效版本行，"
+            f"数据库含增量表 {sorted((P2_TABLES | P3_TABLES) & tables)} 却无有效版本行，"
             "迁移状态不一致，拒绝自动 stamp"
         )
     if P1_TABLES & tables:
@@ -155,6 +168,12 @@ def upgrade_to(database_url: str, revision: str) -> None:
     """原始 Alembic 升级到指定版本（测试构造 P1 旧库等场景使用）。"""
     _ensure_sqlite_parent(database_url)
     command.upgrade(alembic_config(database_url), revision)
+
+
+def downgrade_to(database_url: str, revision: str) -> None:
+    """原始 Alembic 降级到指定版本（测试验证 downgrade 场景使用）。"""
+    _ensure_sqlite_parent(database_url)
+    command.downgrade(alembic_config(database_url), revision)
 
 
 def run_migrations(database_url: str) -> str:

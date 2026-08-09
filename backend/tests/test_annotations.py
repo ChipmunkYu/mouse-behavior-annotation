@@ -200,3 +200,75 @@ def test_annotation_cross_video_rejected(ctx):
     ).json()
     url2 = f"/api/projects/{project['id']}/videos/{video2['id']}/annotations"
     assert ctx.client.patch(f"{url2}/{ann['id']}", json={"end_time": 9.0}, headers=headers).status_code == 404
+
+
+def test_update_stale_annotation_revision_409(ctx, login_headers):
+    """Fix 8: Stale detection_import_revision or identity_revision on update returns 409."""
+    setup = ctx.make_project_with_video()
+    headers, project, categories, video = (
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
+    )
+    base_url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
+
+    created = ctx.client.post(
+        base_url, json=_base_payload(categories[0]["id"]), headers=headers
+    ).json()
+    ann_id = created["id"]
+
+    resp = ctx.client.patch(
+        f"{base_url}/{ann_id}",
+        json={"detection_import_revision": 1, "end_time": 3.0},
+        headers=headers,
+    )
+    assert resp.status_code == 409
+    assert "detection_import_revision mismatch" in resp.json()["detail"].lower()
+
+    resp2 = ctx.client.patch(
+        f"{base_url}/{ann_id}",
+        json={"identity_revision": 1, "end_time": 3.0},
+        headers=headers,
+    )
+    assert resp2.status_code == 409
+    assert "identity_revision mismatch" in resp2.json()["detail"].lower()
+
+
+def test_create_annotation_ignores_client_revisions(ctx, login_headers):
+    """Fix 8: Create ignores client-supplied detection_import_revision/identity_revision."""
+    setup = ctx.make_project_with_video()
+    headers, project, categories, video = (
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
+    )
+    base_url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
+
+    payload = _base_payload(categories[0]["id"])
+    payload["detection_import_revision"] = 999
+    payload["identity_revision"] = 888
+
+    resp = ctx.client.post(base_url, json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    ann = resp.json()
+    assert ann["detection_import_revision"] == 0
+    assert ann["identity_revision"] == 0
+
+
+def test_export_matches_export_event_contract(ctx):
+    setup = ctx.make_project_with_video()
+    headers, project, categories, video = (
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
+    )
+    created = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
+        json=_base_payload(categories[0]["id"]),
+        headers=headers,
+    ).json()
+    response = ctx.client.get(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations/export",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    event = response.json()[0]
+    assert event["annotation_id"] == created["id"]
+    assert event["mouse_ids"] == []
+    assert event["detection_import_revision"] == 0
+    assert event["identity_revision"] == 0
+    assert event["clip_file"] is None
