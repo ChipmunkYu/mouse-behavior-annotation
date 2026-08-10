@@ -45,11 +45,10 @@ type Point = { time: number; frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
-const GROUP_CATEGORY_NAME = "群体行为";
 
 /**
- * 类别接口按 sort_order、id 返回启用类别，并提供明确的 group 字段。
- * 数字键覆盖稳定显示顺序中的前 10 个非“群体行为”类别；参与对象数量不参与判断。
+ * 数字键只覆盖稳定显示顺序中的前 10 个启用类别。
+ * 当前类别模型没有显式的群体行为快捷键字段，因此不按名称、分组或参与对象数量猜测。
  */
 export function sortCategoriesForDisplay(categories: Category[]): Category[] {
   return [...categories].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
@@ -57,14 +56,14 @@ export function sortCategoriesForDisplay(categories: Category[]): Category[] {
 
 export function buildCategoryShortcuts(categories: Category[]): Array<{ key: string; category: Category }> {
   return sortCategoriesForDisplay(categories)
-    .filter((category) => category.is_active && category.group !== GROUP_CATEGORY_NAME)
+    .filter((category) => category.is_active)
     .slice(0, CATEGORY_SHORTCUT_KEYS.length)
     .map((category, index) => ({ key: CATEGORY_SHORTCUT_KEYS[index], category }));
 }
 
 function verifyCategoryShortcuts(categories: Category[], shortcuts: Array<{ key: string; category: Category }>): void {
   const expected = sortCategoriesForDisplay(categories)
-    .filter((category) => category.is_active && category.group !== GROUP_CATEGORY_NAME)
+    .filter((category) => category.is_active)
     .slice(0, CATEGORY_SHORTCUT_KEYS.length);
   const valid = shortcuts.length === expected.length && shortcuts.every(({ key, category }, index) => (
     key === CATEGORY_SHORTCUT_KEYS[index] && category.id === expected[index]?.id
@@ -89,7 +88,7 @@ function digitShortcutFromEvent(event: KeyboardEvent): string | null {
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable || target.closest("[contenteditable]:not([contenteditable='false'])") != null;
 }
 
 function blurActiveButton(): void {
@@ -558,7 +557,7 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
         <kbd>Esc</kbd><span>关闭帮助、取消编辑或退出参与对象导航</span>
         {mode === "behavior" ? <>
           <kbd>S / D</kbd><span>设置起点 / 设置终点并创建行为标注</span>
-          <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个非群体行为类别` : "当前没有可映射的非群体行为类别"}</span>
+          <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个启用行为类别` : "当前没有可映射的启用行为类别"}</span>
           <kbd>↑ / ↓</kbd><span>参与对象导航时移动高亮</span>
           <kbd>Delete</kbd><span>为当前选中的行为标注打开删除确认框</span>
         </> : <>
@@ -672,7 +671,8 @@ export default function AnnotatePage() {
       setHint(`已选择类别“${category.name}”；该类别无需选择参与对象`);
       return;
     }
-    if (!detectionImport || detectionImport.revision <= 0) {
+    // detectionImport 由 current 接口返回；非空即表示当前存在 active 导入。
+    if (!detectionImport) {
       setParticipantNavigationActive(false);
       setHint(`已选择类别“${category.name}”；没有可用检测结果，无法选择参与对象`);
       return;

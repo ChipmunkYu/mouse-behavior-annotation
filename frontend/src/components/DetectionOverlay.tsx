@@ -86,7 +86,8 @@ export default function DetectionOverlay({
     setTruncatedAt(null);
     genRef.current += 1;
     getCurrentDetectionImport(projectId, videoId)
-      .then((value) => { if (alive) { setDetectionImport(value); setLoadState(value.revision > 0 ? "ready" : "none"); } })
+      // current 接口只返回当前 active 导入；不要用 revision 数值再次猜测有效性。
+      .then((value) => { if (alive) { setDetectionImport(value); setLoadState("ready"); } })
       .catch((err: unknown) => {
         if (!alive) return;
         if (err instanceof ApiError && err.status === 404) { setDetectionImport(null); setLoadState("none"); }
