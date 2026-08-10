@@ -586,6 +586,7 @@ export default function AnnotatePage() {
 
   const [streamState, setStreamState] = useState<StreamState>("loading");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [streamErrorHint, setStreamErrorHint] = useState<string | null>(null);
   const [elementDuration, setElementDuration] = useState(0);
 
   const [currentTime, setCurrentTime] = useState(0);
@@ -870,6 +871,7 @@ export default function AnnotatePage() {
     let cancelled = false;
     setStreamState("loading");
     setStreamUrl(null);
+    setStreamErrorHint(null);
     setElementDuration(0);
 
     fetchVideoStreamUrl(vid)
@@ -888,7 +890,9 @@ export default function AnnotatePage() {
           setStreamState("empty");
         } else {
           setStreamState("error");
-          setErrorMsg(err instanceof Error ? err.message : "视频流加载失败");
+          const message = err instanceof Error ? err.message : "视频流加载失败";
+          setStreamErrorHint(message);
+          setErrorMsg(message);
         }
       });
 
@@ -1383,6 +1387,7 @@ export default function AnnotatePage() {
                     onClick={togglePlay}
                     title="点击播放 / 暂停 [Space]"
                     onLoadedMetadata={(e) => {
+                      setStreamErrorHint(null);
                       setElementDuration(e.currentTarget.duration);
                       if (pendingSeekRef.current != null) {
                         e.currentTarget.currentTime = Math.min(pendingSeekRef.current, e.currentTarget.duration);
@@ -1393,6 +1398,12 @@ export default function AnnotatePage() {
                     onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                     onPlay={() => setPlaying(true)}
                     onPause={() => setPlaying(false)}
+                    onError={(e) => {
+                      const mediaError = e.currentTarget.error;
+                      const detail = mediaError?.message || `MediaError code ${mediaError?.code ?? "unknown"}`;
+                      setStreamErrorHint(`浏览器无法加载或解码视频：${streamUrl}（${detail}）`);
+                      setStreamState("error");
+                    }}
                     playsInline
                   />
                   <DetectionOverlay
@@ -1493,7 +1504,7 @@ export default function AnnotatePage() {
                 hint={
                   streamState === "empty"
                     ? "该视频未配置 storage_path 或文件不存在。可先在视频库中补全元数据与文件路径，或直接在下方标注列表管理已有标注。"
-                    : "请确认后端已启动且视频文件路径合法"
+                    : streamErrorHint ?? "视频资源地址不可用或浏览器不支持该视频编码。"
                 }
               />
             )}
