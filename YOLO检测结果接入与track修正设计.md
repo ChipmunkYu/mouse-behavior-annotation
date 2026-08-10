@@ -407,7 +407,7 @@ identity_revision
 
 Split、Merge、对应撤销、整轨检测抑制及其撤销后，服务端按新 track 修正修订重校验视频内全部 Annotation：仍合法的项更新 `detection_import_revision`/`identity_revision` 并保持 `valid`，不合法项进入 `needs_mouse_ids`。仅实际受影响且原为 `approved` 的单条 Annotation 改为 `pending` 并清 reviewer；视频仅在当前为 `submitted/approved` 时退回 `draft`，当前为 `rejected` 时不笼统改回 `draft`。旧审核记录保留审计。
 
-整轨 suppression 可从持久 active 列表恢复撤销入口；Split/Merge 撤销仍只支持当前页面会话记住的最近操作。按实际时间统一撤销最近一次 Split、Merge 或整轨忽略仍为计划能力。
+当前页面会话内可按实际完成顺序统一撤销具有可靠操作 ID 的 Split、Merge 或整轨忽略；刷新后不恢复统一历史。整轨 suppression 可从持久 active 列表恢复记录旁的单独撤销入口，旧 import 项不进入该列表。
 
 | 变化 | 重新审核 | 更新事件/corrected 导出 | 重编码 Clip/缩略图 |
 |---|:---:|:---:|:---:|

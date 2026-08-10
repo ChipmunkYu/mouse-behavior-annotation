@@ -458,7 +458,7 @@ export default function ReviewPage() {
                           ref={videoRef}
                           src={streamUrl}
                           onClick={togglePlay}
-                          title="点击播放 / 暂停 (Space)"
+                          title="点击播放 / 暂停 [Space]"
                           onLoadedMetadata={(e) => setElementDuration(e.currentTarget.duration)}
                           onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                           onPlay={() => setPlaying(true)}
@@ -476,7 +476,7 @@ export default function ReviewPage() {
                             togglePlay();
                           }}
                         >
-                          {playing ? "⏸ 暂停 (Space)" : "▶ 播放 (Space)"}
+                          {playing ? "⏸ 暂停 [Space]" : "▶ 播放 [Space]"}
                         </button>
                         <button
                           type="button"
@@ -486,7 +486,7 @@ export default function ReviewPage() {
                             step(-1);
                           }}
                         >
-                          ⟨ 退一帧 (←)
+                          ⟨ 退一帧 [←]
                         </button>
                         <button
                           type="button"
@@ -496,7 +496,7 @@ export default function ReviewPage() {
                             step(1);
                           }}
                         >
-                          进一帧 (→) ⟩
+                          进一帧 [→] ⟩
                         </button>
                         <span className="time-display">
                           <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}

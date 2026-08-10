@@ -25,7 +25,7 @@
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
   - OverlayLayer 按当前帧显示 YOLO 检测框与修正后 track ID，并可切换关键点和骨架；叠加坐标随播放器缩放映射。
   - 点击检测框或 track ID 列表选择参与对象，按对象数量范围保存到行为标注 `mouse_ids`；没有 detection import 时仍可创建 `needs_mouse_ids` 草稿，前端省略 `mouse_ids` 和检测结果导入/track 修正修订，导入后补选，补齐前不能提交审核或进入正式导出。
-  - track 修正模式支持 Split、Merge 和“忽略整个 track”。整轨 suppression 通过 `GET .../detection-suppressions` 加载当前 active import 未撤销项，刷新后仍可撤销；旧 import 项不展示且撤销返回 409。Split/Merge 撤销仍限当前页面会话；跨三类操作按时间统一撤销尚未实现。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变；当前不提供单框创建能力，历史 `scope=detection` 仅兼容。
+  - track 修正模式支持 Split、Merge 和“忽略整个 track”。当前页面会话内可按实际完成顺序统一撤销具有可靠操作 ID 的三类操作；刷新后不恢复统一历史。整轨 suppression 通过 `GET .../detection-suppressions` 加载当前 active import 未撤销项，刷新后仍可通过记录旁入口单独撤销；旧 import 项不展示且撤销返回 409。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变；当前不提供单框创建能力，历史 `scope=detection` 仅兼容。
   - 行为类别按 `group` 动态分组展示（绝不硬编码类别），类别颜色仅用于区分。
   - 选择类别后按 **S** / 按钮设起点，**D** / 按钮设终点并 POST 保存。
   - **Space** 播放/暂停，**←/→** 步进一帧（输入框聚焦时不触发）。

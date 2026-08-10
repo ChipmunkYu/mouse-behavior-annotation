@@ -42,6 +42,59 @@ import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/f
 type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
 type Point = { time: number; frame: number };
+type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
+
+const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+const GROUP_CATEGORY_NAME = "群体行为";
+
+/**
+ * 类别接口按 sort_order、id 返回启用类别，并提供明确的 group 字段。
+ * 数字键覆盖稳定显示顺序中的前 10 个非“群体行为”类别；参与对象数量不参与判断。
+ */
+export function sortCategoriesForDisplay(categories: Category[]): Category[] {
+  return [...categories].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+}
+
+export function buildCategoryShortcuts(categories: Category[]): Array<{ key: string; category: Category }> {
+  return sortCategoriesForDisplay(categories)
+    .filter((category) => category.is_active && category.group !== GROUP_CATEGORY_NAME)
+    .slice(0, CATEGORY_SHORTCUT_KEYS.length)
+    .map((category, index) => ({ key: CATEGORY_SHORTCUT_KEYS[index], category }));
+}
+
+function verifyCategoryShortcuts(categories: Category[], shortcuts: Array<{ key: string; category: Category }>): void {
+  const expected = sortCategoriesForDisplay(categories)
+    .filter((category) => category.is_active && category.group !== GROUP_CATEGORY_NAME)
+    .slice(0, CATEGORY_SHORTCUT_KEYS.length);
+  const valid = shortcuts.length === expected.length && shortcuts.every(({ key, category }, index) => (
+    key === CATEGORY_SHORTCUT_KEYS[index] && category.id === expected[index]?.id
+  ));
+  if (!valid) {
+    console.error("[快捷键映射校验失败] 类别数字键没有遵循稳定显示顺序", { categories, shortcuts });
+    return;
+  }
+  console.info("[快捷键映射校验]", shortcuts.map(({ key, category }) => `${key}=${category.name}`).join("，"));
+}
+
+function digitShortcutFromEvent(event: KeyboardEvent): string | null {
+  if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return null;
+  const digit = event.code.startsWith("Digit")
+    ? event.code.slice(5)
+    : event.code.startsWith("Numpad")
+      ? event.code.slice(6)
+      : event.key;
+  return CATEGORY_SHORTCUT_KEYS.includes(digit as (typeof CATEGORY_SHORTCUT_KEYS)[number]) ? digit : null;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+function blurActiveButton(): void {
+  if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+}
 
 /* ================= 行为类别面板（按 group 动态分组，绝不硬编码类别） ================= */
 function groupCategories(categories: Category[]): [string, Category[]][] {
@@ -57,11 +110,13 @@ function groupCategories(categories: Category[]): [string, Category[]][] {
 function CategoryPanel({
   categories,
   activeCategory,
+  shortcuts,
   onSelect,
   disabled,
 }: {
   categories: Category[];
   activeCategory: Category | null;
+  shortcuts: Map<number, string>;
   onSelect: (c: Category) => void;
   disabled: boolean;
 }) {
@@ -96,7 +151,8 @@ function CategoryPanel({
                 title={`${c.group} · ${c.name}`}
               >
                 <span className="swatch" style={{ background: c.color ?? "var(--text-3)" }} />
-                {c.name}
+                <span>{c.name}</span>
+                {shortcuts.get(c.id) ? <span className="shortcut-key">[{shortcuts.get(c.id)}]</span> : null}
               </button>
             ))}
           </div>
@@ -117,24 +173,28 @@ function AnnotationRow({
   ann,
   categoryById,
   active,
+  selected,
   busy,
   readOnly,
   onEdit,
   onDelete,
+  onSelect,
   rowRef,
 }: {
   ann: Annotation;
   categoryById: Map<number, Category>;
   active: boolean;
+  selected: boolean;
   busy: boolean;
   readOnly: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onSelect: () => void;
   rowRef?: Ref<HTMLDivElement>;
 }) {
   const cat = categoryById.get(ann.category_id);
   return (
-    <div ref={rowRef} className={active ? "anno-row active" : "anno-row"}>
+    <div ref={rowRef} className={`anno-row${active ? " active" : ""}${selected ? " selected" : ""}`} onClick={onSelect}>
       <div className="anno-row-top">
         <span className="anno-cat" title={cat?.group ?? ""}>
           <span className="swatch" style={{ background: cat?.color ?? "var(--text-3)" }} />
@@ -148,7 +208,7 @@ function AnnotationRow({
             编辑
           </button>
           <button type="button" className="btn-link" disabled={busy || readOnly} onClick={onDelete} style={{ color: "var(--danger)" }}>
-            删除
+            删除 [Delete]
           </button>
         </span>
       </div>
@@ -284,7 +344,7 @@ function AnnotationEditForm({
       <div className="form-error">{localError ?? ""}</div>
       <div className="actions">
         <button type="button" className="btn btn-sm" onClick={onCancel} disabled={saving}>
-          取消
+          取消 [Esc]
         </button>
         <button type="submit" className="btn btn-sm btn-primary" disabled={saving}>
           {saving ? "保存中…" : "保存"}
@@ -301,6 +361,10 @@ function AnnotationList({
   fps,
   currentTime,
   readOnly,
+  selectedId,
+  editingId,
+  onSelect,
+  onEditingChange,
   onEditSave,
   onDelete,
 }: {
@@ -310,10 +374,13 @@ function AnnotationList({
   fps: number | null | undefined;
   currentTime: number;
   readOnly: boolean;
+  selectedId: number | null;
+  editingId: number | null;
+  onSelect: (id: number) => void;
+  onEditingChange: (id: number | null) => void;
   onEditSave: (id: number, patch: AnnotationPatchInput) => Promise<void>;
   onDelete: (ann: Annotation) => Promise<void>;
 }) {
-  const [editingId, setEditingId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const activeId = annotations.find(
     (a) => currentTime >= a.start_time && currentTime <= a.end_time
@@ -331,7 +398,7 @@ function AnnotationList({
     setBusyId(ann.id);
     try {
       await onDelete(ann);
-      setEditingId(null);
+      onEditingChange(null);
     } catch {
       // 错误提示已由父级处理
     } finally {
@@ -352,10 +419,10 @@ function AnnotationList({
                 ann={a}
                 categories={categories}
                 fps={fps}
-                onCancel={() => setEditingId(null)}
+                onCancel={() => onEditingChange(null)}
                 onSave={async (patch) => {
                   await onEditSave(a.id, patch);
-                  setEditingId(null);
+                  onEditingChange(null);
                 }}
               />
             ) : (
@@ -364,10 +431,12 @@ function AnnotationList({
                 ann={a}
                 categoryById={categoryById}
                 active={activeId === a.id}
+                selected={selectedId === a.id}
                 busy={busyId === a.id}
                 readOnly={readOnly}
-                onEdit={() => { if (!readOnly) setEditingId(a.id); }}
+                onEdit={() => { if (!readOnly) { onSelect(a.id); onEditingChange(a.id); } }}
                 onDelete={() => void handleDelete(a)}
+                onSelect={() => onSelect(a.id)}
                 rowRef={activeId === a.id ? activeRowRef : undefined}
               />
             )
@@ -431,35 +500,75 @@ function SubmitReviewControl({
   );
 }
 
-function MouseIdsPanel({ tracks, selected, category, disabled, onToggle }: {
+function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive, focusIndex, onFocusIndex, onExitNavigation, onToggle }: {
   tracks: CorrectedTrackSummary[];
   selected: number[];
   category: Category | null;
   disabled: boolean;
+  navigationActive: boolean;
+  focusIndex: number;
+  onFocusIndex: (index: number) => void;
+  onExitNavigation: () => void;
   onToggle: (id: number) => void;
 }) {
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const min = category?.mouse_count_min ?? 1;
   const max = category?.mouse_count_max ?? null;
   const valid = selected.length >= min && (max == null || selected.length <= max);
   const rule = max == null ? `至少 ${min} 个对象` : min === max ? `恰好 ${min} 个对象` : `${min}–${max} 个对象`;
-  return <Card title="参与对象" className="mouse-ids-panel" extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
+  useEffect(() => {
+    if (navigationActive) itemRefs.current[focusIndex]?.scrollIntoView({ block: "nearest" });
+  }, [focusIndex, navigationActive]);
+  return <Card title="参与对象" className={`mouse-ids-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
+    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Space 选择</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [Esc]</button></div> : null}
     <div className="selected-mice">{selected.length ? selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>) : <span>点击视频框或下方 track ID 选择参与对象</span>}</div>
-    <div className="mouse-id-list">{tracks.map((track) => <button key={track.display_track_id} disabled={disabled} className={selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"} onClick={() => onToggle(track.display_track_id)}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
+    <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
     {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
   </Card>;
 }
 
-function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppressions, canRevertSuppression, canRevertIdentity, onSearch, onShowAll, onToggle, onSplit, onMerge, onSuppressTrack, onRevertSuppression, onRevertIdentity }: {
+function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppressions, canRevertSuppression, canRevertIdentity, canUndoLatest, undoBoundary, onSearch, onShowAll, onToggle, onSplit, onMerge, onSuppressTrack, onUndoLatest, onRevertSuppression, onRevertIdentity }: {
   tracks: CorrectedTrackSummary[]; selected: number[]; frame: number; search: string; showAll: boolean; busy: boolean; suppressions: DetectionSuppression[]; canRevertSuppression: boolean; canRevertIdentity: boolean;
-  onSearch: (s: string) => void; onShowAll: (v: boolean) => void; onToggle: (id: number) => void; onSplit: () => void; onMerge: () => void; onSuppressTrack: () => void; onRevertSuppression: (id?: number) => void; onRevertIdentity: () => void;
+  canUndoLatest: boolean; undoBoundary: string;
+  onSearch: (s: string) => void; onShowAll: (v: boolean) => void; onToggle: (id: number) => void; onSplit: () => void; onMerge: () => void; onSuppressTrack: () => void; onUndoLatest: () => void; onRevertSuppression: (id?: number) => void; onRevertIdentity: () => void;
 }) {
   return <Card title="track 修正" className="identity-panel" extra={<span className="identity-frame mono">帧 {frame}</span>}>
     <div className="identity-filter"><div className="segmented"><button className={!showAll ? "active" : ""} onClick={() => onShowAll(false)}>当前帧可见</button><button className={showAll ? "active" : ""} onClick={() => onShowAll(true)}>全部 track ID</button></div><input className="input" placeholder="搜索 track ID" aria-label="搜索 track ID" value={search} onChange={(e) => onSearch(e.target.value)} /></div>
     <div className="identity-track-list">{tracks.map((t) => <button key={t.display_track_id} className={selected.includes(t.display_track_id) ? "identity-track selected" : "identity-track"} onClick={() => onToggle(t.display_track_id)}><span className="track-id mono">track ID {t.display_track_id}</span><span>{t.visible_in_current_frame ? "● 当前可见" : `${t.first_frame ?? "?"} → ${t.last_frame ?? "?"}`}</span><span className="flex-spacer" /><span>{t.detection_count} 框</span></button>)}</div>
     <div className="identity-actions"><button className="btn btn-primary" disabled={busy || selected.length !== 1} onClick={onSplit}>从当前帧 Split</button><button className="btn btn-primary" disabled={busy || selected.length < 2} onClick={onMerge}>Merge 所选</button></div>
-    <div className="identity-danger-zone"><button className="btn btn-sm btn-danger" disabled={busy || selected.length !== 1} onClick={onSuppressTrack}>忽略整个 track</button><button className="btn btn-sm" disabled={busy || !canRevertSuppression} onClick={() => onRevertSuppression()}>撤销上一次忽略</button><button className="btn btn-sm" disabled={busy || !canRevertIdentity} onClick={onRevertIdentity}>撤销上一次 Split / Merge</button></div>
+    <div className="identity-danger-zone"><button className="btn btn-sm btn-danger" disabled={busy || selected.length !== 1} onClick={onSuppressTrack}>忽略整个 track [Delete]</button><button className="btn btn-sm" disabled={busy || !canUndoLatest} onClick={onUndoLatest}>撤销上一次 track 修正 [Ctrl+Z]</button><button className="btn btn-sm" disabled={busy || !canRevertSuppression} onClick={() => onRevertSuppression()}>撤销上一次忽略</button><button className="btn btn-sm" disabled={busy || !canRevertIdentity} onClick={onRevertIdentity}>撤销上一次 Split / Merge</button></div>
+    <div className="frame-preview">{undoBoundary}</div>
     {suppressions.length ? <div className="identity-track-list">{suppressions.map((s) => <div key={s.id} className="identity-track"><span>忽略记录 #{s.id}</span><span>{s.frozen_detection_count} 个检测</span><span className="flex-spacer" /><button className="btn btn-sm" disabled={busy} onClick={() => onRevertSuppression(s.id)}>撤销</button></div>)}</div> : null}
   </Card>;
+}
+
+function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
+  mode: "behavior" | "identity";
+  categoryShortcuts: Array<{ key: string; category: Category }>;
+  onClose: () => void;
+}) {
+  return <div className="modal-overlay shortcut-help-overlay" onClick={onClose}>
+    <div className="modal shortcut-help" role="dialog" aria-modal="true" aria-labelledby="shortcut-help-title" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-title" id="shortcut-help-title">键盘快捷键</div>
+      <div className="shortcut-help-grid">
+        <kbd>Space</kbd><span>播放 / 暂停；参与对象导航时切换选择</span>
+        <kbd>← / →</kbd><span>前后 1 帧</span>
+        <kbd>Shift+← / Shift+→</kbd><span>前后 10 帧</span>
+        <kbd>?</kbd><span>打开 / 关闭本帮助</span>
+        <kbd>Esc</kbd><span>关闭帮助、取消编辑或退出参与对象导航</span>
+        {mode === "behavior" ? <>
+          <kbd>S / D</kbd><span>设置起点 / 设置终点并创建行为标注</span>
+          <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个非群体行为类别` : "当前没有可映射的非群体行为类别"}</span>
+          <kbd>↑ / ↓</kbd><span>参与对象导航时移动高亮</span>
+          <kbd>Delete</kbd><span>为当前选中的行为标注打开删除确认框</span>
+        </> : <>
+          <kbd>Delete</kbd><span>为单一选中的整个 track 打开忽略确认框</span>
+          <kbd>Ctrl+Z</kbd><span>仅撤销当前页面会话内最近一次可追踪的 track 修正；刷新后历史不完整</span>
+        </>}
+      </div>
+      <div className="modal-actions"><button type="button" className="btn" onClick={onClose}>关闭 [? / Esc]</button></div>
+    </div>
+  </div>;
 }
 
 /* ================= 标注工作台主页面 ================= */
@@ -498,6 +607,12 @@ export default function AnnotatePage() {
   const [lastSuppressionId, setLastSuppressionId] = useState<number | null>(null);
   const [activeSuppressions, setActiveSuppressions] = useState<DetectionSuppression[]>([]);
   const [lastIdentityEditId, setLastIdentityEditId] = useState<number | null>(null);
+  const [undoHistory, setUndoHistory] = useState<UndoEntry[]>([]);
+  const [participantNavigationActive, setParticipantNavigationActive] = useState(false);
+  const [participantFocusIndex, setParticipantFocusIndex] = useState(0);
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<number | null>(null);
+  const [editingAnnotationId, setEditingAnnotationId] = useState<number | null>(null);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [confirmDialog, confirm] = useConfirm();
@@ -511,6 +626,7 @@ export default function AnnotatePage() {
       setActiveCategory(null);
       setSelectedMouseIds([]);
     }
+    setParticipantNavigationActive(false);
   }, [workspaceMode]);
 
   // 从片段库跳回标注位置：?t=<秒> 定位播放头
@@ -529,9 +645,57 @@ export default function AnnotatePage() {
     [categories]
   );
 
+  const displayCategories = useMemo(() => sortCategoriesForDisplay(categories), [categories]);
+  const categoryShortcuts = useMemo(() => buildCategoryShortcuts(displayCategories), [displayCategories]);
+  const categoryShortcutById = useMemo(
+    () => new Map(categoryShortcuts.map(({ key, category }) => [category.id, key] as const)),
+    [categoryShortcuts]
+  );
+
+  useEffect(() => {
+    if (import.meta.env.DEV && displayCategories.length > 0) {
+      verifyCategoryShortcuts(displayCategories, categoryShortcuts);
+    }
+  }, [categoryShortcuts, displayCategories]);
+
   const toggleMouseId = useCallback((id: number) => {
     setSelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
   }, []);
+
+  const selectCategory = useCallback((category: Category) => {
+    // 鼠标点击与数字键复用本函数，全局导航不依赖旧按钮焦点。
+    blurActiveButton();
+    setActiveCategory(category);
+    setErrorMsg(null);
+    if (category.mouse_count_max === 0) {
+      setParticipantNavigationActive(false);
+      setHint(`已选择类别“${category.name}”；该类别无需选择参与对象`);
+      return;
+    }
+    if (!detectionImport || detectionImport.revision <= 0) {
+      setParticipantNavigationActive(false);
+      setHint(`已选择类别“${category.name}”；没有可用检测结果，无法选择参与对象`);
+      return;
+    }
+    if (tracks.length === 0) {
+      setParticipantNavigationActive(false);
+      setHint(`已选择类别“${category.name}”；当前没有可选择的参与对象`);
+      return;
+    }
+    setParticipantFocusIndex(0);
+    setParticipantNavigationActive(true);
+    setHint(`已选择类别“${category.name}”；参与对象选择中：↑/↓ 移动，Space 选择，Esc 退出`);
+  }, [detectionImport, tracks]);
+
+  useEffect(() => {
+    if (!participantNavigationActive) return;
+    if (tracks.length === 0) {
+      setParticipantNavigationActive(false);
+      setHint("参与对象列表已为空，已退出键盘选择");
+      return;
+    }
+    setParticipantFocusIndex((index) => Math.min(index, tracks.length - 1));
+  }, [participantNavigationActive, tracks]);
 
   const mouseIdsValid = useCallback((category: Category | null, ids: number[]) => {
     if (!category) return false;
@@ -560,6 +724,7 @@ export default function AnnotatePage() {
   // DB 元数据时长仅作回退：避免元数据 duration 与真实播放时长不一致时时间轴错位。
   const timelineDuration =
     elementDuration > 0 ? elementDuration : video?.duration && video.duration > 0 ? video.duration : null;
+  const videoReady = streamState === "ok" && streamUrl != null;
 
   /* ---------- 数据加载 ---------- */
   const loadAnnotations = useCallback(async () => {
@@ -569,6 +734,15 @@ export default function AnnotatePage() {
       setErrorMsg(err instanceof Error ? err.message : "加载标注失败");
     }
   }, [pid, vid]);
+
+  useEffect(() => {
+    if (selectedAnnotationId != null && !annotations.some((annotation) => annotation.id === selectedAnnotationId)) {
+      setSelectedAnnotationId(null);
+    }
+    if (editingAnnotationId != null && !annotations.some((annotation) => annotation.id === editingAnnotationId)) {
+      setEditingAnnotationId(null);
+    }
+  }, [annotations, editingAnnotationId, selectedAnnotationId]);
 
   const syncSuppressions = useCallback(async () => {
     try {
@@ -599,6 +773,10 @@ export default function AnnotatePage() {
       setActiveSuppressions(suppressions);
       setLastSuppressionId(suppressions[0]?.id ?? null);
       setLastIdentityEditId(null);
+      setUndoHistory([]);
+      setSelectedAnnotationId(null);
+      setEditingAnnotationId(null);
+      setParticipantNavigationActive(false);
       setErrorMsg(null);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "加载数据失败");
@@ -741,11 +919,11 @@ export default function AnnotatePage() {
     else v.pause();
   }
 
-  function step(dir: 1 | -1) {
+  function step(dir: 1 | -1, frames = 1) {
     const v = videoRef.current;
     if (!v) return;
     const fps = latest.current.video?.fps && latest.current.video.fps > 0 ? latest.current.video.fps : 30;
-    const dt = 1 / fps;
+    const dt = frames / fps;
     const next = Math.min(Math.max(0, v.currentTime + dir * dt), v.duration || Number.MAX_VALUE);
     v.currentTime = next;
   }
@@ -796,6 +974,7 @@ export default function AnnotatePage() {
     // 已提交 / 已通过 / 已退回的视频新增标注前需确认（会退回草稿、审核失效）
     if (!(await guardMutation("新增行为标注"))) {
       setStartPoint(null);
+      setParticipantNavigationActive(false);
       setHint("");
       return;
     }
@@ -816,6 +995,7 @@ export default function AnnotatePage() {
       });
       setSaveState("saved");
       setStartPoint(null);
+      setParticipantNavigationActive(false);
       setErrorMsg(null);
       const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
       setHint(
@@ -854,10 +1034,15 @@ export default function AnnotatePage() {
       setIdentityRevision(result.identity_revision);
       setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v);
       setSelectedMouseIds(result.new_display_track_id != null ? [result.new_display_track_id] : result.retained_display_track_id != null ? [result.retained_display_track_id] : []);
-      if (result.edit_id) setLastIdentityEditId(result.edit_id);
+      if (result.edit_id) {
+        setLastIdentityEditId(result.edit_id);
+        setUndoHistory((history) => [...history, { kind: "identity", id: result.edit_id!, createdAt: Date.now() }]);
+      } else {
+        setHint("track 修正已完成，但服务端未返回可撤销 ID；本次操作不能通过 Ctrl+Z 撤销");
+      }
       setOverlayRefresh((x) => x + 1);
       await loadAnnotations();
-      setHint("track 修正已提交；受影响行为标注和审核状态已刷新");
+      if (result.edit_id) setHint("track 修正已提交；受影响行为标注和审核状态已刷新");
     } catch (err) { setErrorMsg(err instanceof Error ? err.message : "track 修正失败"); }
     finally { setIdentityBusy(false); }
   }
@@ -871,13 +1056,18 @@ export default function AnnotatePage() {
     try {
       const result = await createSuppression(pid, vid, { scope: "corrected_track", track_id: selectedId, base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
       setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastSuppressionId(result.suppression_id ?? null); setSelectedMouseIds([]); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      if (result.suppression_id != null) {
+        setUndoHistory((history) => [...history, { kind: "suppression", id: result.suppression_id!, createdAt: Date.now() }]);
+      } else {
+        setHint("track 已忽略，但服务端未返回可撤销 ID；本次操作不能通过 Ctrl+Z 撤销");
+      }
       await syncSuppressions();
     } catch (err) { setErrorMsg(err instanceof Error ? err.message : "忽略检测失败"); }
     finally { setIdentityBusy(false); }
   }
 
-  async function revertLastSuppression(suppressionId = lastSuppressionId ?? undefined) {
-    if (!detectionImport || suppressionId == null) return;
+  async function revertLastSuppression(suppressionId = lastSuppressionId ?? undefined): Promise<boolean> {
+    if (!detectionImport || suppressionId == null) return false;
     setIdentityBusy(true);
     try {
       const result = await revertSuppression(pid, vid, suppressionId, { base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
@@ -885,18 +1075,35 @@ export default function AnnotatePage() {
       setActiveSuppressions((current) => current.filter((s) => s.id !== suppressionId));
       if (lastSuppressionId === suppressionId) setLastSuppressionId(null);
       await syncSuppressions();
-    } catch (err) { setErrorMsg(err instanceof Error ? err.message : "撤销失败"); }
+      setUndoHistory((history) => history.filter((entry) => !(entry.kind === "suppression" && entry.id === suppressionId)));
+      return true;
+    } catch (err) { setErrorMsg(err instanceof Error ? err.message : "撤销失败"); return false; }
     finally { setIdentityBusy(false); }
   }
 
-  async function revertLastIdentity() {
-    if (!detectionImport || lastIdentityEditId == null) return;
+  async function revertLastIdentity(editId = lastIdentityEditId ?? undefined): Promise<boolean> {
+    if (!detectionImport || editId == null) return false;
     setIdentityBusy(true);
     try {
-      const result = await revertIdentityEdit(pid, vid, lastIdentityEditId, { base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
-      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastIdentityEditId(null); setOverlayRefresh((x) => x + 1); await loadAnnotations();
-    } catch (err) { setErrorMsg(err instanceof Error ? err.message : "撤销 Split / Merge 失败"); }
+      const result = await revertIdentityEdit(pid, vid, editId, { base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
+      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); if (lastIdentityEditId === editId) setLastIdentityEditId(null); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      setUndoHistory((history) => history.filter((entry) => !(entry.kind === "identity" && entry.id === editId)));
+      return true;
+    } catch (err) { setErrorMsg(err instanceof Error ? err.message : "撤销 Split / Merge 失败"); return false; }
     finally { setIdentityBusy(false); }
+  }
+
+  async function undoLatestTrackEdit() {
+    if (identityBusy) return;
+    const latestEntry = undoHistory[undoHistory.length - 1];
+    if (!latestEntry) {
+      setHint("当前页面会话没有可统一撤销的 track 修正；刷新前的 Split / Merge 历史无法恢复");
+      return;
+    }
+    const ok = latestEntry.kind === "identity"
+      ? await revertLastIdentity(latestEntry.id)
+      : await revertLastSuppression(latestEntry.id);
+    if (ok) setHint("已撤销当前页面会话中最近一次 track 修正");
   }
 
   /* ---------- 列表编辑 / 删除 / 导出 ---------- */
@@ -970,44 +1177,134 @@ export default function AnnotatePage() {
    */
   const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
   keyHandlerRef.current = (e: KeyboardEvent) => {
-    function isEditable(target: EventTarget | null): boolean {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName;
-      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+    const confirmOpen = document.querySelector(".modal-overlay:not(.shortcut-help-overlay)") != null;
+    if (confirmOpen) return;
+
+    if (isEditableTarget(e.target)) {
+      if (e.key === "Escape" && editingAnnotationId != null) {
+        e.preventDefault();
+        setEditingAnnotationId(null);
+        setHint("已取消编辑行为标注");
+      }
+      return;
+    }
+    if (editingAnnotationId != null) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setEditingAnnotationId(null);
+        setHint("已取消编辑行为标注");
+      }
+      return;
+    }
+    if ((e.code === "ArrowLeft" || e.code === "ArrowRight") && e.target instanceof HTMLElement && e.target.closest(".timeline")) {
+      return;
+    }
+    if (e.repeat) return;
+
+    if (shortcutHelpOpen) {
+      if (e.key === "Escape" || e.key === "?") {
+        e.preventDefault();
+        setShortcutHelpOpen(false);
+      }
+      return;
+    }
+    if (e.key === "?") {
+      e.preventDefault();
+      setShortcutHelpOpen(true);
+      return;
+    }
+
+    if (participantNavigationActive && workspaceMode === "behavior") {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setParticipantNavigationActive(false);
+        blurActiveButton();
+        setHint("已退出参与对象键盘选择；已选参与对象保持不变");
+        return;
+      }
+      if (e.code === "ArrowUp" || e.code === "ArrowDown") {
+        e.preventDefault();
+        if (tracks.length > 0) {
+          const delta = e.code === "ArrowUp" ? -1 : 1;
+          setParticipantFocusIndex((index) => Math.max(0, Math.min(tracks.length - 1, index + delta)));
+        }
+        return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
+        const track = tracks[participantFocusIndex];
+        if (track) toggleMouseId(track.display_track_id);
+        return;
+      }
+      if (e.code === "Delete") {
+        e.preventDefault();
+        setHint("参与对象键盘选择中，Delete 不执行危险操作；按 Esc 退出后再操作");
+        return;
+      }
     }
 
     if (e.code === "Space") {
-      // 输入框 / 按钮聚焦时交给默认行为（按钮会触发 click）
-      if (isEditable(e.target) || e.target instanceof HTMLButtonElement) return;
+      if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
-      if (!e.repeat) togglePlay();
+      togglePlay();
       return;
     }
-    if (isEditable(e.target)) return;
-    if (e.repeat) return;
-    // 确认对话框打开时不响应全局快捷键（对话框内部自行处理 Esc / 空格）
-    if (document.querySelector(".modal-overlay")) return;
-    switch (e.code) {
-      case "ArrowLeft":
+
+    const categoryKey = digitShortcutFromEvent(e);
+    if (categoryKey && workspaceMode === "behavior") {
+      e.preventDefault();
+      const shortcut = categoryShortcuts.find((item) => item.key === categoryKey);
+      if (!videoReady) {
+        setHint("视频尚未就绪，暂不能用数字键选择类别");
+      } else if (shortcut) {
+        selectCategory(shortcut.category);
+      } else {
+        setHint(`数字键 ${categoryKey} 当前没有映射行为类别`);
+      }
+      return;
+    }
+
+    if (e.code === "Delete") {
+      e.preventDefault();
+      if (workspaceMode === "behavior") {
+        const annotation = annotations.find((item) => item.id === selectedAnnotationId);
+        if (!annotation) {
+          setHint("请先点击选择一条行为标注，再按 Delete");
+          return;
+        }
+        void handleDelete(annotation);
+      } else if (!detectionImport || selectedMouseIds.length !== 1 || identityBusy) {
+        setHint("忽略整个 track 需要恰好选择 1 个有效 track ID");
+      } else {
+        void suppressTrack();
+      }
+      return;
+    }
+
+    if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "KeyZ") {
+      if (workspaceMode === "identity") {
         e.preventDefault();
-        step(-1);
-        break;
-      case "ArrowRight":
+        void undoLatestTrackEdit();
+      }
+      return;
+    }
+
+    if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
         e.preventDefault();
-        step(1);
-        break;
-      case "KeyS":
-        if (workspaceMode === "identity") break;
+        step(e.code === "ArrowLeft" ? -1 : 1, e.shiftKey ? 10 : 1);
+        return;
+      }
+      if (!e.shiftKey && workspaceMode === "behavior" && e.code === "KeyS") {
         e.preventDefault();
         markStart();
-        break;
-      case "KeyD":
-        if (workspaceMode === "identity") break;
+        return;
+      }
+      if (!e.shiftKey && workspaceMode === "behavior" && e.code === "KeyD") {
         e.preventDefault();
         void markEnd();
-        break;
-      default:
-        break;
+        return;
+      }
     }
   };
 
@@ -1016,8 +1313,6 @@ export default function AnnotatePage() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
-
-  const videoReady = streamState === "ok";
 
   return (
     <div className="annotate-page">
@@ -1049,6 +1344,9 @@ export default function AnnotatePage() {
           </div>
         ) : null}
         <div className="actions">
+          <button type="button" className="btn btn-sm" onClick={() => setShortcutHelpOpen(true)}>
+            快捷键 [?]
+          </button>
           <SubmitReviewControl
             status={video?.workflow_status ?? "draft"}
             hasAnnotations={annotations.length > 0}
@@ -1067,6 +1365,7 @@ export default function AnnotatePage() {
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
       {annotations.some((a) => a.mouse_id_status === "needs_mouse_ids") ? <div className="mouse-warning-banner" role="status">⚠ 有 {annotations.filter((a) => a.mouse_id_status === "needs_mouse_ids").length} 条行为标注需要补选参与对象，补齐前不能提交审核。</div> : null}
       {confirmDialog}
+      {shortcutHelpOpen ? <ShortcutHelp mode={workspaceMode} categoryShortcuts={categoryShortcuts} onClose={() => setShortcutHelpOpen(false)} /> : null}
 
       <div className="annotate-body">
         <section className="annotate-main">
@@ -1082,7 +1381,7 @@ export default function AnnotatePage() {
                     ref={videoRef}
                     src={streamUrl}
                     onClick={togglePlay}
-                    title="点击播放 / 暂停 (Space)"
+                    title="点击播放 / 暂停 [Space]"
                     onLoadedMetadata={(e) => {
                       setElementDuration(e.currentTarget.duration);
                       if (pendingSeekRef.current != null) {
@@ -1119,7 +1418,7 @@ export default function AnnotatePage() {
                       togglePlay();
                     }}
                   >
-                    {playing ? "⏸ 暂停 (Space)" : "▶ 播放 (Space)"}
+                    {playing ? "⏸ 暂停 [Space]" : "▶ 播放 [Space]"}
                   </button>
                   <button
                     type="button"
@@ -1129,7 +1428,7 @@ export default function AnnotatePage() {
                       step(-1);
                     }}
                   >
-                    ⟨ 退一帧 (←)
+                    ⟨ 退一帧 [←]
                   </button>
                   <button
                     type="button"
@@ -1139,7 +1438,7 @@ export default function AnnotatePage() {
                       step(1);
                     }}
                   >
-                    进一帧 (→) ⟩
+                    进一帧 [→] ⟩
                   </button>
                   <span className="time-display">
                     <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}
@@ -1156,7 +1455,7 @@ export default function AnnotatePage() {
                     }}
                     title="在当前时间设置起点"
                   >
-                    设起点 (S)
+                    设起点 [S]
                   </button>
                   <button
                     type="button"
@@ -1168,7 +1467,7 @@ export default function AnnotatePage() {
                     }}
                     title="在当前时间设置终点并保存行为标注"
                   >
-                    设终点 (D)
+                    设终点 [D]
                   </button>
                 </div>
 
@@ -1235,16 +1534,20 @@ export default function AnnotatePage() {
             </Card>
           ) : null}
           {workspaceMode === "behavior" ? <>
-            <CategoryPanel categories={categories} activeCategory={activeCategory} onSelect={setActiveCategory} disabled={!videoReady} />
-            <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} onToggle={toggleMouseId} />
-          </> : <IdentityPanel tracks={tracks} selected={selectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
+            <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
+            <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />
+          </> : <IdentityPanel tracks={tracks} selected={selectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
           <AnnotationList
             annotations={annotations}
-            categories={categories}
+            categories={displayCategories}
             categoryById={categoryById}
             fps={video?.fps}
             currentTime={currentTime}
             readOnly={workspaceMode === "identity"}
+            selectedId={selectedAnnotationId}
+            editingId={editingAnnotationId}
+            onSelect={setSelectedAnnotationId}
+            onEditingChange={setEditingAnnotationId}
             onEditSave={handleEditSave}
             onDelete={handleDelete}
           />
