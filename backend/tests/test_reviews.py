@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from app.models import Annotation, Review, Video
+from app.models import Annotation, CorrectedDetectionAssignment, Review, Video
 
 
 _SAMPLE_METADATA = {
@@ -244,12 +244,73 @@ def test_submit_success_sets_submitted_and_resets_annotations(ctx, login_headers
     assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
 
 
+def test_submit_revalidates_valid_stale_annotation_and_advances_revisions(ctx, login_headers):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next(c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1)
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_video.identity_revision = 3
+        db.query(CorrectedDetectionAssignment).update({"identity_revision": 3})
+        stored_ann = db.get(Annotation, ann["id"])
+        stored_ann.mouse_id_status = "valid"
+        stored_ann.detection_import_revision = 1
+        stored_ann.identity_revision = 0
+        db.commit()
+
+    resp = _submit(ctx, headers, project, video)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["workflow_status"] == "submitted"
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_ann = db.get(Annotation, ann["id"])
+        assert stored_video.workflow_status == "submitted"
+        assert stored_ann.mouse_id_status == "valid"
+        assert stored_ann.detection_import_revision == stored_video.detection_import_revision == 1
+        assert stored_ann.identity_revision == stored_video.identity_revision == 3
+
+
+def test_submit_does_not_advance_invalid_stale_annotation(ctx, login_headers):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next(c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1)
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_video.identity_revision = 3
+        stored_ann = db.get(Annotation, ann["id"])
+        stored_ann.mouse_id_status = "valid"
+        stored_ann.detection_import_revision = 1
+        stored_ann.identity_revision = 0
+        db.commit()
+
+    resp = _submit(ctx, headers, project, video)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["invalid_annotations"] == [
+        {
+            "annotation_id": ann["id"],
+            "reason": "Track ID 1 has no unsuppressed detections in frame range [0, 1]",
+        }
+    ]
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_ann = db.get(Annotation, ann["id"])
+        assert stored_video.workflow_status == "draft"
+        assert stored_ann.mouse_id_status == "needs_mouse_ids"
+        assert stored_ann.detection_import_revision == 1
+        assert stored_ann.identity_revision == 0
+
+
 def test_submit_rejects_needs_mouse_ids(ctx, login_headers):
     """有检测导入但标注缺少 mouse_ids 时提交应被拒绝。"""
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     _annotate(ctx, headers, project, video, categories[0]["id"])
     resp = _submit(ctx, headers, project, video)
     assert resp.status_code == 400
+    assert resp.json()["detail"] == "1 annotation(s) still need valid mouse_ids before submission"
 
 
 def test_submit_roles(ctx, login_headers):

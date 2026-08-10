@@ -157,6 +157,10 @@ def _revalidate_annotations(db: Session, video: Video, imp: DetectionImport) -> 
                     "reason": f"Track ID {tid} has no unsuppressed detections in frame range [{ann.start_frame}, {ann.end_frame}]",
                 })
                 break
+        else:
+            ann.mouse_id_status = "valid"
+            ann.detection_import_revision = video.detection_import_revision
+            ann.identity_revision = identity_rev
 
     return invalid, len(invalid) == 0
 
@@ -211,7 +215,9 @@ def submit_video(
         )
 
     invalid, all_valid = _revalidate_annotations(db, video, imp)
+    db.flush()
     if not all_valid:
+        db.commit()
         raise HTTPException(
             status_code=400,
             detail={
