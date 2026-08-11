@@ -213,16 +213,17 @@ handleSubmitReview:
  local guards → confirm → submitVideoForReview(pid, vid)
  setVideo(response); hint="已提交审核"
 ```
-**后端事务 7 步**
+**后端事务 8 步**
 ```pseudo
 submit_video:
 1. role in owner/admin/annotator；状态不能 submitted/approved
 2. 至少一条 Annotation；detection_import_revision != 0；active import 存在
-3. _revalidate_annotations：数量、active track、区间内未抑制覆盖
-4. 任一 invalid/needs_mouse_ids → 400
-5. valid 事件快照 revisions 与 Video 当前值不同 → 400
-6. video.workflow_status="submitted"；所有事件 review_status="pending", reviewer_id=null
-7. db.commit + refresh video
+3. _revalidate_annotations 纯校验数量、active track、区间内未抑制覆盖，只返回 issues 与待同步 revisions，不写 Annotation
+4. 任一 invalid/needs_mouse_ids → 400；事务回滚，Annotation 状态和数据库不变
+5. 已存 revisions stale 但当前语义有效 → 允许继续，不因 stale 本身返回 400
+6. 全部语义有效后，在同一成功事务内将已验证 Annotation 置 mouse_id_status="valid"，推进 detection_import_revision/identity_revision
+7. video.workflow_status="submitted"；所有事件 review_status="pending", reviewer_id=null
+8. db.commit + refresh video
 ```
 | React | wrapper | endpoint | backend | 写入模型 |
 |---|---|---|---|---|
@@ -245,11 +246,11 @@ handleReview(result):
 create_review:
 1. role owner/admin/reviewer；video 必须 submitted
 2. 构造 Review，快照 annotation/detection_import/identity revisions
-3. approved 时再次确认状态，取 active import，_revalidate_annotations；失败 → 409
-4. approved → video approved + approved_at/by
-5. rejected → video rejected + 清 approved 字段
-6. 所有 Annotation.review_status=result、reviewer_id=当前审核人
-7. approved 时同步 Annotation 的 import/identity revisions；db.add(review); db.commit
+3. approved 时再次确认状态，取 active import，调用纯校验 _revalidate_annotations；失败 → 409，Annotation 状态和数据库不变
+4. approved 且全部语义有效时，在同一成功事务内将已验证 Annotation 置 valid，并同步 import/identity revisions（stale 但语义有效可推进）
+5. approved → video approved + approved_at/by
+6. rejected → video rejected + 清 approved 字段
+7. 所有 Annotation.review_status=result、reviewer_id=当前审核人；db.add(review); db.commit
 8. approved 后尝试 enqueue_media_job 并 schedule；调度异常只记日志，不回滚审核
 ```
 | React | wrapper | endpoint | backend | 写入模型 |

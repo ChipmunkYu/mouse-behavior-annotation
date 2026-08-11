@@ -405,6 +405,8 @@ identity_revision
 
 视频工作流 `workflow_status` 使用草稿/待审核/已通过/已退回（`draft/submitted/approved/rejected`）；单条行为标注 `Annotation.review_status` 独立使用 `pending/approved/rejected`。提交视频会把本修订标注置为 `pending`，审核裁决再置为 `approved` 或 `rejected`，不得把两套状态混写。
 
+`submit` 与 approval 前的 `_revalidate_annotations` 是纯校验：只收集语义问题和待同步修订，不写 Annotation。提交时有无效项返回 400，approval 前有无效项返回 409，两种失败均保持数据库不变。全部语义校验通过后，服务端才在同一成功事务内将已验证 Annotation 置为 `valid`、同步其 `detection_import_revision`/`identity_revision`，再提交 `workflow_status=submitted` 或完成通过审核。已存修订 stale 但按当前快照语义有效的项可在成功事务中推进，不因 stale 本身失败。
+
 Split、Merge、对应撤销、整轨检测抑制及其撤销后，服务端按新 track 修正修订重校验视频内全部 Annotation：仍合法的项更新 `detection_import_revision`/`identity_revision` 并保持 `valid`，不合法项进入 `needs_mouse_ids`。仅实际受影响且原为 `approved` 的单条 Annotation 改为 `pending` 并清 reviewer；视频仅在当前为 `submitted/approved` 时退回 `draft`，当前为 `rejected` 时不笼统改回 `draft`。旧审核记录保留审计。
 
 当前页面会话内可按实际完成顺序统一撤销具有可靠操作 ID 的 Split、Merge 或整轨忽略；刷新后不恢复统一历史。整轨 suppression 可从持久 active 列表恢复记录旁的单独撤销入口，旧 import 项不进入该列表。
@@ -438,6 +440,7 @@ Split、Merge、对应撤销、整轨检测抑制及其撤销后，服务端按�
 - 行为字段与完整 `mouse_ids` 列表同事务保存；
 - Merge、事件 `mouse_ids` 替换、失效标记和修订递增处于同一事务；
 - check 结果只用于确认展示，不能代替提交时校验；
+- `_revalidate_annotations` 的失败路径不写 Annotation；只有全部语义校验通过后，才与 submit/approval 状态变化同事务同步有效项修订；
 - 导出固定 annotation/import/identity/media 快照，发布前再次校验；
 - 每次操作记录操作者、时间、原因、基础/结果修订、影响检测、影响 track 和影响标注；
 - 撤销通过新操作恢复，不删除历史；
@@ -454,7 +457,7 @@ Split、Merge、对应撤销、整轨检测抑制及其撤销后，服务端按�
 7. ✅ **导出**：新版集中 `annotations.json`、`clip_file`、`tracks.corrected.jsonl`、manifest 和项目 ZIP 固定快照，并校验事件与 MP4 双向一一对应；
 8. ⏳ **人工验收与部署**：真实长视频、浏览器完整流程、真实 ffmpeg 和生产部署仍待验证；自动化测试已完成。
 
-当前自动化证据：后端全量 `298 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
+当前自动化证据：后端全量 `301 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
 
 ## 17. 验收标准
 

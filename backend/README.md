@@ -283,11 +283,17 @@ Split、Merge、对应撤销、整轨 suppression 及其撤销都会重校验视
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/review` | 审核裁决 → `ReviewOut` |
 
 - **submit**：仅 `owner/admin/annotator`；至少 1 条标注；仅 `draft/rejected` 可提交
-  （`submitted/approved` 拒绝 400）；提交后视频 `workflow_status=submitted`、`submitted_at` 更新，
-  本修订全部标注 `review_status=pending`、`reviewer_id=null`。
+  （`submitted/approved` 拒绝 400）。`_revalidate_annotations` 只校验并返回问题与待同步修订，不写
+  Annotation；任一语义无效项返回 400，数据库不变。全部语义校验通过后，才在同一成功事务内
+  将已验证 Annotation 置为 `mouse_id_status=valid`、推进 `detection_import_revision`/
+  `identity_revision`，再把视频置为 `workflow_status=submitted`、更新 `submitted_at`，并将本修订
+  全部标注置为 `review_status=pending`、`reviewer_id=null`。因此修订 stale 但语义仍有效的标注可在
+  成功提交时推进，而不会仅因已存修订过期被拒绝。
 - **queue**：仅 `owner/admin/reviewer`；只返回 `submitted` 视频（跨项目隔离，按 `submitted_at` 倒序）。
 - **reviews（历史）**：项目成员均可读该视频完整审核历史，跨修订累积，不因失效删除。
 - **review**：仅 `owner/admin/reviewer`；仅 `submitted` 可裁决（其余状态 400，重复裁决 400）；
+  approval 前再次调用纯校验 `_revalidate_annotations`，无效时返回 409 且数据库不变；通过时在
+  同一成功事务内将已验证 Annotation 置为 `valid` 并同步 detection import/track 修正修订；
   追加一条 `Review`（`annotation_revision` = 裁决时视频修订号）并同步：
   `approved` → 视频 `approved/approved_at/approved_by`、标注 `approved/reviewer_id`；
   `rejected` → 视频 `rejected`、清空 approved 字段、标注 `rejected/reviewer_id`。
@@ -527,7 +533,7 @@ cd backend
 pytest -q
 ```
 
-当前全量结果：`298 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
+当前全量结果：`301 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、完整单视频 ExportEvent 和 `clip_file` ZIP 完整性，
