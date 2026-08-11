@@ -15,6 +15,7 @@
 ├── 参考文档/ # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
 ├── 需求文档.md # 需求文档（v0.6）
 ├── 项目术语表.md # 当前项目权威术语基线
+├── 服务器规格估算.md # 用户负载、存储、带宽与费用的参数化估算
 ├── README.md # 本文件
 └── boris-9.13.0-win64-setup.exe # BORIS 桌面版安装包（参考用）
 ```
@@ -131,7 +132,17 @@ cd /d D:\lab\行为识别\标注网站\backend
 
 **进程边界**：媒体、导出与周期清理共用当前应用内的单进程 executor/worker 设计，不得直接让多个应用进程共享同一任务库和数据目录。多进程部署前除显式执行数据库迁移外，还必须为任务领取增加持久化 lease/owner、heartbeat 与过期回收机制。
 
-`demo/frontend-showcase` 是独立录屏分支，不再维护。当前交付位于 `feature/spatial-annotation`，待人工验收后再决定提交、推送与合并。
+空间标注生产能力已整合到 `main`；后续界面与数据库优化分别在 `feature/spatial-ui-optimization`、`feature/spatial-db-optimization` 开展。旧演示与阶段性功能分支不再维护，确认无保留价值后删除。
+
+## 部署带宽优化点（规划，未实施）
+
+以下为生产部署前计划实施的带宽优化方向，均未实施，供后续排期参考：
+
+1. 视频播放改为 HTTP Range 流式（现状为前端整包下载 blob，单次打开即下载整个文件）。
+2. 播放用低码率副本：存储母版，标注/审核走转码后的低码率版本（如 H.264 CRF 28–30，或 H.265，注意 Firefox 桌面不支持 HEVC 需回退）。
+3. 缓存：视频与缩略图增加浏览器缓存头（Cache-Control/ETag）；反向代理层加 proxy_cache 或 CDN，多人重复观看同一视频时命中缓存。
+4. 前端加载策略：视频 `preload="metadata"`、缩略图懒加载并压缩为 WebP、修复前端 `/thumbnails/` 无对应后端路由的问题。
+5. 播放版本按需异步生成（复用现有 MediaWorker 队列），避免预转全部视频。
 
 ## 详见
 
@@ -139,3 +150,4 @@ cd /d D:\lab\行为识别\标注网站\backend
 - 前端功能与技术要点：`frontend/README.md`
 - 需求、数据模型与 P1/P2 边界：`需求文档.md`
 - 权威术语、状态与修订定义：`项目术语表.md`
+- 用户负载到服务器规格的参数化估算：`服务器规格估算.md`
