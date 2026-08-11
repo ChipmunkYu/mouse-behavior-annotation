@@ -272,7 +272,7 @@ def test_submit_revalidates_valid_stale_annotation_and_advances_revisions(ctx, l
         assert stored_ann.identity_revision == stored_video.identity_revision == 3
 
 
-def test_submit_does_not_advance_invalid_stale_annotation(ctx, login_headers):
+def test_submit_does_not_change_invalid_stale_annotation(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next(c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1)
     ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
@@ -299,9 +299,58 @@ def test_submit_does_not_advance_invalid_stale_annotation(ctx, login_headers):
         stored_video = db.get(Video, video["id"])
         stored_ann = db.get(Annotation, ann["id"])
         assert stored_video.workflow_status == "draft"
-        assert stored_ann.mouse_id_status == "needs_mouse_ids"
+        assert stored_ann.mouse_id_status == "valid"
         assert stored_ann.detection_import_revision == 1
         assert stored_ann.identity_revision == 0
+
+
+def test_submit_invalid_mixed_annotations_changes_neither(ctx, login_headers):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    cat = next(c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1)
+    valid_ann = _annotate_with_mouse(
+        ctx, headers, project, video, cat["id"], mouse_ids=[1]
+    )
+    invalid_ann = _annotate_with_mouse(
+        ctx, headers, project, video, cat["id"], start_time=0.04, mouse_ids=[2]
+    )
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_video.identity_revision = 3
+        db.query(CorrectedDetectionAssignment).update({"identity_revision": 3})
+        first = db.get(Annotation, valid_ann["id"])
+        first.mouse_id_status = "valid"
+        first.detection_import_revision = 0
+        first.identity_revision = 1
+        second = db.get(Annotation, invalid_ann["id"])
+        second.mouse_ids = [99]
+        second.mouse_id_status = "needs_mouse_ids"
+        second.detection_import_revision = 1
+        second.identity_revision = 2
+        db.commit()
+
+    resp = _submit(ctx, headers, project, video)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["invalid_annotations"] == [
+        {
+            "annotation_id": invalid_ann["id"],
+            "reason": "Track ID 99 is not an active corrected track",
+        }
+    ]
+
+    with ctx.session_factory() as db:
+        first = db.get(Annotation, valid_ann["id"])
+        second = db.get(Annotation, invalid_ann["id"])
+        assert (
+            first.mouse_id_status,
+            first.detection_import_revision,
+            first.identity_revision,
+        ) == ("valid", 0, 1)
+        assert (
+            second.mouse_id_status,
+            second.detection_import_revision,
+            second.identity_revision,
+        ) == ("needs_mouse_ids", 1, 2)
 
 
 def test_submit_rejects_needs_mouse_ids(ctx, login_headers):

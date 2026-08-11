@@ -104,13 +104,15 @@ cd /d D:\lab\行为识别\标注网站\backend
 ```bat
 cd /d D:\lab\行为识别\标注网站\backend
 .venv\Scripts\activate
-pytest -q :: 当前 298 passed, 3 skipped, 1 warning
+pytest -q :: 当前 301 passed, 3 skipped, 1 warning
 
 cd /d D:\lab\行为识别\标注网站\frontend
 npm run build :: 生产构建验证
 ```
 
-当前验证结果：后端全量 `298 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
+当前验证结果：后端全量 `301 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
+
+当前提交/审核实现中，`submit` 与通过审核前调用的 `_revalidate_annotations` 只返回校验问题与待同步修订，不写 Annotation。语义无效时分别返回 400/409，Annotation 状态和数据库保持不变；语义有效时，即使已存检测结果导入/track 修正修订过期，也会在同一成功事务内将已验证 Annotation 置为 `valid`、推进其修订，再提交为 `workflow_status=submitted` 或完成通过审核。track 修正操作本身仍会重校验视频内全部 Annotation。
 
 ## 生命周期清理
 
