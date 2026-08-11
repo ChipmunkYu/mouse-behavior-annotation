@@ -69,9 +69,11 @@ def _to_review_out(review: Review) -> ReviewOut:
     )
 
 
-def _revalidate_annotations(db: Session, video: Video, imp: DetectionImport) -> tuple[list[dict], bool]:
+def _revalidate_annotations(
+    db: Session, video: Video, imp: DetectionImport
+) -> tuple[list[dict], list[Annotation]]:
     """重新校验所有标注的 mouse_ids 对抗当前 import/identity revisions 和类别规则。
-    返回 (invalid_annotations, all_valid)。
+    纯校验并返回 (invalid_annotations, validated_annotations)，不修改标注。
     """
     annotations = (
         db.query(Annotation)
@@ -80,27 +82,25 @@ def _revalidate_annotations(db: Session, video: Video, imp: DetectionImport) -> 
     )
     identity_rev = video.identity_revision
     invalid: list[dict] = []
+    validated: list[Annotation] = []
 
     for ann in annotations:
         cat = db.get(BehaviorCategory, ann.category_id) if ann.category_id else None
 
         if not ann.mouse_ids:
             if ann.mouse_id_status == "valid":
-                ann.mouse_id_status = "needs_mouse_ids"
                 invalid.append({"annotation_id": ann.id, "reason": "mouse_ids is empty"})
             continue
 
         if cat is not None:
             count = len(ann.mouse_ids)
             if count < cat.mouse_count_min:
-                ann.mouse_id_status = "needs_mouse_ids"
                 invalid.append({
                     "annotation_id": ann.id,
                     "reason": f"Category '{cat.name}' requires at least {cat.mouse_count_min} mouse; got {count}",
                 })
                 continue
             if cat.mouse_count_max is not None and count > cat.mouse_count_max:
-                ann.mouse_id_status = "needs_mouse_ids"
                 invalid.append({
                     "annotation_id": ann.id,
                     "reason": f"Category '{cat.name}' allows at most {cat.mouse_count_max} mice; got {count}",
@@ -118,7 +118,6 @@ def _revalidate_annotations(db: Session, video: Video, imp: DetectionImport) -> 
                 .first()
             )
             if track is None:
-                ann.mouse_id_status = "needs_mouse_ids"
                 invalid.append({
                     "annotation_id": ann.id,
                     "reason": f"Track ID {tid} is not an active corrected track",
@@ -151,18 +150,15 @@ def _revalidate_annotations(db: Session, video: Video, imp: DetectionImport) -> 
                 .count()
             )
             if unsuppressed == 0:
-                ann.mouse_id_status = "needs_mouse_ids"
                 invalid.append({
                     "annotation_id": ann.id,
                     "reason": f"Track ID {tid} has no unsuppressed detections in frame range [{ann.start_frame}, {ann.end_frame}]",
                 })
                 break
         else:
-            ann.mouse_id_status = "valid"
-            ann.detection_import_revision = video.detection_import_revision
-            ann.identity_revision = identity_rev
+            validated.append(ann)
 
-    return invalid, len(invalid) == 0
+    return invalid, validated
 
 
 @router.post(
@@ -214,10 +210,8 @@ def submit_video(
             detail="Cannot submit: no active detection import found.",
         )
 
-    invalid, all_valid = _revalidate_annotations(db, video, imp)
-    db.flush()
-    if not all_valid:
-        db.commit()
+    invalid, validated = _revalidate_annotations(db, video, imp)
+    if invalid:
         raise HTTPException(
             status_code=400,
             detail={
@@ -240,6 +234,12 @@ def submit_video(
             detail=f"{needs_ids_count} annotation(s) still need valid mouse_ids before submission",
         )
 
+    for ann in validated:
+        ann.mouse_id_status = "valid"
+        ann.detection_import_revision = video.detection_import_revision
+        ann.identity_revision = video.identity_revision
+    db.flush()
+
     out_of_sync = (
         db.query(Annotation.id)
         .filter(
@@ -254,6 +254,7 @@ def submit_video(
     )
     if out_of_sync:
         ids = [r[0] for r in out_of_sync]
+        db.rollback()
         raise HTTPException(
             status_code=400,
             detail={
@@ -369,8 +370,8 @@ def create_review(
             raise HTTPException(
                 status_code=409, detail="No active detection import; cannot approve"
             )
-        invalid, all_valid = _revalidate_annotations(db, video, imp)
-        if not all_valid:
+        invalid, validated = _revalidate_annotations(db, video, imp)
+        if invalid:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -385,10 +386,12 @@ def create_review(
         video.workflow_status = "rejected"
         video.approved_at = None
         video.approved_by = None
+    validated_ids = {ann.id for ann in validated} if body.result == "approved" else set()
     for ann in db.query(Annotation).filter(Annotation.video_id == video.id).all():
         ann.review_status = body.result
         ann.reviewer_id = membership.user_id
-        if body.result == "approved":
+        if ann.id in validated_ids:
+            ann.mouse_id_status = "valid"
             ann.detection_import_revision = video.detection_import_revision
             ann.identity_revision = video.identity_revision
     db.add(review)
