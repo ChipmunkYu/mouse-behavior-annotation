@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -28,13 +29,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .media import MediaCommandError, MediaProcessor
-from .models import Annotation, BackgroundJob, Clip, Video
+from .models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
+from .submission_service import validate_snapshot_integrity, validate_storage_key
+from .submission_media_plan import build_submission_media_plan
+from .file_identity import FileIdentity, stream_identity
 
 logger = logging.getLogger(__name__)
 
 JOB_TYPE_MEDIA = "media"
 # Clip 错误字段与任务摘要的截断上限
 ERROR_TRUNCATE_LIMIT = 2000
+
+
+def _fault(_stage: str) -> None:
+    """Test-only crash seam around filesystem/DB atomicity boundaries."""
 
 
 def _now() -> datetime:
@@ -44,6 +52,10 @@ def _now() -> datetime:
 def media_dedupe_key(video_id: int, revision: int) -> str:
     """媒体任务去重键：同一视频+修订唯一（幂等入队 / 防重复任务）。"""
     return f"media:video:{video_id}:rev:{revision}"
+
+
+def submission_media_dedupe_key(submission_id: int) -> str:
+    return f"media:submission:{submission_id}"
 
 
 def _truncate_error(text: str, limit: int = ERROR_TRUNCATE_LIMIT) -> str:
@@ -112,6 +124,37 @@ def resolve_input_path(settings, video: Video) -> Path:
     if not path.is_file():
         raise MediaCommandError(f"video file missing on disk: {video.storage_path}")
     return path
+
+
+def stage_submission_input(settings, submission: Submission, job_id: int) -> Path:
+    """Copy/hash one verified open source handle into a job-private staging file."""
+    key = validate_storage_key(submission.source_storage_key)
+    root = settings.videos_dir.resolve()
+    path = (root / key).resolve()
+    if path == root or not path.is_relative_to(root) or not path.is_file():
+        raise MediaCommandError("immutable submission source is missing or outside videos directory")
+    expected = FileIdentity(submission.source_file_size, submission.source_mtime_ns,
+                            submission.source_device, submission.source_inode)
+    staging = root / f".submission-media-job-{job_id}-{uuid.uuid4().hex}.staging"
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source, staging.open("xb") as target:
+            before = stream_identity(source)
+            if expected.device and expected.inode and before != expected:
+                raise MediaCommandError("immutable submission source file identity mismatch")
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            after = stream_identity(source)
+        if before != after:
+            raise MediaCommandError("immutable submission source changed while staging")
+        if digest.hexdigest() != submission.source_video_sha256:
+            raise MediaCommandError("immutable submission source SHA-256 mismatch")
+        return staging
+    except Exception:
+        staging.unlink(missing_ok=True)
+        raise
 
 
 def resolve_entity_path(stored: str | None, root_dir: Path) -> Path | None:
@@ -190,6 +233,46 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
                 temp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def render_submission_clip_files(processor, settings, submission: Submission,
+                                  annotation: SubmissionAnnotation, clip: Clip,
+                                  *, input_path: Path) -> list[Path]:
+    name = f"clip_{annotation.id}_revsub{annotation.submission_id}"
+    render_id = uuid.uuid4().hex
+    temp_clip = settings.clips_dir / f".{name}.{render_id}.mp4.part"
+    temp_thumb = settings.thumbnails_dir / f".{name}.{render_id}.jpg.part"
+    final_clip = settings.clips_dir / f"{name}.mp4"
+    final_thumb = settings.thumbnails_dir / f"{name}.jpg"
+    settings.clips_dir.mkdir(parents=True, exist_ok=True)
+    settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    try:
+        snapshot = submission.detection_snapshot
+        plan = build_submission_media_plan(
+            start_time=annotation.start_time, end_time=annotation.end_time,
+            start_frame=annotation.start_frame, end_frame=annotation.end_frame,
+            fps=snapshot.fps, frame_count=snapshot.frame_count,
+            width=snapshot.width, height=snapshot.height, crop_region=annotation.crop_region)
+        processor.render_clip(input_path=str(input_path), start=plan.start,
+                              end=plan.end, output_path=str(temp_clip), crop=plan.crop)
+        processor.render_thumbnail(input_path=str(input_path), at=plan.thumbnail_at,
+                                   output_path=str(temp_thumb), crop=plan.crop)
+        os.replace(temp_clip, final_clip); created.append(final_clip)
+        os.replace(temp_thumb, final_thumb); created.append(final_thumb)
+        _fault("submission_files_renamed")
+        clip.clip_path, clip.thumbnail_path = final_clip.name, final_thumb.name
+        clip.status, clip.error, clip.generated_at, clip.updated_at = "ready", None, _now(), _now()
+        return created
+    except Exception:
+        for path in created:
+            try: path.unlink(missing_ok=True)
+            except OSError: pass
+        raise
+    finally:
+        for path in (temp_clip, temp_thumb):
+            try: path.unlink(missing_ok=True)
+            except OSError: pass
 
 
 def claim_and_render_clip(
@@ -284,6 +367,70 @@ def claim_and_render_clip(
         raise
 
 
+def claim_and_render_submission_clip(
+    db: Session, processor, settings, submission_id: int, annotation_id: int, clip_id: int,
+    *, input_path: Path, wait_seconds: float = 10.0, poll_seconds: float = 0.05,
+) -> tuple[Path, list[Path]]:
+    """CAS claim/wait primitive shared by Submission media and project export workers."""
+    deadline = time.monotonic() + wait_seconds
+    owns_claim = False
+    claim_token: datetime | None = None
+    created: list[Path] = []
+    try:
+        while True:
+            next_token = _now()
+            claimed = db.query(Clip).filter(
+                Clip.id == clip_id, Clip.status.in_(("pending", "failed"))
+            ).update({"status": "processing", "error": None, "updated_at": next_token},
+                     synchronize_session=False)
+            db.commit()
+            if claimed == 1:
+                owns_claim, claim_token = True, next_token
+                break
+            db.expire_all(); current = db.get(Clip, clip_id)
+            if current is None:
+                raise MediaCommandError(f"clip {clip_id} no longer exists")
+            if clip_entities_ready(current, settings):
+                path = resolve_entity_path(current.clip_path, settings.clips_dir)
+                assert path is not None
+                return path, []
+            if current.status == "ready":
+                db.query(Clip).filter(Clip.id == clip_id, Clip.status == "ready").update({
+                    "status": "pending", "clip_path": None, "thumbnail_path": None,
+                    "error": None, "generated_at": None, "updated_at": _now()},
+                    synchronize_session=False)
+                db.commit(); continue
+            if current.status != "processing":
+                continue
+            if time.monotonic() >= deadline:
+                raise MediaCommandError(f"timed out waiting for clip {clip_id} render owner")
+            time.sleep(poll_seconds)
+        db.expire_all()
+        clip, submission, annotation = (db.get(Clip, clip_id), db.get(Submission, submission_id),
+                                        db.get(SubmissionAnnotation, annotation_id))
+        if clip is None or submission is None or annotation is None:
+            raise MediaCommandError("Submission clip render input no longer exists")
+        created = render_submission_clip_files(processor, settings, submission, annotation, clip,
+                                               input_path=input_path)
+        db.commit()
+        path = resolve_entity_path(clip.clip_path, settings.clips_dir)
+        if path is None or not path.is_file():
+            raise MediaCommandError(f"clip file missing after render: {clip.clip_path}")
+        return path, created
+    except Exception as exc:
+        db.rollback()
+        for path in created:
+            try: path.unlink(missing_ok=True)
+            except OSError: pass
+        if owns_claim and claim_token is not None:
+            db.query(Clip).filter(Clip.id == clip_id, Clip.status == "processing",
+                                  Clip.updated_at == claim_token).update(
+                {"status": "failed", "error": _truncate_error(str(exc)), "updated_at": _now()},
+                synchronize_session=False)
+            db.commit()
+        raise
+
+
 def ensure_pending_clips(db: Session, video: Video) -> int:
     """为视频当前修订的全部标注幂等创建 pending Clip 行（唯一约束兜底并发重复）。"""
     stmt = sqlite_insert(Clip)
@@ -346,27 +493,44 @@ def reset_interrupted_job_clips(db: Session, job: BackgroundJob) -> int:
     payload = job.payload or {}
     candidates: list[Clip] = []
     if job.job_type == JOB_TYPE_MEDIA:
-        video_id = payload.get("video_id")
-        revision = payload.get("revision")
-        video = db.get(Video, video_id) if video_id else None
-        if video is not None and video.media_revision == revision:
-            candidates = (
-                db.query(Clip)
-                .join(Annotation, Annotation.id == Clip.annotation_id)
-                .filter(
-                    Annotation.video_id == video.id,
-                    Clip.source_revision == revision,
-                    Clip.status == "processing",
+        submission_id = payload.get("submission_id")
+        if submission_id:
+            annotation_ids = payload.get("submission_annotation_ids") or []
+            candidates = db.query(Clip).filter(
+                Clip.submission_annotation_id.in_(annotation_ids), Clip.status == "processing"
+            ).all()
+        else:
+            video_id = payload.get("video_id")
+            revision = payload.get("revision")
+            video = db.get(Video, video_id) if video_id else None
+            if video is not None and video.media_revision == revision:
+                candidates = (
+                    db.query(Clip)
+                    .join(Annotation, Annotation.id == Clip.annotation_id)
+                    .filter(
+                        Annotation.video_id == video.id,
+                        Clip.source_revision == revision,
+                        Clip.status == "processing",
+                    )
+                    .all()
                 )
-                .all()
-            )
     elif job.job_type == "export":
-        annotation_ids = set(payload.get("annotation_ids") or [])
-        revisions = {
-            int(video_id): revision
-            for video_id, revision in (payload.get("video_revisions") or {}).items()
-        }
-        if annotation_ids and revisions:
+        submission_annotation_ids = set(payload.get("submission_annotation_ids") or [])
+        if submission_annotation_ids:
+            # Clip has no claim owner/token. Startup recovery is therefore deliberately
+            # bounded to the immutable refs frozen in this interrupted export job.
+            candidates = db.query(Clip).filter(
+                Clip.submission_annotation_id.in_(submission_annotation_ids),
+                Clip.status == "processing",
+            ).all()
+        else:
+            # Legacy mutable-authority export payload compatibility.
+            annotation_ids = set(payload.get("annotation_ids") or [])
+            revisions = {
+                int(video_id): revision
+                for video_id, revision in (payload.get("video_revisions") or {}).items()
+            }
+        if not submission_annotation_ids and annotation_ids and revisions:
             rows = (
                 db.query(Clip, Video)
                 .join(Annotation, Annotation.id == Clip.annotation_id)
@@ -422,6 +586,29 @@ def enqueue_media_job(db: Session, video: Video, settings=None) -> BackgroundJob
     job = _upsert_media_job(db, video, force_requeue=repaired)
     db.commit()
     db.refresh(job)
+    return job
+
+
+def enqueue_submission_media(db: Session, submission: Submission) -> BackgroundJob:
+    """Create immutable-authority Clip and queued job rows; caller owns transaction."""
+    annotation_ids = [row[0] for row in db.query(SubmissionAnnotation.id).filter_by(
+        submission_id=submission.id).order_by(SubmissionAnnotation.id)]
+    for annotation_id in annotation_ids:
+        db.execute(sqlite_insert(Clip).values(
+            submission_annotation_id=annotation_id, status="pending", media_revision=1,
+        ).on_conflict_do_nothing(
+            index_elements=["submission_annotation_id"],
+            index_where=Clip.submission_annotation_id.is_not(None),
+        ))
+    key = submission_media_dedupe_key(submission.id)
+    db.execute(sqlite_insert(BackgroundJob).values(
+        project_id=submission.video.project_id, job_type=JOB_TYPE_MEDIA, status="queued",
+        progress=0, dedupe_key=key,
+        payload={"submission_id": submission.id, "submission_annotation_ids": annotation_ids},
+    ).on_conflict_do_nothing(index_elements=["dedupe_key"]))
+    job = db.query(BackgroundJob).filter_by(dedupe_key=key).one()
+    if job.status in {"failed", "cancelled"}:
+        job.status, job.progress, job.error, job.attempts = "queued", 0, None, 0
     return job
 
 
@@ -495,7 +682,6 @@ class MediaWorker:
                     job.finished_at = _now()
                 else:
                     job.status = "queued"
-                    job.attempts += 1
                     job.started_at = None
                     job.error = "Interrupted; requeued at startup"
                     reset_interrupted_job_clips(db, job)
@@ -575,6 +761,9 @@ class MediaWorker:
 
     def _process_job(self, db: Session, job: BackgroundJob) -> None:
         payload = job.payload or {}
+        if payload.get("submission_id"):
+            self._process_submission_job(db, job)
+            return
         video_id = payload.get("video_id")
         revision = payload.get("revision")
         if not video_id or not revision:
@@ -661,6 +850,73 @@ class MediaWorker:
         job.status = "succeeded"
         job.progress = 100
         job.finished_at = _now()
+        db.commit()
+
+    def _process_submission_job(self, db: Session, job: BackgroundJob) -> None:
+        payload = job.payload or {}
+        submission = db.get(Submission, payload.get("submission_id"))
+        expected_ids = payload.get("submission_annotation_ids") or []
+        if (not isinstance(expected_ids, list) or not expected_ids
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in expected_ids)
+                or expected_ids != sorted(set(expected_ids))):
+            raise MediaCommandError("media job immutable annotation payload is invalid or duplicated")
+        if submission is None or submission.status not in {"approved", "superseded"}:
+            raise MediaCommandError("media job submission is missing or not approved")
+        if submission.video.project_id != job.project_id:
+            raise MediaCommandError("media job submission does not belong to job project")
+        validate_snapshot_integrity(db, submission.detection_snapshot)
+        annotations = db.query(SubmissionAnnotation).filter(
+            SubmissionAnnotation.submission_id == submission.id,
+            SubmissionAnnotation.id.in_(expected_ids),
+        ).order_by(SubmissionAnnotation.id).all()
+        if [item.id for item in annotations] != expected_ids:
+            raise MediaCommandError("media job immutable annotation set is inconsistent")
+        pairs = db.query(SubmissionAnnotation, Clip).join(
+            Clip, Clip.submission_annotation_id == SubmissionAnnotation.id
+        ).filter(SubmissionAnnotation.submission_id == submission.id,
+                 SubmissionAnnotation.id.in_(expected_ids)).order_by(SubmissionAnnotation.id).all()
+        if [annotation.id for annotation, _clip in pairs] != expected_ids:
+            raise MediaCommandError("media job Clip set is incomplete")
+        failures = []
+        staging = None
+        try:
+            if any(not clip_entities_ready(clip, self.settings) for _annotation, clip in pairs):
+                staging = stage_submission_input(self.settings, submission, job.id)
+                _fault("submission_source_staged")
+            for index, (annotation, clip) in enumerate(pairs, 1):
+                if clip_entities_ready(clip, self.settings):
+                    continue
+                try:
+                    claim_and_render_submission_clip(
+                        db, self.processor, self.settings, submission.id, annotation.id, clip.id,
+                        input_path=staging,
+                    )
+                except Exception as exc:
+                    db.rollback(); failures.append(str(exc)); break
+                job = db.get(BackgroundJob, job.id)
+                job.progress = int(index * 100 / len(pairs)) if pairs else 100
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            first_pending = next((clip for _annotation, clip in pairs
+                                  if not clip_entities_ready(clip, self.settings)), None)
+            if first_pending is not None:
+                clip = db.get(Clip, first_pending.id)
+                clip.status, clip.error, clip.updated_at = "failed", _truncate_error(str(exc)), _now()
+                db.commit()
+            failures.append(str(exc))
+        finally:
+            if staging is not None:
+                try:
+                    staging.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Failed to remove submission staging file %s", staging)
+        job = db.get(BackgroundJob, job.id)
+        job.finished_at = _now()
+        if failures:
+            job.status, job.error = "failed", _truncate_error(failures[0])
+        else:
+            job.status, job.progress = "succeeded", 100
         db.commit()
 
     def _process_clip(self, db: Session, video: Video, clip: Clip) -> list[Path]:

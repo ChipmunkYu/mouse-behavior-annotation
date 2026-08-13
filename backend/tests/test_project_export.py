@@ -1,554 +1,387 @@
-"""批次 6：项目级分类 ZIP 导出、权限、隔离、补生成与下载安全。"""
+"""Phase 4: immutable Submission project ZIP and independent consumer contract."""
 from __future__ import annotations
 
-import io
 import json
-import threading
-import time
+import re
 import zipfile
-from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
-from app.export_jobs import enqueue_export_job, export_dedupe_key
-from app.media import MediaCommandError
-from app.media_jobs import claim_and_render_clip, media_dedupe_key
-from app.models import Annotation, BackgroundJob, Clip, Project, Video
+from app.export_contract import FILES, safe_part, transform_detection
+from app.media_jobs import reset_interrupted_job_clips
+from app.models import Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission
 from tests.conftest import auth_headers
+from tests.test_reviews import (_add_reviewer, _annotate_with_mouse, _review,
+                                _setup_video_with_import, _submit)
 
 
-def _setup(ctx, *, count: int = 2, ready: int = 0):
-    setup = ctx.make_project_with_video("导出测试")
-    headers = setup["headers"]
-    project = setup["project"]
-    video = setup["video"]
-    categories = setup["categories"][:count]
-    source = ctx.app.state.settings.videos_dir / "export-source.mp4"
-    source.write_bytes(b"SOURCE")
-    annotation_ids = []
-    for index, category in enumerate(categories):
-        response = ctx.client.post(
-            f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
-            json={
-                "category_id": category["id"],
-                "start_time": float(index + 1),
-                "end_time": float(index + 2),
-                "start_frame": (index + 1) * 25,
-                "end_frame": (index + 2) * 25,
-            },
-            headers=headers,
-        )
-        assert response.status_code == 201
-        annotation_ids.append(response.json()["id"])
-    with ctx.session_factory() as db:
-        row = db.get(Video, video["id"])
-        row.storage_path = source.name
-        row.workflow_status = "approved"
-        for index, annotation_id in enumerate(annotation_ids):
-            annotation = db.get(Annotation, annotation_id)
-            annotation.review_status = "approved"
-            annotation.mouse_id_status = "valid"
-            annotation.mouse_ids = [1]
-            if index < ready:
-                name = f"existing_{annotation_id}.mp4"
-                thumb_name = f"existing_{annotation_id}.jpg"
-                (ctx.app.state.settings.clips_dir / name).write_bytes(b"EXISTING")
-                (ctx.app.state.settings.thumbnails_dir / thumb_name).write_bytes(b"THUMB")
-                db.add(
-                    Clip(
-                        project_id=project["id"],
-                        annotation_id=annotation_id,
-                        source_revision=row.annotation_revision,
-                        status="ready",
-                        clip_path=name,
-                        thumbnail_path=thumb_name,
-                    )
-                )
-        db.commit()
-    return headers, project, video, categories, annotation_ids
+def _approved(ctx, *, two_categories=False):
+    login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
+    headers, project, categories, video = _setup_video_with_import(ctx, login)
+    suitable = [c for c in categories if c["mouse_count_min"] <= 1 <= c["mouse_count_max"]]
+    first = _annotate_with_mouse(ctx, headers, project, video, suitable[0]["id"], mouse_ids=[1])
+    annotations = [first]
+    if two_categories:
+        annotations.append(_annotate_with_mouse(
+            ctx, headers, project, video, suitable[1]["id"], start_time=0.08, mouse_ids=[1]))
+    _add_reviewer(ctx, project["id"])
+    assert _submit(ctx, headers, project, video).status_code == 200
+    assert _review(ctx, login("reviewer1", "pw123"), project, video, "approved").status_code == 200
+    return headers, project, suitable, video, annotations
 
 
-def _post(ctx, project_id: int, headers: dict, category_ids=None):
+def _export(ctx, project, headers, category_ids=None):
     body = {} if category_ids is None else {"category_ids": category_ids}
-    return ctx.client.post(f"/api/projects/{project_id}/export", json=body, headers=headers)
+    response = ctx.client.post(f"/api/projects/{project['id']}/export", json=body, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
-def test_first_export_generates_real_zip_annotations_and_download(media_ctx):
-    ctx = media_ctx
-    headers, project, _video, categories, annotation_ids = _setup(ctx)
+def _archive(ctx, job):
+    return ctx.app.state.settings.exports_dir / job["result_path"]
 
-    response = _post(ctx, project["id"], headers)
-    assert response.status_code == 201
-    job = response.json()
-    assert job["status"] == "succeeded"
-    assert job["result_path"] == f"export_project_{project['id']}_{job['id']}.zip"
-    assert len(ctx.processor.clip_calls) == 2
 
-    archive = ctx.app.state.settings.exports_dir / job["result_path"]
-    assert archive.is_file()
+def _clip_dirs(archive):
     with zipfile.ZipFile(archive) as zf:
-        names = zf.namelist()
-        assert "annotations.json" in names
-        assert sum(name.endswith(".mp4") for name in names) == 2
-        for category in categories:
-            assert any(
-                name.startswith(f"clips/{category['group']}/{category['name']}/") for name in names
-            )
-        events = json.loads(zf.read("annotations.json"))
-        assert len(events) == 2
-        assert {event["behavior"] for event in events} == {c["name"] for c in categories}
-        assert all(event["review_status"] == "approved" for event in events)
-        assert all(event.get("clip_file") and event["clip_file"].startswith("clips/") for event in events)
-        assert all(event["annotation_id"] in annotation_ids for event in events)
-        assert all("mouse_ids" in event for event in events)
-
-    status = ctx.client.get(
-        f"/api/projects/{project['id']}/export/status", headers=headers
-    ).json()
-    assert status["latest_job"]["id"] == job["id"]
-    assert (status["exportable_count"], status["ready_count"], status["missing_count"]) == (
-        2,
-        2,
-        0,
-    )
-    download = ctx.client.get(
-        f"/api/projects/{project['id']}/export/download", headers=headers
-    )
-    assert download.status_code == 200
-    assert download.content == archive.read_bytes()
-    assert zipfile.is_zipfile(io.BytesIO(download.content))
-    assert set(annotation_ids) == {
-        row.annotation_id
-        for row in _clips(ctx, project["id"])
-    }
+        files = [name for name in zf.namelist() if not name.endswith("/")]
+    directories = sorted({name.rsplit("/", 1)[0] for name in files})
+    return directories, files
 
 
-def _clips(ctx, project_id: int):
+def _remove_submission_clips(ctx):
     with ctx.session_factory() as db:
-        return db.query(Clip).filter(Clip.project_id == project_id).all()
-
-
-def test_category_filter_controls_zip_and_latest_status_scope(media_ctx):
-    ctx = media_ctx
-    headers, project, _video, categories, _annotation_ids = _setup(ctx)
-    selected = categories[1]
-    response = _post(ctx, project["id"], headers, [selected["id"]])
-    assert response.status_code == 201
-    job = response.json()
-    assert job["payload"]["category_ids"] == [selected["id"]]
-
-    status = ctx.client.get(
-        f"/api/projects/{project['id']}/export/status", headers=headers
-    ).json()
-    assert status["exportable_count"] == status["ready_count"] == 1
-    with zipfile.ZipFile(ctx.app.state.settings.exports_dir / job["result_path"]) as zf:
-        events = json.loads(zf.read("annotations.json"))
-        assert [event["behavior"] for event in events] == [selected["name"]]
-        assert sum(name.endswith(".mp4") for name in zf.namelist()) == 1
-
-
-def test_export_active_job_is_exclusive_and_rerun_keeps_history(media_ctx):
-    ctx = media_ctx
-    headers, project, _video, _categories, _annotation_ids = _setup(ctx, count=1)
-    first = _post(ctx, project["id"], headers).json()
-    second_response = _post(ctx, project["id"], headers)
-    assert second_response.status_code == 201
-    second = second_response.json()
-    assert second["id"] != first["id"]
-    assert second["result_path"] != first["result_path"]
-    assert (ctx.app.state.settings.exports_dir / first["result_path"]).is_file()
-    assert (ctx.app.state.settings.exports_dir / second["result_path"]).is_file()
-    with ctx.session_factory() as db:
-        history = (
-            db.query(BackgroundJob)
-            .filter(
-                BackgroundJob.project_id == project["id"],
-                BackgroundJob.job_type == "export",
-            )
-            .all()
-        )
-        assert len(history) == 2
-        db.add(
-            BackgroundJob(
-                project_id=project["id"],
-                job_type="export",
-                status="running",
-                dedupe_key=export_dedupe_key(project["id"]),
-                payload={"project_id": project["id"], "category_ids": []},
-            )
-        )
+        clips = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).all()
+        ids = [clip.submission_annotation_id for clip in clips]
+        for clip in clips:
+            for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                                 (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+                if stored:
+                    (root / stored).unlink(missing_ok=True)
+            db.delete(clip)
         db.commit()
-    assert _post(ctx, project["id"], headers).status_code == 409
+    return ids
 
 
-def test_concurrent_sessions_create_only_one_active_export(media_ctx):
+def test_single_category_is_flat_and_has_exact_four_files(media_ctx):
     ctx = media_ctx
-    _headers, project, _video, _categories, _annotation_ids = _setup(ctx, count=1)
-    barrier = threading.Barrier(2)
-    results = []
+    headers, project, categories, _video, _annotations = _approved(ctx)
+    job = _export(ctx, project, headers)
+    assert job["status"] == "succeeded", repr(job)
+    assert job["payload"]["category_ids"] == [categories[0]["id"]]
+    directories, files = _clip_dirs(_archive(ctx, job))
+    assert len(directories) == 1 and "/" not in directories[0]
+    assert {name.rsplit("/", 1)[1] for name in files} == FILES
+    assert not any("annotations.json" in name or "manifest" in name or "corrected_tracks" in name
+                   for name in files)
 
-    def enqueue():
+
+def test_multiple_categories_use_snapshot_category_directories(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx, two_categories=True)
+    job = _export(ctx, project, headers)
+    directories, files = _clip_dirs(_archive(ctx, job))
+    assert len(directories) == 2 and all(directory.count("/") == 1 for directory in directories)
+    with zipfile.ZipFile(_archive(ctx, job)) as zf:
+        annotations = [json.loads(zf.read(name)) for name in files if name.endswith("annotation.json")]
+    assert {directory.split("/")[0] for directory in directories} == {
+        item["behavior"] for item in annotations}
+
+
+def test_payload_freezes_submission_annotation_category_and_snapshot_ids(media_ctx):
+    ctx = media_ctx
+    headers, project, categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker; worker.synchronous = False
+    with ctx.session_factory() as db:
+        job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+            db, db.get(Project, project["id"]), [])
+        payload = job.payload
+        assert payload["category_ids"] == [categories[0]["id"]]
+        assert len(payload["submission_ids"]) == len(payload["submission_annotation_ids"]) == 1
+        assert payload["refs"][0]["snapshot_id"]
+
+
+def test_superseded_frozen_submission_completes_without_current_draft_reads(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, source_annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker; original = worker.synchronous; worker.synchronous = False
+    try:
         with ctx.session_factory() as db:
-            target = db.get(Project, project["id"])
-            barrier.wait()
-            results.append(enqueue_export_job(db, target, []))
+            job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+                db, db.get(Project, project["id"]), [])
+            job_id = job.id
+            submission = db.query(Submission).filter_by(status="approved").one()
+            submission.status = "superseded"
+            db.get(Annotation, source_annotations[0]["id"]).start_time = 0.12
+            db.get(BehaviorCategory, source_annotations[0]["category_id"]).name = "RENAMED"
+            db.commit()
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            job = db.get(BackgroundJob, job_id); assert job.status == "succeeded"
+        with zipfile.ZipFile(_archive(ctx, {"result_path": job.result_path})) as zf:
+            annotation = json.loads(zf.read(next(n for n in zf.namelist() if n.endswith("annotation.json"))))
+        assert annotation["behavior"] != "RENAMED"
+        assert annotation["time_range"]["start"] == 0.0
+    finally:
+        worker.synchronous = original
 
-    threads = [threading.Thread(target=enqueue) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
-    assert sum(job is not None for job in results) == 1
 
-
-def test_media_and_export_workers_share_one_clip_render_owner(media_ctx):
+def test_independent_consumer_relative_frames_empty_frames_and_no_forbidden_fields(media_ctx):
     ctx = media_ctx
-    _headers, project, video, _categories, annotation_ids = _setup(ctx, count=1)
-    entered = threading.Event()
-    release = threading.Event()
-    original_render = ctx.processor.render_clip
-
-    def blocking_render(**kwargs):
-        entered.set()
-        assert release.wait(5)
-        original_render(**kwargs)
-
-    ctx.processor.render_clip = blocking_render
-    with ctx.session_factory() as db:
-        clip = Clip(
-            project_id=project["id"],
-            annotation_id=annotation_ids[0],
-            source_revision=1,
-            status="pending",
-        )
-        db.add(clip)
-        media_job = BackgroundJob(
-            project_id=project["id"],
-            job_type="media",
-            status="queued",
-            dedupe_key=media_dedupe_key(video["id"], 1),
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
-        )
-        export_job = BackgroundJob(
-            project_id=project["id"],
-            job_type="export",
-            status="queued",
-            dedupe_key=export_dedupe_key(project["id"]),
-            payload={
-                "project_id": project["id"],
-                "category_ids": [],
-                "annotation_ids": annotation_ids,
-                "video_revisions": {str(video["id"]): 1},
-            },
-        )
-        db.add_all([media_job, export_job])
-        db.commit()
-        media_job_id, export_job_id = media_job.id, export_job.id
-
-    media_thread = threading.Thread(
-        target=ctx.app.state.media_worker._run_job, args=(media_job_id,)
-    )
-    export_thread = threading.Thread(
-        target=ctx.app.state.export_worker._run_job, args=(export_job_id,)
-    )
-    media_thread.start()
-    assert entered.wait(5)
-    export_thread.start()
-    time.sleep(0.2)
-    assert len(ctx.processor.clip_calls) == 0
-    release.set()
-    media_thread.join(timeout=10)
-    export_thread.join(timeout=10)
-    assert not media_thread.is_alive() and not export_thread.is_alive()
-    assert len(ctx.processor.clip_calls) == 1
-    with ctx.session_factory() as db:
-        clip = db.query(Clip).one()
-        assert clip.status == "ready"
-        assert (ctx.app.state.settings.clips_dir / clip.clip_path).is_file()
-        assert (ctx.app.state.settings.thumbnails_dir / clip.thumbnail_path).is_file()
-        assert db.get(BackgroundJob, media_job_id).status == "succeeded"
-        assert db.get(BackgroundJob, export_job_id).status == "succeeded"
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    job = _export(ctx, project, headers)
+    with zipfile.ZipFile(_archive(ctx, job)) as zf:
+        directory = next(name.rsplit("/", 1)[0] for name in zf.namelist() if name.endswith("tracks.json"))
+        tracks = json.loads(zf.read(f"{directory}/tracks.json"))
+        annotation = json.loads(zf.read(f"{directory}/annotation.json"))
+        metadata = json.loads(zf.read(f"{directory}/metadata.json"))
+    assert [frame["frame"] for frame in tracks] == list(range(len(tracks)))
+    assert all(frame["time"] == pytest.approx(frame["frame"] / metadata["clip"]["fps"])
+               for frame in tracks)
+    assert annotation["frame_range"] == {"start": 0, "end": len(tracks) - 1}
+    serialized = json.dumps([annotation, tracks, metadata]).lower()
+    assert not any(term in serialized for term in ("annotation_id", "submission_id", "reviewer",
+                                                    "annotator", "storage_key", "sha256"))
 
 
-def test_clip_wait_timeout_does_not_release_another_render_owners_claim(media_ctx):
+@pytest.mark.parametrize("value,expected", [
+    ("../攻击", "_攻击"), ("CON", "_CON"), ("  ", "untitled"),
+    ("a/b\\c:*?", "a_b_c___"), ("Ａ", "A"),
+])
+def test_safe_directory_components(value, expected):
+    assert safe_part(value) == expected
+
+
+def test_windows_device_basename_with_extension_is_prefixed():
+    assert safe_part("CON.txt") == "_CON.txt"
+    assert safe_part("COM1.foo") == "_COM1.foo"
+
+
+def test_safe_part_bounds_unicode_and_casefold_collisions():
+    assert len(safe_part("鼠" * 200, limit=37)) == 37
+    assert safe_part("ｅvil") == "e_vil"
+
+
+def test_explicit_unrepresented_category_preserves_multi_category_layout(media_ctx):
     ctx = media_ctx
-    _headers, project, video, _categories, annotation_ids = _setup(ctx, count=1)
-    entered = threading.Event()
-    release = threading.Event()
-    owner_result = []
-    owner_errors = []
-    original_render = ctx.processor.render_clip
-
-    def blocking_render(**kwargs):
-        original_render(**kwargs)
-        entered.set()
-        assert release.wait(5)
-
-    ctx.processor.render_clip = blocking_render
-    with ctx.session_factory() as db:
-        clip = Clip(
-            project_id=project["id"],
-            annotation_id=annotation_ids[0],
-            source_revision=1,
-            status="pending",
-        )
-        db.add(clip)
-        db.commit()
-        clip_id = clip.id
-
-    def render_as_owner():
-        try:
-            with ctx.session_factory() as db:
-                owner_result.append(
-                    claim_and_render_clip(
-                        db,
-                        ctx.processor,
-                        ctx.app.state.settings,
-                        video["id"],
-                        annotation_ids[0],
-                        clip_id,
-                        wait_seconds=1,
-                        poll_seconds=0.005,
-                    )
-                )
-        except Exception as exc:  # pragma: no cover - asserted below
-            owner_errors.append(exc)
-
-    owner_thread = threading.Thread(target=render_as_owner)
-    owner_thread.start()
-    assert entered.wait(5)
-
-    with ctx.session_factory() as db:
-        with pytest.raises(MediaCommandError, match="timed out waiting"):
-            claim_and_render_clip(
-                db,
-                ctx.processor,
-                ctx.app.state.settings,
-                video["id"],
-                annotation_ids[0],
-                clip_id,
-                wait_seconds=0.02,
-                poll_seconds=0.005,
-            )
-    with ctx.session_factory() as db:
-        clip = db.get(Clip, clip_id)
-        assert clip.status == "processing"
-        assert clip.clip_path is None
-        assert clip.thumbnail_path is None
-        assert clip.error is None
-    assert len(ctx.processor.clip_calls) == 1
-
-    release.set()
-    owner_thread.join(timeout=5)
-    assert not owner_thread.is_alive()
-    assert owner_errors == []
-    assert len(owner_result) == 1
-    with ctx.session_factory() as db:
-        clip = db.get(Clip, clip_id)
-        assert clip.status == "ready"
-        assert (ctx.app.state.settings.clips_dir / clip.clip_path).is_file()
-        assert (ctx.app.state.settings.thumbnails_dir / clip.thumbnail_path).is_file()
-        reused_path, created = claim_and_render_clip(
-            db,
-            ctx.processor,
-            ctx.app.state.settings,
-            video["id"],
-            annotation_ids[0],
-            clip_id,
-            wait_seconds=0,
-            poll_seconds=0.005,
-        )
-        assert reused_path.is_file()
-        assert created == []
-    assert len(ctx.processor.clip_calls) == 1
+    headers, project, categories, _video, _annotations = _approved(ctx)
+    job = _export(ctx, project, headers, [categories[0]["id"], categories[1]["id"]])
+    assert job["payload"]["category_ids"] == [categories[0]["id"], categories[1]["id"]]
+    directories, _files = _clip_dirs(_archive(ctx, job))
+    assert len(directories) == 1 and directories[0].count("/") == 1
 
 
-def test_restart_requeues_export_and_recovers_its_processing_clip(media_ctx):
+def test_no_eligible_rows_returns_400_without_job(media_ctx):
     ctx = media_ctx
-    _headers, project, video, _categories, annotation_ids = _setup(ctx, count=1)
+    headers, project, categories, _video, _annotations = _approved(ctx)
+    response = ctx.client.post(f"/api/projects/{project['id']}/export",
+                               json={"category_ids": [categories[1]["id"]]}, headers=headers)
+    assert response.status_code == 400
     with ctx.session_factory() as db:
-        clip = Clip(
-            project_id=project["id"],
-            annotation_id=annotation_ids[0],
-            source_revision=1,
-            status="processing",
-        )
-        job = BackgroundJob(
-            project_id=project["id"],
-            job_type="export",
-            status="running",
-            dedupe_key=export_dedupe_key(project["id"]),
-            payload={
-                "project_id": project["id"],
-                "category_ids": [],
-                "annotation_ids": annotation_ids,
-                "video_revisions": {str(video["id"]): 1},
-            },
-        )
-        db.add_all([clip, job])
-        db.commit()
-        clip_id, job_id = clip.id, job.id
-
-    ctx.app.state.export_worker.start()
-
-    with ctx.session_factory() as db:
-        assert db.get(Clip, clip_id).status == "ready"
-        recovered = db.get(BackgroundJob, job_id)
-        assert recovered.status == "succeeded"
-        assert recovered.attempts == 2
-        assert (ctx.app.state.settings.exports_dir / recovered.result_path).is_file()
-    assert len(ctx.processor.clip_calls) == 1
+        assert db.query(BackgroundJob).filter_by(job_type="export").count() == 0
 
 
-def test_export_rechecks_revision_at_publish_and_does_not_publish(media_ctx):
+def test_opaque_token_is_high_entropy_and_retry_stable(media_ctx):
     ctx = media_ctx
-    _headers, project, video, _categories, annotation_ids = _setup(ctx, count=1)
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker; worker.synchronous = False
     with ctx.session_factory() as db:
-        job = enqueue_export_job(db, db.get(Project, project["id"]), [])
-        job_id = job.id
+        job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+            db, db.get(Project, project["id"]), [])
+        token = job.payload["refs"][0]["opaque_token"]
+        assert re.fullmatch(r"[0-9a-f]{32}", token)
+        assert token != format(job.payload["refs"][0]["submission_annotation_id"], "032x")
+        db.refresh(job)
+        assert job.payload["refs"][0]["opaque_token"] == token
 
-    entered = threading.Event()
-    release = threading.Event()
 
-    def before_publish():
-        entered.set()
-        assert release.wait(5)
+def test_crop_policy_excludes_outside_clamps_intersection_and_invalidates_keypoint():
+    class Raw:
+        detection_confidence = .9; class_id = 0
+        box = {"x1": 5, "y1": 15, "x2": 25, "y2": 35}
+        keypoints = [{"x_px": 5, "y_px": 15, "confidence": .8},
+                     {"x_px": 20, "y_px": 30, "confidence": .7}]
+    result = transform_detection(Raw(), 9, (10, 20, 20, 20), 20, 20)
+    assert result["track_id"] == 9 and result["box"] == [0.0, 0.0, 15.0, 15.0]
+    assert result["keypoints"][0] == [0.0, 0.0, 0.0]
+    Raw.box = {"x1": 0, "y1": 0, "x2": 5, "y2": 5}
+    assert transform_detection(Raw(), 9, (10, 20, 20, 20), 20, 20) is None
 
-    ctx.app.state.export_worker.before_publish_hook = before_publish
-    thread = threading.Thread(target=ctx.app.state.export_worker._run_job, args=(job_id,))
-    thread.start()
-    assert entered.wait(5)
-    with ctx.session_factory() as db:
-        row = db.get(Video, video["id"])
-        row.annotation_revision += 1
-        row.workflow_status = "draft"
-        db.get(Annotation, annotation_ids[0]).review_status = "pending"
-        db.commit()
-    release.set()
-    thread.join(timeout=10)
-    assert not thread.is_alive()
-    with ctx.session_factory() as db:
-        job = db.get(BackgroundJob, job_id)
-        assert job.status == "failed"
-        assert job.result_path is None
+
+def test_probe_mismatch_and_render_failure_publish_no_final(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    original = ctx.processor.probe_clip
+    ctx.processor.probe_clip = lambda path, expected=None: {
+        **expected, "frame_count": 999, "duration": expected["frame_count"] / expected["fps"]}
+    job = _export(ctx, project, headers)
+    assert job["status"] == "failed" and job["result_path"] is None
     assert list(ctx.app.state.settings.exports_dir.glob("*.zip")) == []
+    assert list(ctx.app.state.settings.exports_dir.glob(".export-*")) == []
+    ctx.processor.probe_clip = original
 
 
-def test_export_permissions_project_category_and_job_isolation(media_ctx):
+def test_missing_submission_clip_is_generated_before_packaging(media_ctx):
     ctx = media_ctx
-    headers, project, _video, _categories, _annotation_ids = _setup(ctx, count=1)
-    other = ctx.make_project_with_video("其他导出项目")
-    annotator_id = ctx.create_user("export-annotator")
-    ctx.add_member(project["id"], annotator_id, "annotator")
-    annotator_headers = auth_headers(ctx.client, "export-annotator", "pw123")
-    assert _post(ctx, project["id"], annotator_headers).status_code == 403
-    assert ctx.client.get(
-        f"/api/projects/{project['id']}/export/status", headers=annotator_headers
-    ).status_code == 403
-
-    foreign_category = other["categories"][0]["id"]
-    assert _post(ctx, project["id"], headers, [foreign_category]).status_code == 400
-    job = _post(ctx, project["id"], headers).json()
-    assert ctx.client.get(
-        f"/api/projects/{project['id']}/jobs/{job['id']}", headers=headers
-    ).status_code == 200
-    assert ctx.client.get(
-        f"/api/projects/{project['id']}/jobs/{job['id']}", headers=annotator_headers
-    ).status_code == 403
-    assert ctx.client.get(
-        f"/api/projects/{other['project']['id']}/jobs/{job['id']}",
-        headers=other["headers"],
-    ).status_code == 404
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    _remove_submission_clips(ctx)
+    calls = len(ctx.processor.clip_calls)
+    job = _export(ctx, project, headers)
+    assert job["status"] == "succeeded"
+    assert len(ctx.processor.clip_calls) == calls + 1
+    with ctx.session_factory() as db:
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        assert clip.status == "ready"
 
 
-def test_status_requires_current_ready_file_and_reports_missing(media_ctx):
+def test_current_export_startup_recovers_processing_clip_and_reruns(media_ctx):
     ctx = media_ctx
-    headers, project, _video, categories, annotation_ids = _setup(ctx, ready=1)
-    with ctx.session_factory() as db:
-        db.add(
-            Clip(
-                project_id=project["id"],
-                annotation_id=annotation_ids[1],
-                source_revision=1,
-                status="ready",
-                clip_path="../outside.mp4",
-            )
-        )
-        db.commit()
-    status = ctx.client.get(
-        f"/api/projects/{project['id']}/export/status", headers=headers
-    ).json()
-    assert status["exportable_count"] == 2
-    assert status["ready_count"] == 1
-    assert status["missing_count"] == 1
-    assert status["missing_clips"] == [
-        {
-            "annotation_id": annotation_ids[1],
-            "category_name": categories[1]["name"],
-            "video_filename": "session1.mp4",
-        }
-    ]
-    valid = ctx.app.state.settings.clips_dir / f"existing_{annotation_ids[0]}.mp4"
-    valid.unlink()
-    status = ctx.client.get(
-        f"/api/projects/{project['id']}/export/status", headers=headers
-    ).json()
-    assert status["ready_count"] == 0
-    assert status["missing_count"] == 2
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker
+    original = worker.synchronous
+    worker.synchronous = False
+    try:
+        with ctx.session_factory() as db:
+            job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+                db, db.get(Project, project["id"]), [])
+            job_id = job.id
+            job.status, job.attempts = "running", 1
+            clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+            clip.status = "processing"
+            db.commit()
+        worker._recover_interrupted()
+        with ctx.session_factory() as db:
+            assert db.get(BackgroundJob, job_id).status == "queued"
+            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "pending"
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            assert db.get(BackgroundJob, job_id).status == "succeeded"
+            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "ready"
+    finally:
+        worker.synchronous = original
 
 
-def test_missing_clip_failure_does_not_publish_archive(media_ctx):
+def test_exhausted_export_recovery_resets_processing_clip_for_new_export(media_ctx):
     ctx = media_ctx
-    headers, project, _video, _categories, annotation_ids = _setup(ctx, count=1)
-    ctx.processor.fail_clips.add(annotation_ids[0])
-    response = _post(ctx, project["id"], headers)
-    assert response.status_code == 201
-    job = response.json()
-    assert job["status"] == "failed"
-    assert job["result_path"] is None
-    assert list(ctx.app.state.settings.exports_dir.glob("*.zip")) == []
-    assert ctx.client.get(
-        f"/api/projects/{project['id']}/export/download", headers=headers
-    ).status_code == 404
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker
+    original = worker.synchronous
+    worker.synchronous = False
+    try:
+        with ctx.session_factory() as db:
+            job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+                db, db.get(Project, project["id"]), [])
+            exhausted_job_id = job.id
+            job.status, job.attempts = "running", ctx.app.state.settings.media_max_attempts
+            clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+            clip.status = "processing"
+            db.commit()
+
+        worker._recover_interrupted()
+
+        with ctx.session_factory() as db:
+            exhausted = db.get(BackgroundJob, exhausted_job_id)
+            assert exhausted.status == "failed"
+            assert "retry limit" in exhausted.error
+            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "pending"
+
+        worker.synchronous = True
+        replacement = _export(ctx, project, headers)
+        with ctx.session_factory() as db:
+            assert db.get(BackgroundJob, replacement["id"]).status == "succeeded"
+            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "ready"
+    finally:
+        worker.synchronous = original
 
 
-def test_download_rejects_expired_missing_and_out_of_bounds_results(media_ctx):
+def test_legacy_export_payload_processing_clip_recovery_compatibility(media_ctx):
     ctx = media_ctx
-    headers, project, _video, _categories, _annotation_ids = _setup(ctx, count=1)
-    job_id = _post(ctx, project["id"], headers).json()["id"]
+    _headers, project, _categories, video, annotations = _approved(ctx)
     with ctx.session_factory() as db:
-        job = db.get(BackgroundJob, job_id)
-        job.expires_at = datetime.utcnow() - timedelta(seconds=1)
-        db.commit()
-    url = f"/api/projects/{project['id']}/export/download"
-    assert ctx.client.get(url, headers=headers).status_code == 404
-
-    with ctx.session_factory() as db:
-        job = db.get(BackgroundJob, job_id)
-        job.expires_at = datetime.utcnow() + timedelta(days=1)
-        job.result_path = "../outside.zip"
-        db.commit()
-    assert ctx.client.get(url, headers=headers).status_code == 404
-    with ctx.session_factory() as db:
-        job = db.get(BackgroundJob, job_id)
-        job.result_path = "missing.zip"
-        db.commit()
-    assert ctx.client.get(url, headers=headers).status_code == 404
+        source = db.get(Annotation, annotations[0]["id"])
+        current_video = db.get(__import__("app.models", fromlist=["Video"]).Video, video["id"])
+        clip = Clip(project_id=project["id"], annotation_id=source.id,
+                    source_revision=current_video.media_revision, status="processing")
+        job = BackgroundJob(project_id=project["id"], job_type="export", status="running",
+                            payload={"annotation_ids": [source.id],
+                                     "video_revisions": {str(video["id"]): current_video.annotation_revision}})
+        db.add_all([clip, job]); db.commit()
+        assert reset_interrupted_job_clips(db, job) == 1
+        db.commit(); db.refresh(clip)
+        assert clip.status == "pending"
 
 
-def test_only_approved_annotation_and_approved_video_are_exported(media_ctx):
+def test_render_failure_cleans_staging_and_never_publishes_final(media_ctx):
     ctx = media_ctx
-    headers, project, video, _categories, annotation_ids = _setup(ctx)
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    submission_annotation_id = _remove_submission_clips(ctx)[0]
+    ctx.processor.fail_clips.add(submission_annotation_id)
+    job = _export(ctx, project, headers)
+    assert job["status"] == "failed" and job["result_path"] is None
+    assert list(ctx.app.state.settings.exports_dir.iterdir()) == []
+
+
+def test_colliding_directory_names_receive_stable_unique_suffix(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx, two_categories=True)
+    monkeypatch.setattr("app.export_jobs.clip_directory_name", lambda annotation, submission: "same")
+    job = _export(ctx, project, headers)
+    directories, _files = _clip_dirs(_archive(ctx, job))
+    assert len(directories) == 2
+    assert len({directory.casefold() for directory in directories}) == 2
+
+
+def test_colliding_category_directories_use_frozen_opaque_tokens(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, categories, _video, _annotations = _approved(ctx, two_categories=True)
     with ctx.session_factory() as db:
-        db.get(Annotation, annotation_ids[1]).review_status = "pending"
+        db.get(BehaviorCategory, categories[0]["id"]).name = "A"
+        db.get(BehaviorCategory, categories[1]["id"]).name = "Ａ"
         db.commit()
-    first = _post(ctx, project["id"], headers).json()
-    with zipfile.ZipFile(ctx.app.state.settings.exports_dir / first["result_path"]) as zf:
-        assert len(json.loads(zf.read("annotations.json"))) == 1
+    worker = ctx.app.state.export_worker; worker.synchronous = False
     with ctx.session_factory() as db:
-        db.get(Video, video["id"]).workflow_status = "draft"
-        db.commit()
-    second = _post(ctx, project["id"], headers).json()
-    with zipfile.ZipFile(ctx.app.state.settings.exports_dir / second["result_path"]) as zf:
-        assert json.loads(zf.read("annotations.json")) == []
+        job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+            db, db.get(Project, project["id"]), [])
+        directories = list(job.payload["category_directories"].values())
+        tokens = job.payload["category_tokens"]
+        assert len({name.casefold() for name in directories}) == 2
+        assert all(re.fullmatch(r"[0-9a-f]{32}", token) for token in tokens.values())
+        assert any(token[:12] in name for token in tokens.values() for name in directories)
+
+
+def test_track_export_streams_query_without_materializing_all(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    from app import export_jobs
+
+    original = export_jobs.effective_detection_query
+    observed = {"yield_per": None}
+
+    class StreamingOnly:
+        def __init__(self, query):
+            self.query = query
+
+        def order_by(self, *args):
+            self.query = self.query.order_by(*args)
+            return self
+
+        def yield_per(self, count):
+            observed["yield_per"] = count
+            return self.query.yield_per(count)
+
+        def all(self):  # pragma: no cover - this is the forbidden regression path
+            raise AssertionError("track export must not materialize the detection stream with .all()")
+
+    monkeypatch.setattr(export_jobs, "effective_detection_query",
+                        lambda *args, **kwargs: StreamingOnly(original(*args, **kwargs)))
+    job = _export(ctx, project, headers)
+    assert job["status"] == "succeeded"
+    assert observed["yield_per"] == 500
+
+
+def test_active_dedupe_download_and_retry_history_compatibility(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    first = _export(ctx, project, headers); second = _export(ctx, project, headers)
+    assert first["id"] != second["id"]
+    response = ctx.client.get(f"/api/projects/{project['id']}/export/download", headers=headers)
+    assert response.status_code == 200 and zipfile.is_zipfile(__import__("io").BytesIO(response.content))

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from app.track_ids import TRACK_ID_UPPER_BOUND
+
 
 # ---------------------------------------------------------------------------
 # 测试数据工厂
@@ -404,6 +406,8 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
         assert imp.revision == 1
         assert imp.status == "imported"
         assert imp.detection_count == 12
+        assert imp.edit_version == 0
+        assert imp.next_display_track_id == 4
 
         raw_count = db.query(models.RawDetection).filter(
             models.RawDetection.detection_import_id == imp.id
@@ -414,7 +418,7 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
             models.CorrectedTrack.detection_import_id == imp.id,
             models.CorrectedTrack.active == True,
         ).count()
-        assert track_count == 3
+        assert track_count == 0
 
         assign_count = db.query(models.CorrectedDetectionAssignment).join(
             models.RawDetection,
@@ -422,7 +426,7 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
         ).filter(
             models.RawDetection.detection_import_id == imp.id,
         ).count()
-        assert assign_count == 12
+        assert assign_count == 0
 
         video = db.get(models.Video, body["video_id"])
         assert video.detection_import_revision == 1
@@ -935,6 +939,8 @@ def test_all_zero_detection_import(ctx, login_headers):
         assert imp is not None
         assert imp.detection_count == 0
         assert imp.frame_range == {"first_frame": 0, "last_frame": 4}
+        assert imp.next_display_track_id == 0
+        assert imp.edit_version == 0
 
         raw_count = db.query(models.RawDetection).filter(
             models.RawDetection.detection_import_id == imp.id
@@ -1038,6 +1044,9 @@ def test_replace_detection_import_new_revision(ctx, login_headers):
         assert imports[0].active is False
         assert imports[1].revision == 2
         assert imports[1].active is True
+        assert imports[0].next_display_track_id == 4
+        assert imports[1].next_display_track_id == 5
+        assert imports[1].edit_version == 0
         old_raw = db.query(models.RawDetection).filter(
             models.RawDetection.detection_import_id == imports[0].id
         ).count()
@@ -1046,6 +1055,112 @@ def test_replace_detection_import_new_revision(ctx, login_headers):
             models.RawDetection.detection_import_id == imports[1].id
         ).count()
         assert new_raw == 4
+
+
+@pytest.mark.parametrize("invalid_id", [-1, TRACK_ID_UPPER_BOUND])
+def test_complete_rejects_track_id_outside_domain_with_400(ctx, login_headers, invalid_id):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    tracks = "\n".join(
+        [_make_frame_line(i, [_det(invalid_id)] if i == 0 else []) for i in range(5)]
+    ) + "\n"
+    _upload_file(ctx.client, pid, batch["id"], "video", "bad-id.mp4", b"fake", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", tracks, headers)
+    _upload_file(
+        ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers
+    )
+    response = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers
+    )
+    assert response.status_code == 400
+    assert "0 <= id <" in response.text
+
+
+def test_complete_accepts_max_track_id_and_cursor_reaches_upper_bound(ctx, login_headers):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    tracks = "\n".join(
+        [
+            _make_frame_line(i, [_det(TRACK_ID_UPPER_BOUND - 1)] if i == 0 else [])
+            for i in range(5)
+        ]
+    ) + "\n"
+    _upload_file(ctx.client, pid, batch["id"], "video", "max-id.mp4", b"fake", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", tracks, headers)
+    _upload_file(
+        ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers
+    )
+    response = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    from app import models
+
+    with ctx.session_factory() as db:
+        detection_import = db.get(models.DetectionImport, response.json()["detection_import_id"])
+        assert detection_import.next_display_track_id == TRACK_ID_UPPER_BOUND
+
+
+def test_replace_rejects_invalid_track_id_before_database_write(ctx, login_headers):
+    headers, pid, vid = _setup_complete_import(ctx, login_headers)
+    tracks = "\n".join(
+        [_make_frame_line(i, [_det(-1)] if i == 0 else []) for i in range(5)]
+    ) + "\n"
+    response = ctx.client.post(
+        f"/api/projects/{pid}/videos/{vid}/detection-imports",
+        files={
+            "tracks_file": ("bad.jsonl", tracks.encode()),
+            "metadata_file": ("metadata.json", make_metadata_json().encode()),
+        },
+        params={"confirm": True},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    assert "0 <= id <" in response.text
+    from app import models
+
+    with ctx.session_factory() as db:
+        imports = db.query(models.DetectionImport).filter_by(video_id=vid).all()
+        assert len(imports) == 1
+        assert imports[0].active is True
+        assert imports[0].next_display_track_id == 4
+
+
+def test_corrected_export_rejects_historical_or_mismatched_revisions(ctx, login_headers):
+    headers, pid, vid = _setup_complete_import(ctx, login_headers)
+    split = ctx.client.post(
+        f"/api/projects/{pid}/videos/{vid}/identity-edits",
+        json={
+            "operation": "split", "track_ids": [1], "frame": 2,
+            "base_identity_revision": 0, "base_detection_import_revision": 1,
+        }, headers=headers,
+    )
+    assert split.status_code == 200
+    current = ctx.client.get(
+        f"/api/projects/{pid}/videos/{vid}/detections/export",
+        params={"import_revision": 1, "identity_revision": 1}, headers=headers,
+    )
+    assert current.status_code == 200, current.text
+    assert current.json()["manifest"]["identity_revision"] == 1
+    stale_identity = ctx.client.get(
+        f"/api/projects/{pid}/videos/{vid}/detections/export",
+        params={"import_revision": 1, "identity_revision": 0}, headers=headers,
+    )
+    assert stale_identity.status_code == 409
+
+    replacement = ctx.client.post(
+        f"/api/projects/{pid}/videos/{vid}/detection-imports",
+        files={
+            "tracks_file": ("tracks.jsonl", make_tracks_jsonl().encode()),
+            "metadata_file": ("metadata.json", make_metadata_json().encode()),
+        }, params={"confirm": True}, headers=headers,
+    )
+    assert replacement.status_code == 200
+    historical_import = ctx.client.get(
+        f"/api/projects/{pid}/videos/{vid}/detections/export",
+        params={"import_revision": 1, "identity_revision": 1}, headers=headers,
+    )
+    assert historical_import.status_code == 409
 
 
 # ---------------------------------------------------------------------------

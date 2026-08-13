@@ -15,6 +15,7 @@
   含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
 - YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核、修正后 track 结果与带 `clip_file` 的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
+- 正式项目导出是每片段固定 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的四文件 ZIP；单视频 `/annotations/export` 仅为 legacy 兼容 JSON API，两者不是同一契约。
 
 ## 目录结构
 
@@ -84,7 +85,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0007），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0011），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -113,11 +114,43 @@ baseline（0001）再升级到 head（0007），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键，0005～0007 增加检测导入、track 修正及批次路径兼容）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键，0005～0007 增加检测导入，0008 增加 sparse draft/提交基础）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0006 已版本化库 → 增量 `upgrade head` 到 0007，既有数据按迁移规则保留。
+- 0002～0007 已版本化库 → 增量 `upgrade head` 到 0008；0008 严格预检 legacy current state，不完整时硬失败。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
+
+0010 在任何 digest 列 DDL 前验证既有 0009 snapshot 的 raw/state count、same-import
+关系、header 与 pose metadata；关键点名称必须是非空、唯一、去除首尾空白的字符串数组，
+skeleton edge 必须恰含两个非 bool 整数，索引有效，并禁止自环及正反向重复边。损坏数据会
+保持 revision 0009 且不遗留 digest 列。0011 为已存在 snapshot 的 raw baseline 增加
+INSERT/UPDATE/DELETE 数据库 trigger，并保护 frozen Submission authority；迁移和内存库
+`create_all` 共用同一 trigger 定义，downgrade 会移除。
+
+Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Windows handle 前后取得；
+短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
+已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
+该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。合并前
+仍必须在提供真实 ffmpeg/ffprobe 的环境补做 25/30/60 FPS 实际帧数证据。
+
+### Sparse writer 切换维护命令
+
+仅在从 legacy writer 切换到 Phase 2 sparse writer 的维护窗口执行一次；可重复运行的前提是
+DraftIdentityEdit/DraftDetectionChange 栈为空且所有旧后端/worker 已停止：
+
+```bash
+# 1. 停止全部后端与 worker，备份 SQLite 数据库
+# 2. 确认 schema 已在 0008
+.venv\Scripts\python scripts\migrate.py --check
+# 3. 显式确认 legacy writer 已停止并执行 BEGIN IMMEDIATE reconciliation
+.venv\Scripts\python scripts\reconcile_detection_state.py \
+  --confirm-legacy-writer-stopped \
+  --db-url sqlite:///./data/annotation.db
+```
+
+命令会严格验证 legacy current state、清空并重建 active sparse override、重算 cursor，要求
+`shadow_difference_count=0` 后才同步 Video/Annotation identity revision；draft 栈非空、并发写、
+shadow 差异或任何异常都会整体 rollback。成功后再启动当前代码；当前代码不再写旧身份/抑制表。
 
 ### 后台任务去重与重试（0004）
 
@@ -242,16 +275,18 @@ baseline（0001）再升级到 head（0007），**不删除任何已有数据**�
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/corrected-tracks` | 查询修正后 track 摘要、搜索和当前帧可见性 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/check` | 预检 Split/Merge 冲突及影响范围 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits` | 提交 Split/Merge 操作 |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询可审计 track 修正历史 |
-| `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 撤销 track 修正并生成新修订 |
-| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 整轨检测抑制：忽略整个 track；提交时冻结当前未抑制 detection 集合，原始检测保持不可变 |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 仅列当前 active import 中尚未撤销的 suppression；页面刷新后可恢复整轨撤销入口 |
-| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 撤销检测抑制 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询当前 draft 的 LIFO undo 栈（不是永久审计） |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 仅撤销栈顶 Split/Merge；非栈顶或类型不匹配返回 409 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 以 sparse override 整轨抑制当前未抑制 detection；不写旧 suppression 表 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表 |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 仅在该 suppression edit 为栈顶时撤销，否则返回 409 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | 导出 `tracks.corrected.jsonl` 与 manifest |
 
 `metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。`source_relative` 按 basename 与视频文件名匹配。新视频成功导入时同步 FPS、宽、高和 `duration=frame_count/fps`；已有视频替换时校验 source basename、FPS、宽、高和当前导入 `frame_count`。预览及失败均清理候选文件，只有 `confirm=true` 成功才保留。原始 YOLO 文件与 RawDetection 保持不可变。
 
-Split、Merge、对应撤销、整轨 suppression 及其撤销都会重校验视频内全部 Annotation：有效项推进 detection import/track 修正修订，无效项进入 `needs_mouse_ids`。仅实际受影响且原为 `approved` 的单条标注改为 `pending`；视频仅在 `submitted/approved` 时退回 `draft`。整轨 suppression 的 active 列表可跨刷新恢复；旧 import suppression 撤销返回 409。Split/Merge 撤销仍限当前页面会话，统一按时间撤销仍未实现。当前只创建整轨 `corrected_track` scope，历史 `scope=detection` 仅兼容。
+Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。`submitted`（含未来 Submission submitted）锁定编辑并要求先 withdraw；`approved/rejected` 的当前兼容投影在新编辑后回到 draft，但不会修改未来不可变快照。撤销严格限栈顶，cursor 不回退、display ID 不复用。
+
+Detection edit、Annotation create/update/delete、submit 和 detection replacement 统一先执行 Video no-op UPDATE 获取 SQLite 写门禁，再在锁内重读 active import、detection/edit/annotation revision 与 submitted 状态；锁竞争的 busy/locked 统一返回可重试 409。submitted 对 Annotation 与 replacement 同样是硬锁，不再隐式退回 draft。当前 corrected export 只接受 active import 的当前 `edit_version`，历史 import/revision 明确返回 409；JSONL 按 frame/detection/raw ID 稳定排序并以 `yield_per(500)` + `StringIO` 有界读取构造，Phase 4 再改为直接流式写文件。
 
 ### 真实视频上传（批次 2）
 
@@ -277,7 +312,8 @@ Split、Merge、对应撤销、整轨 suppression 及其撤销都会重校验视
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/projects/{project_id}/videos/{video_id}/submit` | 提交视频审核 → `VideoOut` |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/submit` | 冻结 Submission/DetectionSnapshot 后提交 → `VideoOut` |
+| `POST` | `/api/projects/{project_id}/videos/{video_id}/withdraw` | 撤回尚未裁决的 Submission → `VideoOut` |
 | `GET` | `/api/projects/{project_id}/reviews/queue` | 审核队列 → `VideoOut[]`（仅 `submitted`） |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/reviews` | 审核历史 → `ReviewOut[]`（含所有修订） |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/review` | 审核裁决 → `ReviewOut` |
@@ -297,6 +333,24 @@ Split、Merge、对应撤销、整轨 suppression 及其撤销都会重校验视
   追加一条 `Review`（`annotation_revision` = 裁决时视频修订号）并同步：
   `approved` → 视频 `approved/approved_at/approved_by`、标注 `approved/reviewer_id`；
   `rejected` → 视频 `rejected`、清空 approved 字段、标注 `rejected/reviewer_id`。
+
+Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是新提交与裁决的唯一
+
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 代码实现完成，待真实媒体与合并验收。
+权威数据；`Video.workflow_status`、`Annotation.review_status` 仅作 UI 兼容投影。submit 由服务端计算
+受控源媒体 SHA-256；withdraw 允许 owner/admin/annotator 或原 submitter，且仅限无 Review 的 submitted
+attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
+
+Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
+并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
+worker 渲染前仍全量复核。DetectionSnapshot 同时冻结 raw/state/metadata 三个确定性 digest，
+复用和审核均做 count+digest 完整性检查，metadata 文件按导入时 SHA-256 复核。
+
+Submission 媒体统一采用 `submission_media_plan`：Annotation 的 `start_frame/end_frame` 都是
+inclusive，渲染区间为 `[start_frame/fps, (end_frame+1)/fps)`；时间字段允许一帧舍入误差。
+clip 与 thumbnail 使用同一整数 crop。已入队的 approved Submission 即使后来 superseded
+仍可恢复完成，默认片段库只展示 current approved；有 new authority 历史的视频不回退 legacy。
+0009 仅把 Clip legacy authority 列改为 nullable；旧行和旧表均保留。
 
 **标注写入与工作流联动**：标注新增/删除/修改（PATCH 实际字段）在视频处于
 `submitted/approved/rejected` 时，先在同一事务内把视频失效回 `draft`：
@@ -390,11 +444,26 @@ annotator_name, review_status, created_at`。
 - **不批量加载视频流**：本接口只返回元数据与相对路径，客户端自行按需请求单条 blob
   （如经 `GET /api/videos/{video_id}/stream` 或后续的 clip 文件接口）。
 
-### 批次 6：项目分类 ZIP 导出
+### Phase 4：Submission authority 独立四文件项目 ZIP 导出
 
-项目导出只包含「标注 `review_status=approved` 且视频当前 `workflow_status=approved`」的
-当前修订片段。接口均要求项目 `owner/admin`；任务详情沿用通用 job 路由，但 export 类型
-同样执行该角色限制。
+项目 ZIP 只从入队瞬间的 current approved `Submission` 解析并冻结具体 category ID、
+`Submission` ID、`SubmissionAnnotation` ID、DetectionSnapshot 与 source 引用；worker 不重新
+选择 current 状态，也不读取 current Annotation/Category.name、draft override、Video workflow
+projection 或用户身份作为导出内容。已入队后 Submission 若被新批准版本 supersede，冻结内容
+因数据库不可变保护仍允许完成，但不得混入新 approved Submission。
+
+每个 `SubmissionAnnotation` 输出一个独立目录和固定 `clip.mp4`、`annotation.json`、
+`tracks.json`、`metadata.json` 四文件，不再输出集中 annotations/manifest/corrected_tracks。
+最终类别数为 1 时片段目录平铺 ZIP 根；大于 1 时仅增加 category_name 快照目录（忽略 group）。
+轨迹按帧直接流式写文件并保留空帧；坐标转换到 crop 后 clip pixels：检测框与 crop 无交集时
+排除，相交时 clamp；关键点平移并 clamp，crop 外关键点置信度置 0，不改变 display track ID。
+每个 clip 必须通过 ffprobe 的帧数/FPS/尺寸检查及四文件 schema/业务校验。全部 staging 完成且
+ZIP 完整性检查通过后，才在发布前短事务中复核冻结引用与 job claim/payload，并以同文件系统
+`os.replace` 原子发布；任一失败不暴露 partial ZIP。
+
+单视频 `GET .../annotations/export` 仍是 legacy JSON 兼容 API，不是正式项目 ZIP 契约。
+
+接口均要求项目 `owner/admin`；任务详情沿用通用 job 路由，但 export 类型同样执行该角色限制。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -406,11 +475,10 @@ annotator_name, review_status, created_at`。
 **任务与文件语义**：
 - 每次导出新建一条 `BackgroundJob(job_type=export)` 和唯一 dedupe key，保留历史任务、结果与
   过期时间；项目 active 导出通过 queued/running 查询排他。
-- 状态统计以最近任务的类别范围为准；ready 必须同时满足当前修订、`Clip.status=ready`、
+- 状态统计以最近任务冻结的类别范围为准；ready 必须满足 Submission Clip `status=ready`、
   `clip_path` 位于 `DATA_DIR/clips` 内且实体文件存在，否则列入 missing。
-- 项目导出 worker 对 missing Clip 复用注入的 `MediaProcessor` 在后台任务内补生成；Export 页面/API 请求线程本身不直接同步调用 ffmpeg。任一视频片段失败则任务失败，
-  不发布新 ZIP。成功包按 `clips/{group}/{category}/{安全文件名}.mp4` 组织，根目录包含
-  `annotations.json`。
+- 项目导出 worker 对 missing Submission Clip 复用注入的 `MediaProcessor` 在后台任务内补生成；
+  Export 页面/API 请求线程本身不直接同步调用 ffmpeg。任一片段失败则任务失败且不发布 ZIP。
 - ZIP 先在 `DATA_DIR/exports` 生成任务专属临时 archive，再原子替换为
   `export_project_{project_id}_{job_id}.zip`；每次结果文件唯一。下载同时校验成功状态、
   `EXPORT_RETENTION_DAYS`（默认 7 天）、路径边界和实体存在性。
@@ -464,7 +532,9 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 - `ProjectMembership`：`user_id + project_id` 唯一，`role ∈ {owner, admin, annotator, reviewer}`。
 - `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；创建项目时初始化北医 12 类。
 - `DetectionImport` / `RawDetection` / `CorrectedTrack` / `CorrectedDetectionAssignment`：保存不可变导入、逐帧原始检测和当前修正身份视图。
-- `IdentityEdit` / `DetectionSuppression`：记录 Split/Merge、抑制与撤销审计；操作以 identity revision 并发校验。
+- `DetectionStateOverride`：当前 draft 相对 RawDetection baseline 的稀疏 display/suppressed 状态。
+- `DraftIdentityEdit` / `DraftDetectionChange`：当前 draft 的紧凑 LIFO undo 栈与受影响 detection before/after；不是永久审计。
+- 旧 `CorrectedTrack` / CDA / `IdentityEdit` / suppression 表仅保留迁移兼容，当前运行时不再写入。
 - `Video`：项目级元数据（filename/duration/fps/width/height/storage_path/status）。
   - 媒体 `status ∈ {metadata, uploaded, needs_transcode}`：`metadata` 为 P1 Mock 创建；
     批次 2 真实上传按扩展名映射为 `uploaded`（mp4/webm/mov/m4v）或 `needs_transcode`（avi/mkv/wmv/mpeg/mpg）。
@@ -502,7 +572,9 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 
 ## 导出格式
 
-`GET .../annotations/export` 返回完整 ExportEvent 列表，字段符合 `../需求文档.md` §2.3；其中 `clip_file` 在没有 ready Clip 时可为 `null`。项目 ZIP 根目录的 `annotations.json` 使用同一事件字段，但每条行为事件的 `clip_file` 必须是安全非空路径，并与 `clips/<group>/<category>/...` 下一个实际 MP4 一一对应：
+`GET .../annotations/export` 返回下列完整 ExportEvent 列表，是保留的单视频 legacy JSON
+兼容 API；其中 `clip_file` 在没有 ready legacy Clip 时可为 `null`。正式项目 ZIP 不复用该格式，
+其契约为本 README 的 Phase 4 独立四文件结构，且没有集中式 `annotations.json`：
 
 ```json
 {

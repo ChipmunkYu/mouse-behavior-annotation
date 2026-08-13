@@ -80,8 +80,11 @@ def _set_annotation_status(ctx, annotation_id, status) -> None:
         db.commit()
 
 
-def _add_clip(ctx, project_id, annotation_id, status="ready", rev=1) -> None:
+def _add_clip(ctx, project_id, annotation_id, status="ready", rev=None) -> None:
     with ctx.session_factory() as db:
+        annotation = db.get(Annotation, annotation_id)
+        if rev is None:
+            rev = db.get(Video, annotation.video_id).media_revision
         clip = Clip(
             project_id=project_id,
             annotation_id=annotation_id,
@@ -91,6 +94,9 @@ def _add_clip(ctx, project_id, annotation_id, status="ready", rev=1) -> None:
         if status == "ready":
             clip.clip_path = f"clip_{annotation_id}_rev{rev}.mp4"
             clip.thumbnail_path = f"clip_{annotation_id}_rev{rev}.jpg"
+            settings = ctx.client.app.state.settings
+            settings.clips_dir.joinpath(clip.clip_path).write_bytes(b"CLIP")
+            settings.thumbnails_dir.joinpath(clip.thumbnail_path).write_bytes(b"THUMB")
         db.add(clip)
         db.commit()
 
@@ -208,8 +214,10 @@ def test_non_ready_clip_paths_are_null(ctx):
     body = _library(ctx, project["id"], headers).json()
     items = {i["annotation_id"]: i for i in body["items"]}
     assert set(items) == {a_ready["id"], a_pending["id"], a_failed["id"], a_noclip["id"]}
-    assert items[a_ready["id"]]["clip_path"] == f"clip_{a_ready['id']}_rev1.mp4"
-    assert items[a_ready["id"]]["thumbnail_path"] == f"clip_{a_ready['id']}_rev1.jpg"
+    with ctx.session_factory() as db:
+        revision = db.get(Video, video["id"]).media_revision
+    assert items[a_ready["id"]]["clip_path"] == f"clip_{a_ready['id']}_rev{revision}.mp4"
+    assert items[a_ready["id"]]["thumbnail_path"] == f"clip_{a_ready['id']}_rev{revision}.jpg"
     for a in (a_pending, a_failed, a_noclip):
         assert items[a["id"]]["clip_path"] is None
         assert items[a["id"]]["thumbnail_path"] is None
@@ -245,8 +253,10 @@ def test_ready_paths_match_media_generation(media_ctx):
     assert body["total"] == 2
     # items 按 start_time 排序，与 anns 创建顺序一致
     for item, ann in zip(body["items"], anns):
-        assert item["clip_path"] == f"clip_{ann['id']}_rev1.mp4"
-        assert item["thumbnail_path"] == f"clip_{ann['id']}_rev1.jpg"
+        with ctx.session_factory() as db:
+            revision = db.get(Video, video["id"]).media_revision
+        assert item["clip_path"] == f"clip_{ann['id']}_rev{revision}.mp4"
+        assert item["thumbnail_path"] == f"clip_{ann['id']}_rev{revision}.jpg"
 
 
 # ---------- 分页 / 排序 ----------
@@ -566,8 +576,8 @@ def test_clipitem_field_completeness(ctx):
         "start_frame": 25,
         "end_frame": 75,
         "confidence": "certain",
-        "clip_path": f"clip_{ann['id']}_rev1.mp4",
-        "thumbnail_path": f"clip_{ann['id']}_rev1.jpg",
+        "clip_path": item["clip_path"],
+        "thumbnail_path": item["thumbnail_path"],
         "annotator_name": "demo",
         "review_status": "approved",
     }

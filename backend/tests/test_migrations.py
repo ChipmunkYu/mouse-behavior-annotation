@@ -66,6 +66,13 @@ ALL_TABLES = (
         "identity_edits",
         "detection_suppressions",
         "suppression_detections",
+        "detection_state_overrides",
+        "draft_identity_edits",
+        "draft_detection_changes",
+        "detection_snapshots",
+        "detection_snapshot_states",
+        "submissions",
+        "submission_annotations",
     ]
 )
 VIDEO_NEW_COLUMNS = {"workflow_status", "annotation_revision", "submitted_at", "approved_at", "approved_by"}
@@ -188,7 +195,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -211,7 +218,9 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
     clip_columns = {c["name"] for c in insp.get_columns("clips")}
     assert "media_revision" in clip_columns
     detection_import_columns = {c["name"] for c in insp.get_columns("detection_imports")}
-    assert "source_relative" in detection_import_columns
+    assert {"source_relative", "edit_version", "next_display_track_id"} <= detection_import_columns
+    assert "submission_id" in {c["name"] for c in insp.get_columns("reviews")}
+    assert "submission_annotation_id" in {c["name"] for c in insp.get_columns("clips")}
     # 0003：四处 users 外键具备显式 ON DELETE 策略
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
@@ -340,7 +349,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -359,7 +368,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -433,7 +442,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -465,7 +474,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -655,7 +664,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -705,7 +714,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -776,7 +785,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -832,7 +841,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0007" in proc.stdout
+    assert "0011" in proc.stdout
 
 
 
@@ -988,7 +997,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1033,7 +1042,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1043,7 +1052,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1136,7 +1145,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1394,7 +1403,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1436,7 +1445,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1458,8 +1467,767 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0007"
+    assert current_revision(url) == "0011"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
         assert db.query(DetectionImport).one().tracks_path == "imports/tracks.jsonl"
+
+
+def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
+    """0007→0008 only restores recoverable current state, not deleted legacy history."""
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    settings = _settings(tmp_path, "v0007_sparse_backfill.db")
+    url = settings.resolved_database_url
+    upgrade_to(url, "0007")
+    db_mod.configure_engine(url)
+
+    with db_mod.SessionLocal() as db:
+        user_id, _project_id, video_id = _make_full_project_with_video(db)
+
+    now = datetime.utcnow()
+    statements = [
+        (
+            "UPDATE videos SET identity_revision = 5 WHERE id = :video_id",
+            {"video_id": video_id},
+        ),
+        (
+            "INSERT INTO detection_imports "
+            "(id, video_id, revision, schema_version, status, active, created_by, created_at) "
+            "VALUES (101, :video_id, 1, '1.0', 'imported', 1, :user_id, :now)",
+            {"video_id": video_id, "user_id": user_id, "now": now},
+        ),
+        (
+            "INSERT INTO detection_imports "
+            "(id, video_id, revision, schema_version, status, active, created_by, created_at) "
+            "VALUES (102, :video_id, 2, '1.0', 'imported', 0, :user_id, :now)",
+            {"video_id": video_id, "user_id": user_id, "now": now},
+        ),
+        (
+            "INSERT INTO detection_imports "
+            "(id, video_id, revision, schema_version, status, active, created_by, created_at) "
+            "VALUES (103, :video_id, 3, '1.0', 'imported', 0, :user_id, :now)",
+            {"video_id": video_id, "user_id": user_id, "now": now},
+        ),
+    ]
+    for raw_id, import_id, frame_index, track_id in (
+        (1001, 101, 0, 1),       # baseline
+        (1002, 101, 0, 2),       # corrected to display 20
+        (1003, 101, 1, 3),       # currently suppressed
+        (1004, 101, 1, 4),       # reverted suppression: detail row is gone
+        (1005, 102, 0, 10),      # inactive import, never draft-backfilled
+    ):
+        statements.append(
+            (
+                "INSERT INTO raw_detections "
+                "(id, detection_import_id, frame_index, frame_detection_index, raw_track_id) "
+                "VALUES (:id, :import_id, :frame_index, :detection_index, :track_id)",
+                {
+                    "id": raw_id,
+                    "import_id": import_id,
+                    "frame_index": frame_index,
+                    "detection_index": raw_id % 1000,
+                    "track_id": track_id,
+                },
+            )
+        )
+    statements.extend(
+        [
+            (
+                "INSERT INTO corrected_tracks "
+                "(id, detection_import_id, display_track_id, effective_detection_count, "
+                "created_identity_revision, active) VALUES "
+                "(2001, 101, 1, 1, 0, 1), (2002, 101, 20, 1, 5, 1), "
+                "(2003, 101, 3, 1, 0, 1), (2004, 101, 4, 1, 0, 1), "
+                "(2099, 101, 99, 0, 2, 0), (2050, 102, 50, 1, 5, 1)",
+                {},
+            ),
+            (
+                "INSERT INTO corrected_detection_assignments "
+                "(raw_detection_id, corrected_track_id, identity_revision) VALUES "
+                "(1001, 2001, 5), (1002, 2002, 5), (1003, 2003, 5), "
+                "(1004, 2004, 5), (1005, 2050, 5)",
+                {},
+            ),
+            (
+                "INSERT INTO detection_suppressions "
+                "(id, video_id, detection_import_id, base_identity_revision, "
+                "result_identity_revision, scope, created_at, reverted_suppression_id) VALUES "
+                "(3001, :video_id, 101, 5, 5, 'corrected_track', :now, NULL), "
+                "(3002, :video_id, 101, 5, 5, 'corrected_track', :now, NULL), "
+                "(3003, :video_id, 102, 5, 5, 'corrected_track', :now, NULL), "
+                "(3004, :video_id, 101, 5, 5, 'corrected_track', :now, 3002), "
+                "(3005, :video_id, 101, 6, 6, 'corrected_track', :now, NULL), "
+                "(3006, :video_id, 101, 4, 4, 'corrected_track', :now, NULL), "
+                "(3007, :video_id, 101, 5, 5, 'corrected_track', :now, 3006)",
+                {"video_id": video_id, "now": now},
+            ),
+            (
+                "INSERT INTO suppression_detections (suppression_id, raw_detection_id) "
+                "VALUES (3001, 1003), (3002, 1004), (3003, 1005), (3005, 1001)",
+                {},
+            ),
+        ]
+    )
+    with db_mod.engine.begin() as conn:
+        for sql, params in statements:
+            conn.execute(text(sql), params)
+
+    run_migrations(url)
+    assert current_revision(url) == "0011"
+    with db_mod.engine.connect() as conn:
+        imports = conn.execute(
+            text(
+                "SELECT id, edit_version, next_display_track_id FROM detection_imports "
+                "WHERE id IN (101, 102, 103) ORDER BY id"
+            )
+        ).all()
+        assert imports == [(101, 1, 100), (102, 0, 51), (103, 0, 0)]
+        overrides = conn.execute(
+            text(
+                "SELECT raw_detection_id, detection_import_id, display_track_id, suppressed, "
+                "updated_edit_version FROM detection_state_overrides ORDER BY raw_detection_id"
+            )
+        ).all()
+        assert overrides == [
+            (1002, 101, 20, 0, 1),
+            (1003, 101, 3, 1, 1),
+        ]
+
+    # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
+    db_mod.ensure_schema(url)
+    assert current_revision(url) == "0011"
+    with db_mod.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
+
+
+def test_0008_composite_fks_partial_uniques_and_compatibility_links(tmp_path):
+    """Target foundation enforces same-import state and nullable legacy bridges."""
+    from datetime import datetime
+
+    settings = _settings(tmp_path, "v0008_constraints.db")
+    url = settings.resolved_database_url
+    run_migrations(url)
+    db_mod.configure_engine(url)
+    now = datetime.utcnow()
+
+    with db_mod.SessionLocal() as db:
+        user_id, project_id, video_id = _make_full_project_with_video(db)
+        category = BehaviorCategory(
+            project_id=project_id,
+            name="攻击行为",
+            group="社交行为",
+            mouse_count_min=2,
+            mouse_count_max=2,
+        )
+        db.add(category)
+        db.flush()
+        annotation = Annotation(
+            video_id=video_id,
+            annotator_id=user_id,
+            category_id=category.id,
+            start_time=0.0,
+            end_time=1.0,
+            start_frame=0,
+            end_frame=25,
+            confidence="certain",
+        )
+        imp1 = DetectionImport(
+            video_id=video_id, revision=1, schema_version="1.0", active=True
+        )
+        imp2 = DetectionImport(
+            video_id=video_id, revision=2, schema_version="1.0", active=False
+        )
+        db.add_all([annotation, imp1, imp2])
+        db.flush()
+        raw1 = RawDetection(
+            detection_import_id=imp1.id,
+            frame_index=0,
+            frame_detection_index=0,
+            raw_track_id=1,
+        )
+        raw2 = RawDetection(
+            detection_import_id=imp2.id,
+            frame_index=0,
+            frame_detection_index=0,
+            raw_track_id=2,
+        )
+        db.add_all([raw1, raw2])
+        db.commit()
+
+        # Valid sparse override and cross-import composite FK rejection.
+        db.add(
+            models.DetectionStateOverride(
+                raw_detection_id=raw1.id,
+                detection_import_id=imp1.id,
+                display_track_id=10,
+                suppressed=False,
+                updated_edit_version=1,
+            )
+        )
+        db.commit()
+        db.add(
+            models.DetectionStateOverride(
+                raw_detection_id=raw2.id,
+                detection_import_id=imp1.id,
+                display_track_id=20,
+                suppressed=False,
+                updated_edit_version=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+
+def test_0009_clip_transition_nullable_upgrade_and_downgrade(tmp_path):
+    """0009 permits new Clip authority without rewriting legacy rows."""
+    from app.migration import downgrade_to
+    from sqlalchemy import create_engine, inspect
+
+    url = _settings(tmp_path, "v0009_clip_nullable.db").resolved_database_url
+    upgrade_to(url, "0009")
+    engine = create_engine(url)
+    columns = {item["name"]: item for item in inspect(engine).get_columns("clips")}
+    assert all(columns[name]["nullable"] for name in ("project_id", "annotation_id", "source_revision"))
+    engine.dispose()
+    downgrade_to(url, "0008")
+    engine = create_engine(url)
+    columns = {item["name"]: item for item in inspect(engine).get_columns("clips")}
+    assert all(not columns[name]["nullable"] for name in ("project_id", "annotation_id", "source_revision"))
+    engine.dispose()
+
+
+def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_path):
+    """0010 fresh/head exposes digests; 0009 data is canonically backfilled and survives downgrade/re-upgrade."""
+    from datetime import datetime
+    from app.migration import downgrade_to
+    from app.submission_service import validate_snapshot_integrity
+    from sqlalchemy import create_engine, inspect, text
+
+    fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
+    run_migrations(fresh_url)
+    fresh_engine = create_engine(fresh_url)
+    assert current_revision(fresh_url) == "0011"
+    assert {"raw_digest", "state_digest", "metadata_digest"} <= {
+        column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
+    }
+    fresh_engine.dispose()
+
+    url = _settings(tmp_path, "v0009_digest_backfill.db").resolved_database_url
+    upgrade_to(url, "0009")
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        user_id, _project_id, video_id = _make_full_project_with_video(db)
+    with db_mod.engine.begin() as conn:
+        now = datetime.utcnow()
+        conn.execute(text(
+            "INSERT INTO detection_imports (id, video_id, revision, schema_version, status, active, "
+            "created_by, created_at, edit_version) VALUES "
+            "(91, :video, 1, '1.0', 'imported', 1, :user, :now, 2)"
+        ), {"video": video_id, "user": user_id, "now": now})
+        conn.execute(text(
+            "INSERT INTO raw_detections (id, detection_import_id, frame_index, "
+            "frame_detection_index, raw_track_id, box, keypoints, detection_confidence, class_id) "
+            "VALUES (92, 91, 3, 0, 7, 'null', '[1.0,true,null]', 0.5, 0)"
+        ))
+        conn.execute(text(
+            "INSERT INTO detection_snapshots (id, detection_import_id, source_edit_version, "
+            "raw_detection_count, override_count, schema_version, fps, width, height, frame_count, "
+            "keypoint_names, skeleton_edges, created_at) VALUES "
+            "(93, 91, 2, 1, 1, 1, 25.0, 640, 480, 100, '[\"nose\"]', '[]', :now)"
+        ), {"now": now})
+        conn.execute(text(
+            "INSERT INTO detection_snapshot_states (snapshot_id, raw_detection_id, "
+            "detection_import_id, display_track_id, suppressed) VALUES (93, 92, 91, 9, 1)"
+        ))
+
+    run_migrations(url)
+    assert current_revision(url) == "0011"
+    with db_mod.SessionLocal() as db:
+        snapshot = db.get(models.DetectionSnapshot, 93)
+        assert all(len(getattr(snapshot, name)) == 64 for name in
+                   ("raw_digest", "state_digest", "metadata_digest"))
+        assert validate_snapshot_integrity(db, snapshot).id == 91
+
+    downgrade_to(url, "0009")
+    assert current_revision(url) == "0009"
+    assert not ({"raw_digest", "state_digest", "metadata_digest"} & {
+        column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
+    })
+    run_migrations(url)
+    assert current_revision(url) == "0011"
+    with db_mod.SessionLocal() as db:
+        assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
+
+
+@pytest.mark.parametrize("damage", ["count", "missing_raw", "cross_import", "header",
+                                    "name_type", "edge_shape", "edge_range", "edge_bool",
+                                    "edge_self", "edge_duplicate"])
+def test_0010_damaged_0009_preflight_is_atomic(tmp_path, damage):
+    """Damaged 0009 authority aborts before digest DDL and leaves revision 0009."""
+    from datetime import datetime
+    import sqlite3
+    from sqlalchemy import create_engine, inspect, text
+
+    url = _settings(tmp_path, f"damaged_{damage}.db").resolved_database_url
+    upgrade_to(url, "0009")
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        user_id, _project_id, video_id = _make_full_project_with_video(db)
+    with db_mod.engine.begin() as conn:
+        now = datetime.utcnow()
+        conn.execute(text(
+            "INSERT INTO detection_imports (id, video_id, revision, schema_version, status, active, "
+            "created_by, created_at, edit_version) VALUES (91, :v, 1, '1.0', 'imported', 1, :u, :n, 0), "
+            "(94, :v, 2, '1.0', 'imported', 0, :u, :n, 0)"
+        ), {"v": video_id, "u": user_id, "n": now})
+        conn.execute(text(
+            "INSERT INTO raw_detections (id,detection_import_id,frame_index,frame_detection_index,raw_track_id) "
+            "VALUES (92,91,0,0,1),(95,94,0,0,2)"))
+        conn.execute(text(
+            "INSERT INTO detection_snapshots (id,detection_import_id,source_edit_version,raw_detection_count,"
+            "override_count,schema_version,fps,width,height,frame_count,keypoint_names,skeleton_edges,created_at) "
+            "VALUES (93,91,0,1,1,1,25,640,480,10,'[\"nose\"]','[]',:n)"), {"n": now})
+        conn.execute(text(
+            "INSERT INTO detection_snapshot_states (snapshot_id,raw_detection_id,detection_import_id,"
+            "display_track_id,suppressed) VALUES (93,92,91,1,0)"))
+
+    # Deliberately construct legacy corruption without letting FK enforcement mask migration preflight.
+    database_path = Path(url.removeprefix("sqlite:///"))
+    raw = sqlite3.connect(database_path)
+    raw.execute("PRAGMA foreign_keys=OFF")
+    if damage == "count":
+        raw.execute("UPDATE detection_snapshots SET raw_detection_count=2 WHERE id=93")
+    elif damage == "missing_raw":
+        raw.execute("DELETE FROM raw_detections WHERE id=92")
+    elif damage == "cross_import":
+        raw.execute("UPDATE detection_snapshot_states SET detection_import_id=94 WHERE snapshot_id=93")
+    else:
+        raw.execute("UPDATE detection_snapshots SET keypoint_names='{}' WHERE id=93")
+    metadata_damage = {
+        "name_type": ("[\"nose\",1]", "[]"),
+        "edge_shape": ("[\"nose\",\"tail\"]", "[[0]]"),
+        "edge_range": ("[\"nose\",\"tail\"]", "[[0,2]]"),
+        "edge_bool": ("[\"nose\",\"tail\"]", "[[true,1]]"),
+        "edge_self": ("[\"nose\",\"tail\"]", "[[0,0]]"),
+        "edge_duplicate": ("[\"nose\",\"tail\"]", "[[0,1],[1,0]]"),
+    }
+    if damage in metadata_damage:
+        names, edges = metadata_damage[damage]
+        raw.execute("UPDATE detection_snapshots SET keypoint_names=?, skeleton_edges=? WHERE id=93",
+                    (names, edges))
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError, match="0010 integrity preflight"):
+        run_migrations(url)
+    assert current_revision(url) == "0009"
+    engine = create_engine(url)
+    assert not ({"raw_digest", "state_digest", "metadata_digest"} & {
+        column["name"] for column in inspect(engine).get_columns("detection_snapshots")
+    })
+    engine.dispose()
+
+
+def test_0011_raw_insert_trigger_round_trip(tmp_path):
+    from app.migration import downgrade_to
+    from sqlalchemy import create_engine, text
+    url = _settings(tmp_path, "v0011_trigger.db").resolved_database_url
+    run_migrations(url)
+    engine = create_engine(url)
+    def trigger_exists():
+        with engine.connect() as conn:
+            return conn.execute(text(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='trg_raw_insert'"
+            )).scalar_one() == 1
+    assert trigger_exists()
+    downgrade_to(url, "0010")
+    assert not trigger_exists()
+    run_migrations(url)
+    assert trigger_exists()
+    engine.dispose()
+
+
+def test_0008_key_delete_policies(tmp_path):
+    """Phase 1 target links exercise SET NULL, CASCADE, and snapshot RESTRICT."""
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    settings = _settings(tmp_path, "v0008_deletes.db")
+    url = settings.resolved_database_url
+    run_migrations(url)
+    db_mod.configure_engine(url)
+
+    with db_mod.SessionLocal() as db:
+        owner_id, project_id, video_id = _make_full_project_with_video(db)
+        operator = User(username="phase1_operator", password_hash=hash_password("pw"))
+        category = BehaviorCategory(project_id=project_id, name="行走", group="个体行为")
+        imp = DetectionImport(video_id=video_id, revision=1, schema_version="1.0", active=True)
+        db.add_all([operator, category, imp])
+        db.flush()
+        raw = RawDetection(
+            detection_import_id=imp.id,
+            frame_index=0,
+            frame_detection_index=0,
+            raw_track_id=1,
+        )
+        source_annotation = Annotation(
+            video_id=video_id,
+            annotator_id=owner_id,
+            category_id=category.id,
+            start_time=0.0,
+            end_time=1.0,
+            start_frame=0,
+            end_frame=25,
+            confidence="certain",
+        )
+        db.add_all([raw, source_annotation])
+        db.flush()
+        edit = models.DraftIdentityEdit(
+            detection_import_id=imp.id,
+            applied_edit_version=1,
+            operation="suppress_track",
+            params={"track_id": 1},
+            operator_id=operator.id,
+        )
+        snapshot = models.DetectionSnapshot(
+            detection_import_id=imp.id,
+            source_edit_version=0,
+            raw_detection_count=1,
+            override_count=0,
+            schema_version=1,
+            fps=25.0,
+            width=640,
+            height=480,
+            frame_count=25,
+            keypoint_names=[],
+            skeleton_edges=[],
+        )
+        db.add_all([edit, snapshot])
+        db.flush()
+        db.add(
+            models.DraftDetectionChange(
+                edit_id=edit.id,
+                raw_detection_id=raw.id,
+                detection_import_id=imp.id,
+                before_override_exists=False,
+                before_display_track_id=None,
+                before_suppressed=None,
+                after_override_exists=True,
+                after_display_track_id=1,
+                after_suppressed=True,
+            )
+        )
+        submission = models.Submission(
+            video_id=video_id,
+            detection_snapshot_id=snapshot.id,
+            attempt_no=1,
+            source_annotation_version=1,
+            source_media_revision=1,
+            source_video_filename="v0005.mp4",
+            source_storage_key="videos/v0005.mp4",
+            source_video_sha256="b" * 64,
+            status="withdrawn",
+            submitted_by=operator.id,
+            submitted_at=datetime.utcnow(),
+        )
+        db.add(submission)
+        db.flush()
+        submitted_annotation = models.SubmissionAnnotation(
+            submission_id=submission.id,
+            source_annotation_id=source_annotation.id,
+            category_id=category.id,
+            category_name="行走",
+            start_time=0.0,
+            end_time=1.0,
+            start_frame=0,
+            end_frame=25,
+            confidence="certain",
+            crop_region=None,
+            mouse_ids=[1],
+        )
+        db.add(submitted_annotation)
+        db.flush()
+        db.add(
+            Clip(
+                project_id=project_id,
+                annotation_id=source_annotation.id,
+                source_revision=1,
+                submission_annotation_id=submitted_annotation.id,
+            )
+        )
+        db.commit()
+        operator_id = operator.id
+        edit_id = edit.id
+        submission_id = submission.id
+        submitted_annotation_id = submitted_annotation.id
+        raw_id = raw.id
+
+        db.execute(text("DELETE FROM users WHERE id = :id"), {"id": operator_id})
+        db.commit()
+        assert db.get(models.DraftIdentityEdit, edit_id).operator_id is None
+        assert db.get(models.Submission, submission_id).submitted_by is None
+
+        db.execute(text("DELETE FROM draft_identity_edits WHERE id = :id"), {"id": edit_id})
+        db.commit()
+        assert db.query(models.DraftDetectionChange).count() == 0
+
+        # Referenced immutable copies prevent deleting their Submission authority.
+        with pytest.raises(IntegrityError):
+            db.execute(text("DELETE FROM submissions WHERE id = :id"), {"id": submission_id})
+        db.rollback()
+        assert db.get(models.SubmissionAnnotation, submitted_annotation_id) is not None
+        assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).count() == 1
+
+        # No snapshot state references raw yet, but snapshot still RESTRICTs its import.
+        with pytest.raises(IntegrityError):
+            db.execute(text("DELETE FROM raw_detections WHERE id = :id"), {"id": raw_id})
+        db.rollback()
+        db.delete(imp)
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+
+def test_0008_draft_submission_review_clip_constraints(tmp_path):
+    """Composite draft FKs, partial uniques, and nullable Review/Clip links."""
+    from datetime import datetime
+
+    settings = _settings(tmp_path, "v0008_authority_constraints.db")
+    url = settings.resolved_database_url
+    run_migrations(url)
+    db_mod.configure_engine(url)
+    now = datetime.utcnow()
+
+    with db_mod.SessionLocal() as db:
+        user_id, project_id, video_id = _make_full_project_with_video(db)
+        category = BehaviorCategory(
+            project_id=project_id,
+            name="攻击行为",
+            group="社交行为",
+            mouse_count_min=2,
+            mouse_count_max=2,
+        )
+        annotation = Annotation(
+            video_id=video_id,
+            annotator_id=user_id,
+            category=category,
+            start_time=0.0,
+            end_time=1.0,
+            start_frame=0,
+            end_frame=25,
+            confidence="certain",
+        )
+        imp1 = DetectionImport(
+            video_id=video_id, revision=1, schema_version="1.0", active=True
+        )
+        imp2 = DetectionImport(
+            video_id=video_id, revision=2, schema_version="1.0", active=False
+        )
+        db.add_all([annotation, imp1, imp2])
+        db.flush()
+        raw1 = RawDetection(
+            detection_import_id=imp1.id,
+            frame_index=0,
+            frame_detection_index=0,
+            raw_track_id=1,
+        )
+        raw2 = RawDetection(
+            detection_import_id=imp2.id,
+            frame_index=0,
+            frame_detection_index=0,
+            raw_track_id=2,
+        )
+        db.add_all([raw1, raw2])
+        db.commit()
+
+        edit = models.DraftIdentityEdit(
+            detection_import_id=imp1.id,
+            applied_edit_version=1,
+            operation="split",
+            params={"track_id": 1, "split_frame": 1},
+            operator_id=user_id,
+        )
+        db.add(edit)
+        db.flush()
+        db.add(
+            models.DraftDetectionChange(
+                edit_id=edit.id,
+                raw_detection_id=raw2.id,
+                detection_import_id=imp1.id,
+                before_override_exists=False,
+                before_display_track_id=None,
+                before_suppressed=None,
+                after_override_exists=True,
+                after_display_track_id=10,
+                after_suppressed=False,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        snapshot = models.DetectionSnapshot(
+            detection_import_id=imp1.id,
+            source_edit_version=1,
+            raw_detection_count=1,
+            override_count=1,
+            schema_version=1,
+            fps=25.0,
+            width=1280,
+            height=720,
+            frame_count=100,
+            keypoint_names=["nose"],
+            skeleton_edges=[],
+        )
+        db.add(snapshot)
+        db.commit()
+
+        def make_submission(attempt: int, status: str) -> models.Submission:
+            return models.Submission(
+                video_id=video_id,
+                detection_snapshot_id=snapshot.id,
+                attempt_no=attempt,
+                source_annotation_version=1,
+                source_media_revision=1,
+                source_video_filename="v0005.mp4",
+                source_storage_key="videos/v0005.mp4",
+                source_video_sha256="a" * 64,
+                status=status,
+                submitted_by=user_id,
+                submitted_at=now,
+            )
+
+        submitted = make_submission(1, "submitted")
+        approved = make_submission(2, "approved")
+        db.add_all([submitted, approved])
+        db.commit()
+        db.add(make_submission(3, "submitted"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+        db.add(make_submission(3, "approved"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        submitted_annotation = models.SubmissionAnnotation(
+            submission_id=submitted.id,
+            source_annotation_id=annotation.id,
+            category_id=category.id,
+            category_name="攻击行为",
+            start_time=0.0,
+            end_time=1.0,
+            start_frame=0,
+            end_frame=25,
+            confidence="certain",
+            crop_region=None,
+            mouse_ids=[1, 2],
+        )
+        db.add(submitted_annotation)
+        db.commit()
+        db.add(
+            models.SubmissionAnnotation(
+                submission_id=submitted.id,
+                source_annotation_id=annotation.id,
+                category_id=category.id,
+                category_name="攻击行为",
+                start_time=1.0,
+                end_time=2.0,
+                start_frame=25,
+                end_frame=50,
+                confidence="certain",
+                crop_region=None,
+                mouse_ids=[1, 2],
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        # Multiple legacy NULL links remain valid.
+        db.add_all(
+            [
+                Review(
+                    project_id=project_id,
+                    video_id=video_id,
+                    reviewer_id=user_id,
+                    result="approved",
+                    annotation_revision=1,
+                    submission_id=None,
+                ),
+                Review(
+                    project_id=project_id,
+                    video_id=video_id,
+                    reviewer_id=user_id,
+                    result="rejected",
+                    annotation_revision=2,
+                    submission_id=None,
+                ),
+                Clip(
+                    project_id=project_id,
+                    annotation_id=annotation.id,
+                    source_revision=1,
+                    submission_annotation_id=None,
+                ),
+                Clip(
+                    project_id=project_id,
+                    annotation_id=annotation.id,
+                    source_revision=2,
+                    submission_annotation_id=None,
+                ),
+            ]
+        )
+        db.commit()
+
+        linked_review = Review(
+            project_id=project_id,
+            video_id=video_id,
+            reviewer_id=user_id,
+            result="approved",
+            annotation_revision=3,
+            submission_id=submitted.id,
+        )
+        linked_clip = Clip(
+            project_id=project_id,
+            annotation_id=annotation.id,
+            source_revision=3,
+            submission_annotation_id=submitted_annotation.id,
+        )
+        db.add_all([linked_review, linked_clip])
+        db.commit()
+        db.add(
+            Review(
+                project_id=project_id,
+                video_id=video_id,
+                reviewer_id=user_id,
+                result="rejected",
+                annotation_revision=4,
+                submission_id=submitted.id,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+        db.add(
+            Clip(
+                project_id=project_id,
+                annotation_id=annotation.id,
+                source_revision=4,
+                submission_annotation_id=submitted_annotation.id,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        # Approved snapshot makes its DetectionImport deletion RESTRICTed.
+        db.delete(imp1)
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()

@@ -49,6 +49,9 @@ def ensure_schema(database_url: str) -> None:
     """
     if database_url == "sqlite:///:memory:":
         Base.metadata.create_all(bind=engine)
+        from .authority_triggers import install_sqlite_authority_triggers
+        with engine.begin() as connection:
+            install_sqlite_authority_triggers(connection)
         return
     from .migration import run_migrations
 
@@ -62,5 +65,8 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except BaseException:
+        db.rollback()
+        raise
     finally:
         db.close()
