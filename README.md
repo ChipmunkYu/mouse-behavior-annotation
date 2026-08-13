@@ -128,7 +128,7 @@ cd /d D:\lab\行为识别\标注网站\backend
 
 ## 当前能力与边界
 
-**已实现**：登录与项目角色、12 类初始化、行为标注、审核、视频片段与缩略图、片段库、分类 ZIP 和生命周期清理；原始视频/`tracks.jsonl`/`metadata.json` 三文件导入批次与替换、框/track ID/关键点/骨架叠加、参与对象 `mouse_ids`、Split、Merge、检测抑制与撤销、三类修订审核、修正后 track 结果 `tracks.corrected.jsonl`，以及 `clip_file` 集中 ZIP 索引均已实现。单视频事件 API 返回完整事件字段（`clip_file` 可为 `null`），ZIP 中 `clip_file` 必须是安全非空路径；修正后 track 结果保留全部帧，空帧写为 `detection_count=0`、`detections=[]`，可重新导入。原始检测始终不可变。
+**已实现**：登录与项目角色、行为标注、审核、片段库、检测导入与 track 修正、三类修订审核及项目 ZIP。正式项目 ZIP 中每个行为片段是仅含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的独立目录，不含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。单视频 `/annotations/export` 继续提供 legacy 兼容 JSON。原始检测始终不可变。
 
 **本地 / 生产边界**：当前仍是未部署、未合并分支，不声称完成真实 ffmpeg 编码、真实长视频浏览器流程或生产部署验收。正式输入应使用原始 `社交-攻击1.mov`；已上传的 `社交-攻击1_all_ids.mp4` 是烧录调试视频。生产使用前还须完成完整人工流程并配置强密钥、账号、CORS、持久化 `DATA_DIR`、数据库备份和 ffmpeg/ffprobe。
 
