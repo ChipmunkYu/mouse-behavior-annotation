@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=jinghan
 Group=jinghan
+UMask=0027
 WorkingDirectory=/opt/mouse-annotation/current/backend
 EnvironmentFile=/home/jinghan/.config/mouse-annotation/backend.env
 ExecStart=/opt/mouse-annotation/current/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
