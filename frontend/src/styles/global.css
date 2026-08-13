@@ -697,6 +697,72 @@ a:focus-visible,
   gap: 6px;
 }
 
+.annotate-video-nav {
+  display: inline-flex;
+  align-items: stretch;
+  flex: none;
+  border-radius: var(--radius);
+}
+
+.annotate-video-nav .btn {
+  position: relative;
+  min-height: 32px;
+  padding-inline: 9px;
+  gap: 6px;
+  color: var(--text-2);
+}
+
+.annotate-video-nav .btn:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.annotate-video-nav .btn:last-child {
+  margin-left: -1px;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.annotate-video-nav .btn:hover:not(:disabled),
+.annotate-video-nav .btn:focus-visible {
+  z-index: 1;
+  color: var(--text);
+}
+
+.annotate-video-nav .btn:disabled {
+  color: var(--text-3);
+  background: var(--bg-inset);
+  opacity: 0.68;
+}
+
+.annotate-video-nav-arrow {
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.annotate-video-nav .btn:disabled .annotate-video-nav-arrow {
+  color: currentColor;
+}
+
+.annotate-video-nav-key {
+  min-width: 28px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-inset);
+  box-shadow: 0 1px 0 var(--border-strong);
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.annotate-video-nav .btn:disabled .annotate-video-nav-key {
+  box-shadow: none;
+}
+
 .annotate-header h1 .crumb-link {
   color: var(--text-2);
 }
@@ -1243,6 +1309,26 @@ a:focus-visible,
 
 /* ============ 窄屏堆叠 ============ */
 @media (max-width: 960px) {
+  .annotate-page > .annotate-header h1 {
+    flex-basis: calc(100% - 96px);
+  }
+
+  .annotate-page > .annotate-header .annotate-video-nav {
+    margin-left: 0;
+  }
+
+  .annotate-page > .annotate-header .actions {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .annotate-page > .annotate-header .workflow-chip {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
   .annotate-body {
     grid-template-columns: 1fr;
   }
@@ -1306,6 +1392,24 @@ a:focus-visible,
 
   .player-controls .btn {
     flex: 1;
+  }
+
+  .annotate-page > .annotate-header .annotate-video-nav {
+    width: 100%;
+  }
+
+  .annotate-video-nav .btn {
+    flex: 1 1 50%;
+    min-width: 0;
+  }
+
+  .annotate-video-nav-key {
+    display: none;
+  }
+
+  .annotate-page > .annotate-header .actions .btn,
+  .annotate-page > .annotate-header .actions .submit-pill {
+    flex: 1 1 auto;
   }
 }
 

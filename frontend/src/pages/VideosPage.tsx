@@ -16,6 +16,7 @@ import {
 import { MediaStatusSummary } from "../components/MediaStatusPanel";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { formatDate, formatDuration } from "../utils/format";
+import { sortVideosForNavigation } from "../utils/videoNavigation";
 
 /** 可访问审核工作台的项目角色（仅主/次导航对 owner/admin/reviewer 显示）。 */
 const REVIEW_ROLES = ["owner", "admin", "reviewer"];
@@ -90,7 +91,7 @@ export default function VideosPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (videos ?? []).filter((v) => {
+    return sortVideosForNavigation(videos ?? []).filter((v) => {
       if (workflowStatusFilter && v.workflow_status !== workflowStatusFilter) return false;
       if (q && !v.filename.toLowerCase().includes(q)) return false;
       return true;
