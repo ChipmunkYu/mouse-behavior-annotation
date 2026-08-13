@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   createAnnotation,
   deleteAnnotation,
@@ -38,6 +38,7 @@ import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
 import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/format";
+import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
@@ -553,6 +554,8 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
         <kbd>Space</kbd><span>播放 / 暂停；参与对象导航时切换选择</span>
         <kbd>← / →</kbd><span>前后 1 帧</span>
         <kbd>Shift+← / Shift+→</kbd><span>前后 10 帧</span>
+        <kbd>《</kbd><span>上一个视频（物理键 Shift+Comma）</span>
+        <kbd>》</kbd><span>下一个视频（物理键 Shift+Period）</span>
         <kbd>?</kbd><span>打开 / 关闭本帮助</span>
         <kbd>Esc</kbd><span>关闭帮助、取消编辑或退出参与对象导航</span>
         {mode === "behavior" ? <>
@@ -575,17 +578,23 @@ export default function AnnotatePage() {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
   const pid = Number(projectId);
   const vid = Number(videoId);
+  const navigate = useNavigate();
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const loadAllRequestRef = useRef(0);
+  const routeKeyRef = useRef(`${pid}:${vid}`);
+  routeKeyRef.current = `${pid}:${vid}`;
 
   const [project, setProject] = useState<Project | null>(null);
   const [video, setVideo] = useState<Video | null>(null);
+  const [projectVideos, setProjectVideos] = useState<Video[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [streamState, setStreamState] = useState<StreamState>("loading");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [streamErrorHint, setStreamErrorHint] = useState<string | null>(null);
   const [elementDuration, setElementDuration] = useState(0);
 
   const [currentTime, setCurrentTime] = useState(0);
@@ -614,6 +623,9 @@ export default function AnnotatePage() {
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
+  const [annotationMutationBusy, setAnnotationMutationBusy] = useState(false);
+  const [navigationPending, setNavigationPending] = useState(false);
+  const navigationPendingRef = useRef(false);
   const [confirmDialog, confirm] = useConfirm();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -635,6 +647,57 @@ export default function AnnotatePage() {
   const hasSeekTarget = seekParamRaw != null && Number.isFinite(seekParam);
   const pendingSeekRef = useRef<number | null>(null);
 
+  // 同一组件承载相邻视频路由；路由变化时先彻底移除旧视频的交互与临时状态。
+  useLayoutEffect(() => {
+    loadAllRequestRef.current += 1;
+    navigationPendingRef.current = false;
+    const element = videoRef.current;
+    if (element) {
+      element.pause();
+      element.currentTime = 0;
+    }
+    pendingSeekRef.current = null;
+    setProject(null);
+    setVideo(null);
+    setProjectVideos([]);
+    setCategories([]);
+    setAnnotations([]);
+    setLoading(true);
+    setStreamState("loading");
+    setStreamUrl(null);
+    setStreamErrorHint(null);
+    setElementDuration(0);
+    setCurrentTime(0);
+    setPlaying(false);
+    setActiveCategory(null);
+    setStartPoint(null);
+    setSaveState("idle");
+    setWorkspaceMode("behavior");
+    setSelectedMouseIds([]);
+    setTracks([]);
+    setCurrentFrame(0);
+    setDetectionImport(null);
+    setIdentityRevision(0);
+    setIdentitySearch("");
+    setShowAllTracks(false);
+    setIdentityBusy(false);
+    setOverlayRefresh(0);
+    setLastSuppressionId(null);
+    setActiveSuppressions([]);
+    setLastIdentityEditId(null);
+    setUndoHistory([]);
+    setParticipantNavigationActive(false);
+    setParticipantFocusIndex(0);
+    setSelectedAnnotationId(null);
+    setEditingAnnotationId(null);
+    setShortcutHelpOpen(false);
+    setSubmitting(false);
+    setAnnotationMutationBusy(false);
+    setNavigationPending(false);
+    setErrorMsg(null);
+    setHint("播放视频，选择类别后按 S 设起点、D 设终点；Space 播放/暂停，←/→ 步进一帧");
+  }, [pid, vid]);
+
   // 供键盘监听读取最新值（避免闭包过期）
   const latest = useRef({ startPoint, activeCategory, video });
   latest.current = { startPoint, activeCategory, video };
@@ -650,6 +713,16 @@ export default function AnnotatePage() {
     () => new Map(categoryShortcuts.map(({ key, category }) => [category.id, key] as const)),
     [categoryShortcuts]
   );
+  const sortedProjectVideos = useMemo(() => sortVideosForNavigation(projectVideos), [projectVideos]);
+  const { previous: previousVideo, next: nextVideo } = useMemo(
+    () => getAdjacentVideos(sortedProjectVideos, vid),
+    [sortedProjectVideos, vid]
+  );
+  const currentVideoInList = useMemo(
+    () => sortedProjectVideos.some((item) => item.id === vid),
+    [sortedProjectVideos, vid]
+  );
+  const navigationBusy = saveState === "saving" || annotationMutationBusy || submitting || identityBusy || navigationPending;
 
   useEffect(() => {
     if (import.meta.env.DEV && displayCategories.length > 0) {
@@ -728,10 +801,12 @@ export default function AnnotatePage() {
 
   /* ---------- 数据加载 ---------- */
   const loadAnnotations = useCallback(async () => {
+    const routeKey = `${pid}:${vid}`;
     try {
-      setAnnotations(await listAnnotations(pid, vid));
+      const loadedAnnotations = await listAnnotations(pid, vid);
+      if (routeKeyRef.current === routeKey) setAnnotations(loadedAnnotations);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "加载标注失败");
+      if (routeKeyRef.current === routeKey) setErrorMsg(err instanceof Error ? err.message : "加载标注失败");
     }
   }, [pid, vid]);
 
@@ -745,16 +820,20 @@ export default function AnnotatePage() {
   }, [annotations, editingAnnotationId, selectedAnnotationId]);
 
   const syncSuppressions = useCallback(async () => {
+    const routeKey = `${pid}:${vid}`;
     try {
       const suppressions = await listDetectionSuppressions(pid, vid);
+      if (routeKeyRef.current !== routeKey) return;
       setActiveSuppressions(suppressions);
       setLastSuppressionId(suppressions[0]?.id ?? null);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? `操作已完成，但忽略记录同步失败：${err.message}` : "操作已完成，但忽略记录同步失败");
+      if (routeKeyRef.current === routeKey) setErrorMsg(err instanceof Error ? `操作已完成，但忽略记录同步失败：${err.message}` : "操作已完成，但忽略记录同步失败");
     }
   }, [pid, vid]);
 
   const loadAll = useCallback(async () => {
+    const requestId = ++loadAllRequestRef.current;
+    const routeKey = `${pid}:${vid}`;
     setLoading(true);
     try {
       const [projs, vids, cats, anns, suppressions] = await Promise.all([
@@ -764,9 +843,11 @@ export default function AnnotatePage() {
         listAnnotations(pid, vid),
         listDetectionSuppressions(pid, vid),
       ]);
+      if (loadAllRequestRef.current !== requestId || routeKeyRef.current !== routeKey) return;
       const loadedVideo = vids.find((v) => v.id === vid) ?? null;
       setProject(projs.find((p) => p.id === pid) ?? null);
       setVideo(loadedVideo);
+      setProjectVideos(vids);
       setIdentityRevision(loadedVideo?.identity_revision ?? 0);
       setCategories(cats);
       setAnnotations(anns);
@@ -779,9 +860,11 @@ export default function AnnotatePage() {
       setParticipantNavigationActive(false);
       setErrorMsg(null);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "加载数据失败");
+      if (loadAllRequestRef.current === requestId && routeKeyRef.current === routeKey) {
+        setErrorMsg(err instanceof Error ? err.message : "加载数据失败");
+      }
     } finally {
-      setLoading(false);
+      if (loadAllRequestRef.current === requestId && routeKeyRef.current === routeKey) setLoading(false);
     }
   }, [pid, vid]);
 
@@ -791,8 +874,11 @@ export default function AnnotatePage() {
 
   /* ---------- 视频元数据刷新（标注变更后工作流状态可能回到 draft） ---------- */
   const refreshVideo = useCallback(async () => {
+    const routeKey = `${pid}:${vid}`;
     try {
       const vids = await listVideos(pid);
+      if (routeKeyRef.current !== routeKey) return;
+      setProjectVideos(vids);
       const v = vids.find((item) => item.id === vid) ?? null;
       if (v) {
         setVideo(v);
@@ -870,6 +956,7 @@ export default function AnnotatePage() {
     let cancelled = false;
     setStreamState("loading");
     setStreamUrl(null);
+    setStreamErrorHint(null);
     setElementDuration(0);
 
     fetchVideoStreamUrl(vid)
@@ -888,7 +975,9 @@ export default function AnnotatePage() {
           setStreamState("empty");
         } else {
           setStreamState("error");
-          setErrorMsg(err instanceof Error ? err.message : "视频流加载失败");
+          const message = err instanceof Error ? err.message : "视频流加载失败";
+          setStreamErrorHint(message);
+          setErrorMsg(message);
         }
       });
 
@@ -979,6 +1068,7 @@ export default function AnnotatePage() {
       return;
     }
     setSaveState("saving");
+    setAnnotationMutationBusy(true);
     try {
       await createAnnotation(pid, vid, {
         category_id: cat.id,
@@ -1008,6 +1098,8 @@ export default function AnnotatePage() {
     } catch (err) {
       setSaveState("error");
       setErrorMsg(err instanceof Error ? err.message : "保存行为标注失败");
+    } finally {
+      setAnnotationMutationBusy(false);
     }
   }
 
@@ -1109,6 +1201,8 @@ export default function AnnotatePage() {
   /* ---------- 列表编辑 / 删除 / 导出 ---------- */
   async function handleEditSave(id: number, patch: AnnotationPatchInput) {
     if (!(await guardMutation("编辑行为标注"))) return;
+    setSaveState("saving");
+    setAnnotationMutationBusy(true);
     try {
       await updateAnnotation(pid, vid, id, patch);
       setSaveState("saved");
@@ -1117,8 +1211,11 @@ export default function AnnotatePage() {
       await loadAnnotations();
       if (wasLocked) await refreshVideo();
     } catch (err) {
+      setSaveState("error");
       setErrorMsg(err instanceof Error ? err.message : "保存行为标注失败");
       throw err;
+    } finally {
+      setAnnotationMutationBusy(false);
     }
   }
 
@@ -1140,6 +1237,8 @@ export default function AnnotatePage() {
       danger: true,
     });
     if (!ok) return;
+    setSaveState("saving");
+    setAnnotationMutationBusy(true);
     try {
       await deleteAnnotation(pid, vid, ann.id);
       setSaveState("saved");
@@ -1147,7 +1246,10 @@ export default function AnnotatePage() {
       await loadAnnotations();
       if (locked) await refreshVideo();
     } catch (err) {
+      setSaveState("error");
       setErrorMsg(err instanceof Error ? err.message : "删除行为标注失败");
+    } finally {
+      setAnnotationMutationBusy(false);
     }
   }
 
@@ -1171,6 +1273,50 @@ export default function AnnotatePage() {
     }
   }
 
+  const handleVideoNavigation = useCallback(async (direction: "previous" | "next") => {
+    if (saveState === "saving" || annotationMutationBusy || submitting || identityBusy) {
+      setHint("当前操作尚未完成，请稍后再切换视频");
+      return;
+    }
+    if (navigationPendingRef.current) {
+      setHint("正在确认或切换视频，请稍候");
+      return;
+    }
+    const target = direction === "previous" ? previousVideo : nextVideo;
+    if (!target) {
+      setHint(currentVideoInList
+        ? direction === "previous" ? "已到项目视频列表开头" : "已到项目视频列表末尾"
+        : "当前视频不在项目视频列表中，无法切换");
+      return;
+    }
+    navigationPendingRef.current = true;
+    setNavigationPending(true);
+    let didNavigate = false;
+    try {
+      if (startPoint != null || editingAnnotationId != null) {
+        const ok = await confirm({
+          title: `切换到${direction === "previous" ? "上一个" : "下一个"}视频？`,
+          message: <>
+            {startPoint != null && editingAnnotationId != null
+              ? "当前有未完成的临时标注和正在编辑的行为标注，切换后这些未保存内容可能丢失。"
+              : startPoint != null
+                ? "当前有未完成的临时标注，切换后该起点可能丢失。"
+                : "当前有正在编辑的行为标注，切换后未保存的编辑可能丢失。"}
+          </>,
+          confirmLabel: "仍要切换",
+        });
+        if (!ok) return;
+      }
+      didNavigate = true;
+      navigate(`/projects/${pid}/annotate/${target.id}`);
+    } finally {
+      if (!didNavigate && routeKeyRef.current === `${pid}:${vid}`) {
+        navigationPendingRef.current = false;
+        setNavigationPending(false);
+      }
+    }
+  }, [annotationMutationBusy, confirm, currentVideoInList, editingAnnotationId, identityBusy, navigate, nextVideo, pid, previousVideo, saveState, startPoint, submitting, vid]);
+
   /* ---------- 键盘快捷键（输入聚焦时不触发） ----------
    * 处理函数通过 ref 持有最新闭包：effect 仅注册一次，但每次渲染都更新 ref，
    * 避免路由参数变化（组件未卸载）时 S/D 等快捷键继续作用于旧的 pid/vid。
@@ -1188,7 +1334,9 @@ export default function AnnotatePage() {
       }
       return;
     }
-    if (editingAnnotationId != null) {
+    const isVideoNavigationShortcut = e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
+      && (e.code === "Comma" || e.code === "Period");
+    if (editingAnnotationId != null && !isVideoNavigationShortcut) {
       if (e.key === "Escape") {
         e.preventDefault();
         setEditingAnnotationId(null);
@@ -1211,6 +1359,12 @@ export default function AnnotatePage() {
     if (e.key === "?") {
       e.preventDefault();
       setShortcutHelpOpen(true);
+      return;
+    }
+
+    if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.code === "Comma" || e.code === "Period")) {
+      e.preventDefault();
+      void handleVideoNavigation(e.code === "Comma" ? "previous" : "next");
       return;
     }
 
@@ -1314,6 +1468,17 @@ export default function AnnotatePage() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  const previousVideoTitle = previousVideo
+    ? `上一个视频：${previousVideo.filename}（快捷键：上一个《 / Shift+Comma）${navigationBusy ? "；当前操作完成后可切换" : ""}`
+    : currentVideoInList
+      ? "已到项目视频列表开头，没有上一个视频"
+      : "当前视频不在项目视频列表中，无法定位上一个视频";
+  const nextVideoTitle = nextVideo
+    ? `下一个视频：${nextVideo.filename}（快捷键：下一个》 / Shift+Period）${navigationBusy ? "；当前操作完成后可切换" : ""}`
+    : currentVideoInList
+      ? "已到项目视频列表末尾，没有下一个视频"
+      : "当前视频不在项目视频列表中，无法定位下一个视频";
+
   return (
     <div className="annotate-page">
       <div className="annotate-header">
@@ -1329,6 +1494,30 @@ export default function AnnotatePage() {
             {video?.filename ?? `视频 #${vid}`}
           </span>
         </h1>
+        <nav className="annotate-video-nav" aria-label="视频导航">
+          <button
+            type="button"
+            className="btn btn-sm annotate-video-nav-previous"
+            disabled={navigationBusy || previousVideo == null}
+            title={previousVideoTitle}
+            onClick={() => void handleVideoNavigation("previous")}
+          >
+            <span className="annotate-video-nav-arrow" aria-hidden="true">‹</span>
+            <span>上一个视频</span>
+            <kbd className="annotate-video-nav-key" aria-hidden="true">⇧ ,</kbd>
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm annotate-video-nav-next"
+            disabled={navigationBusy || nextVideo == null}
+            title={nextVideoTitle}
+            onClick={() => void handleVideoNavigation("next")}
+          >
+            <span>下一个视频</span>
+            <kbd className="annotate-video-nav-key" aria-hidden="true">⇧ .</kbd>
+            <span className="annotate-video-nav-arrow" aria-hidden="true">›</span>
+          </button>
+        </nav>
         {video ? (
           <div className="workflow-chip" title="视频工作流状态与行为标注版本">
             <WorkflowBadge value={video.workflow_status} revision={video.annotation_revision} />
@@ -1383,6 +1572,7 @@ export default function AnnotatePage() {
                     onClick={togglePlay}
                     title="点击播放 / 暂停 [Space]"
                     onLoadedMetadata={(e) => {
+                      setStreamErrorHint(null);
                       setElementDuration(e.currentTarget.duration);
                       if (pendingSeekRef.current != null) {
                         e.currentTarget.currentTime = Math.min(pendingSeekRef.current, e.currentTarget.duration);
@@ -1393,6 +1583,12 @@ export default function AnnotatePage() {
                     onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                     onPlay={() => setPlaying(true)}
                     onPause={() => setPlaying(false)}
+                    onError={(e) => {
+                      const mediaError = e.currentTarget.error;
+                      const detail = mediaError?.message || `MediaError code ${mediaError?.code ?? "unknown"}`;
+                      setStreamErrorHint(`浏览器无法加载或解码视频：${streamUrl}（${detail}）`);
+                      setStreamState("error");
+                    }}
                     playsInline
                   />
                   <DetectionOverlay
@@ -1493,7 +1689,7 @@ export default function AnnotatePage() {
                 hint={
                   streamState === "empty"
                     ? "该视频未配置 storage_path 或文件不存在。可先在视频库中补全元数据与文件路径，或直接在下方标注列表管理已有标注。"
-                    : "请确认后端已启动且视频文件路径合法"
+                    : streamErrorHint ?? "视频资源地址不可用或浏览器不支持该视频编码。"
                 }
               />
             )}
