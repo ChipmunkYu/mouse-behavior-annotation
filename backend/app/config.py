@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
@@ -67,6 +67,42 @@ class Settings(BaseSettings):
     cleanup_interval_seconds: int = Field(default=60 * 60, ge=1)
     temp_retention_hours: int = Field(default=24, ge=0)
     job_retention_days: int = Field(default=30, ge=0)
+
+    @model_validator(mode="after")
+    def validate_production_credentials(self) -> "Settings":
+        """生产环境拒绝开发默认值、模板占位值和强度不足的凭据。"""
+        if self.env.strip().lower() != "production":
+            return self
+
+        secret = self.secret_key.strip()
+        password = self.demo_password.strip()
+        username = self.demo_username.strip()
+
+        def is_placeholder(value: str) -> bool:
+            normalized = value.upper().replace("-", "_")
+            compact = "".join(character for character in normalized if character.isalnum())
+            return "CHANGEME" in compact or "PLACEHOLDER" in compact
+
+        errors: list[str] = []
+        if secret == "dev-only-insecure-secret-change-me":
+            errors.append("SECRET_KEY must not use the development default")
+        if is_placeholder(secret):
+            errors.append("SECRET_KEY must not contain a template placeholder")
+        if len(secret) < 32:
+            errors.append("SECRET_KEY must be at least 32 characters")
+        if username.lower() == "demo":
+            errors.append("DEMO_USERNAME must not be demo")
+        if is_placeholder(username):
+            errors.append("DEMO_USERNAME must not contain a template placeholder")
+        if password.lower() == "demo123":
+            errors.append("DEMO_PASSWORD must not be demo123")
+        if is_placeholder(password):
+            errors.append("DEMO_PASSWORD must not contain a template placeholder")
+        if len(password) < 12:
+            errors.append("DEMO_PASSWORD must be at least 12 characters")
+        if errors:
+            raise ValueError("invalid production credentials: " + "; ".join(errors))
+        return self
 
     @property
     def videos_dir(self) -> Path:

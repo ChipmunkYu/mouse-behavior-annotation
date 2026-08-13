@@ -3,6 +3,7 @@ data/
 
 # 本地环境与缓存
 .env
+.env.production
 __pycache__/
 *.py[cod]
 .venv/

@@ -12,6 +12,7 @@
 标注网站/
 ├── backend/ # FastAPI + SQLite 后端（含 tests/、scripts/seed_demo.py）
 ├── frontend/ # React + TypeScript + Vite 前端
+├── deploy/ # systemd、Nginx 与生产部署步骤模板
 ├── 参考文档/ # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
 ├── 需求文档.md # 需求文档（v0.6）
 ├── 项目术语表.md # 当前项目权威术语基线
@@ -148,6 +149,7 @@ cd /d D:\lab\行为识别\标注网站\backend
 
 ## 详见
 
+- 生产部署配置、路径边界与执行顺序：`deploy/README.md`
 - 后端启动、配置、API 一览与测试：`backend/README.md`
 - 前端功能与技术要点：`frontend/README.md`
 - 需求、数据模型与 P1/P2 边界：`需求文档.md`

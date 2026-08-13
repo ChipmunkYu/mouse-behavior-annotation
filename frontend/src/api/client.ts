@@ -1,6 +1,6 @@
 /**
  * 统一 fetch 封装：
- * - base 默认 http://localhost:8000/api（可用 VITE_API_BASE 覆盖）
+ * - 本地开发默认连接 http://localhost:8000/api；生产由 .env.production 注入同源 /api
  * - 自动附加 Bearer token
  * - 401 时清除登录态并广播 auth:unauthorized（由 AuthContext 处理退出）
  * - 统一抛出 ApiError，提取 FastAPI 的 {detail} 错误信息
