@@ -184,6 +184,7 @@ class ReviewOut(BaseModel):
     created_at: datetime
     # 便捷字段：审核人用户名
     reviewer: Optional[str] = None
+    submission_id: Optional[int] = None
 
 
 # ---------- 后台任务 / 媒体状态（批次 4） ----------
@@ -232,7 +233,7 @@ class ClipItem(BaseModel):
     confidence: str
     clip_path: Optional[str] = None
     thumbnail_path: Optional[str] = None
-    annotator_name: str
+    annotator_name: Optional[str] = None
     review_status: str
     created_at: datetime
 

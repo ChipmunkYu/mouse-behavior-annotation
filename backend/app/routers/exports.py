@@ -57,7 +57,10 @@ def create_export(
             raise HTTPException(
                 status_code=400, detail="Category does not belong to this project"
             )
-    job = enqueue_export_job(db, access[0], category_ids)
+    try:
+        job = enqueue_export_job(db, access[0], category_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if job is None:
         raise HTTPException(status_code=409, detail="An export is already queued or running")
     request.app.state.export_worker.schedule(job.id)
@@ -81,7 +84,7 @@ def export_status(
     rows = approved_rows(db, project_id, category_ids)
     missing: list[MissingClipOut] = []
     ready = 0
-    for annotation, video, clip in rows:
+    for annotation, submission, clip in rows:
         path = None
         if clip is not None and clip.status == "ready":
             path, _ = _resolve_within(clip.clip_path, request.app.state.settings.clips_dir)
@@ -91,8 +94,8 @@ def export_status(
             missing.append(
                 MissingClipOut(
                     annotation_id=annotation.id,
-                    category_name=annotation.category.name,
-                    video_filename=video.filename,
+                    category_name=annotation.category_name,
+                    video_filename=submission.source_video_filename,
                 )
             )
     return ExportStatusOut(

@@ -1,10 +1,11 @@
-"""检测导入与查询（Phase 1B）：批次上传、校验、导入、按帧查询、轨迹摘要。
+"""检测导入、替换、稀疏有效状态查询与当前修正结果导出。
 
 不包含 Split/Merge/Suppression 端点。
 """
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -18,30 +19,34 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
+from ..effective_detections import effective_detection_query, effective_track_summary_query
 from ..models import (
     Annotation,
-    CorrectedDetectionAssignment,
-    CorrectedTrack,
     DetectionImport,
-    DetectionSuppression,
+    DetectionStateOverride,
+    DraftIdentityEdit,
     ProjectMembership,
     RawDetection,
-    SuppressionDetection,
     User,
     Video,
     VideoImportBatch,
 )
 from ..schemas import (
     BatchStatusOut,
-    CorrectedTrackSummaryOut,
     DetectionImportCurrentOut,
     DetectionImportReplaceOut,
     DetectionWithTrackOut,
     PageOut,
     VideoImportBatchOut,
 )
+from ..track_ids import TRACK_ID_UPPER_BOUND, is_valid_track_id, next_display_track_id
+from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["detection-imports"])
+
+
+def _after_corrected_export_candidate() -> None:
+    """Test synchronization point after materialization and before publish validation."""
 
 ALLOWED_TRACKS_EXT = ".jsonl"
 ALLOWED_METADATA_EXT = ".json"
@@ -404,6 +409,11 @@ def _validate_tracks_jsonl(file_path: Path, meta: dict, settings) -> tuple[set[i
                 if isinstance(tid, bool) or not isinstance(tid, int):
                     errors.append(f"{ctx}: missing or invalid track_id")
                     continue
+                if not is_valid_track_id(tid):
+                    errors.append(
+                        f"{ctx}: track_id must satisfy 0 <= id < {TRACK_ID_UPPER_BOUND}"
+                    )
+                    continue
 
                 # box_xyxy_px
                 box = det.get("box_xyxy_px")
@@ -568,7 +578,7 @@ def _insert_detection_import_data(
     user_id: int,
     detection_imports_dir: Path,
 ) -> DetectionImport:
-    """在同一事务内：创建 DetectionImport、插入 RawDetection、创建初始 CorrectedTrack 与映射。"""
+    """在同一事务内创建 DetectionImport 与 immutable RawDetection baseline。"""
     tracks_full = detection_imports_dir / tracks_rel_path
     metadata_full = detection_imports_dir / metadata_rel_path
     tracks_sha = _streaming_sha256(tracks_full)
@@ -603,6 +613,8 @@ def _insert_detection_import_data(
         source_relative=meta_info.get("source_relative"),
         status="imported",
         active=True,
+        edit_version=0,
+        next_display_track_id=0,
         created_by=user_id,
     )
     db.add(imp)
@@ -647,56 +659,8 @@ def _insert_detection_import_data(
         info["last_frame"] = max(info["last_frame"], fi)
         info["count"] += 1
 
-    # 创建初始 CorrectedTrack（display_track_id = raw_track_id）
-    if unique_tids:
-        ct_batch = []
-        for tid, stats in unique_tids.items():
-            ct = CorrectedTrack(
-                detection_import_id=imp.id,
-                display_track_id=tid,
-                first_frame=stats["first_frame"],
-                last_frame=stats["last_frame"],
-                effective_detection_count=stats["count"],
-                created_identity_revision=0,
-                active=True,
-            )
-            ct_batch.append(ct)
-        db.add_all(ct_batch)
-        db.flush()
-
-    # 创建初始 CorrectedDetectionAssignment（identity_revision=0）
-    # 需要 raw_id_map：通过查询获取刚插入的 RawDetection ID
-    raw_rows = (
-        db.query(RawDetection.id, RawDetection.frame_index, RawDetection.frame_detection_index)
-        .filter(RawDetection.detection_import_id == imp.id)
-        .all()
-    )
-    raw_id_map: dict[tuple[int, int], int] = {
-        (r.frame_index, r.frame_detection_index): r.id for r in raw_rows
-    }
-
-    # 同时建立 track_id → corrected_track.id 映射
-    track_rows = (
-        db.query(CorrectedTrack.id, CorrectedTrack.display_track_id)
-        .filter(CorrectedTrack.detection_import_id == imp.id, CorrectedTrack.active == True)
-        .all()
-    )
-    track_id_map: dict[int, int] = {t.display_track_id: t.id for t in track_rows}
-
-    if flat_detections:
-        cda_batch = []
-        for fi, di, det in flat_detections:
-            tid = det.get("track_id", 0)
-            key = (fi, di)
-            if key in raw_id_map and tid in track_id_map:
-                cda = CorrectedDetectionAssignment(
-                    raw_detection_id=raw_id_map[key],
-                    corrected_track_id=track_id_map[tid],
-                    identity_revision=0,
-                )
-                cda_batch.append(cda)
-        if cda_batch:
-            db.add_all(cda_batch)
+    # Fresh imports initialize the monotonic sparse-edit display-ID cursor.
+    imp.next_display_track_id = next_display_track_id(unique_tids)
 
     return imp
 
@@ -982,6 +946,13 @@ def complete_import_batch(
         batch.status = "failed"
         db.commit()
         db.refresh(batch)
+        validation_errors = (
+            exc.detail.get("validation_errors", []) if isinstance(exc.detail, dict) else []
+        )
+        if any("track_id must satisfy" in str(error) for error in validation_errors):
+            # Domain violations are rejected as input errors before ORM insertion;
+            # retain the failed batch record while preserving HTTP 400 semantics.
+            raise exc
         return {
             "batch_id": batch.id,
             "video_id": batch.created_video_id,
@@ -1111,6 +1082,10 @@ async def replace_detection_import(
         raise HTTPException(status_code=403, detail="Project membership is not active")
 
     video = _require_video(db, video_id, project_id)
+    initial_active = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
+    initial_active_id = initial_active.id if initial_active else None
+    initial_edit_version = initial_active.edit_version if initial_active else None
+    initial_detection_revision = video.detection_import_revision
 
     settings = request.app.state.settings
     detection_imports_dir = settings.detection_imports_dir.resolve()
@@ -1207,70 +1182,58 @@ async def replace_detection_import(
         _remove_if_exists(metadata_final)
         return preview
 
-    # 新增 revision
-    new_revision = video.detection_import_revision + 1
-
-    # 反激活旧导入
-    db.query(DetectionImport).filter(
-        DetectionImport.video_id == video_id, DetectionImport.active == True
-    ).update({"active": False})
-
     try:
-        imp = _insert_detection_import_data(
-            db=db,
-            video_id=video_id,
-            revision=new_revision,
-            meta_info=meta_info,
-            tracks_rel_path=tracks_rel,
-            metadata_rel_path=metadata_rel,
-            seen_frames=seen_frames,
-            flat_detections=flat_detections,
-            user_id=membership.user_id,
-            detection_imports_dir=detection_imports_dir,
-        )
+        with video_write_gate(
+            db, project_id=project_id, video_id=video_id,
+            expected_active_import_id=initial_active_id,
+            expected_detection_revision=initial_detection_revision,
+            expected_edit_version=initial_edit_version,
+        ) as state:
+            video = state.video
+            new_revision = video.detection_import_revision + 1
+            old_active = state.detection_import
+            if old_active is not None:
+                db.query(DetectionStateOverride).filter(
+                    DetectionStateOverride.detection_import_id == old_active.id
+                ).delete(synchronize_session=False)
+                db.query(DraftIdentityEdit).filter(
+                    DraftIdentityEdit.detection_import_id == old_active.id
+                ).delete(synchronize_session=False)
+                old_active.active = False
 
-        # Fix 4: 重置视频 identity_revision，标注进入 needs_mouse_ids
-        video.detection_import_revision = new_revision
-        video.identity_revision = 0
-
-        affected_annotations = (
-            db.query(Annotation)
-            .filter(Annotation.video_id == video_id)
-            .update(
-                {
-                    "mouse_id_status": "needs_mouse_ids",
-                    "detection_import_revision": 0,
-                    "identity_revision": 0,
-                },
-                synchronize_session=False,
+            imp = _insert_detection_import_data(
+                db=db, video_id=video_id, revision=new_revision, meta_info=meta_info,
+                tracks_rel_path=tracks_rel, metadata_rel_path=metadata_rel,
+                seen_frames=seen_frames, flat_detections=flat_detections,
+                user_id=membership.user_id, detection_imports_dir=detection_imports_dir,
             )
-        )
-
-        db.query(Annotation).filter(
-            Annotation.video_id == video_id, Annotation.review_status == "approved"
-        ).update({"review_status": "pending", "reviewer_id": None}, synchronize_session=False)
-
-        if video.workflow_status in ("submitted", "approved"):
-            video.workflow_status = "draft"
-            video.submitted_at = None
-            video.approved_at = None
-            video.approved_by = None
-
-        db.commit()
+            video.detection_import_revision = new_revision
+            video.identity_revision = 0
+            affected_annotations = db.query(Annotation).filter(
+                Annotation.video_id == video_id
+            ).update({
+                "mouse_id_status": "needs_mouse_ids",
+                "detection_import_revision": 0,
+                "identity_revision": 0,
+            }, synchronize_session=False)
+            db.query(Annotation).filter(
+                Annotation.video_id == video_id, Annotation.review_status == "approved"
+            ).update({"review_status": "pending", "reviewer_id": None}, synchronize_session=False)
+            if video.workflow_status == "approved":
+                video.workflow_status = "draft"
+                video.submitted_at = None
+                video.approved_at = None
+                video.approved_by = None
+            db.commit()
     except Exception:
         db.rollback()
         _remove_if_exists(tracks_final)
         _remove_if_exists(metadata_final)
         raise
 
-    track_count = (
-        db.query(CorrectedTrack)
-        .filter(
-            CorrectedTrack.detection_import_id == imp.id,
-            CorrectedTrack.active == True,
-        )
-        .count()
-    )
+    track_count = db.query(RawDetection.raw_track_id).filter(
+        RawDetection.detection_import_id == imp.id
+    ).distinct().count()
 
     return {
         "id": imp.id,
@@ -1338,63 +1301,33 @@ def get_detections(
     if imp is None:
         return {"detections": [], "total": 0}
 
-    identity_rev = video.identity_revision
-    suppressed_ids = _get_suppressed_detection_ids(db, imp.id, identity_rev)
-
     if end_frame is None:
         end_frame = start_frame + 100
-
-    query = (
-        db.query(
-            RawDetection.id.label("detection_id"),
-            RawDetection.frame_index,
-            RawDetection.raw_track_id,
-            CorrectedTrack.display_track_id,
-            RawDetection.box,
-            RawDetection.keypoints,
-            RawDetection.detection_confidence,
-        )
-        .join(
-            CorrectedDetectionAssignment,
-            CorrectedDetectionAssignment.raw_detection_id == RawDetection.id,
-        )
-        .join(
-            CorrectedTrack,
-            CorrectedTrack.id == CorrectedDetectionAssignment.corrected_track_id,
-        )
-        .filter(
-            RawDetection.detection_import_id == imp.id,
-            CorrectedDetectionAssignment.identity_revision == identity_rev,
-            CorrectedTrack.active == True,
-            RawDetection.frame_index >= start_frame,
-        )
+    query = effective_detection_query(
+        db, imp.id, start_frame=start_frame, end_frame=end_frame
     )
-
-    if end_frame is not None:
-        query = query.filter(RawDetection.frame_index <= end_frame)
-    if suppressed_ids:
-        query = query.filter(~RawDetection.id.in_(suppressed_ids))
 
     total = query.count()
     rows = query.order_by(RawDetection.frame_index, RawDetection.frame_detection_index).limit(500).all()
 
     results = []
     for row in rows:
-        box = row.box
+        raw = row.RawDetection
+        box = raw.box
         box_xyxy_px = None
         if box and isinstance(box, dict) and all(k in box for k in ("x1", "y1", "x2", "y2")):
             box_xyxy_px = [box["x1"], box["y1"], box["x2"], box["y2"]]
 
         results.append({
-            "detection_id": row.detection_id,
-            "frame_index": row.frame_index,
-            "raw_track_id": row.raw_track_id,
+            "detection_id": raw.id,
+            "frame_index": raw.frame_index,
+            "raw_track_id": raw.raw_track_id,
             "display_track_id": row.display_track_id,
             "box_xyxy_px": box_xyxy_px,
-            "keypoints": row.keypoints,
-            "confidence": row.detection_confidence,
+            "keypoints": raw.keypoints,
+            "confidence": raw.detection_confidence,
             "import_revision": imp.revision,
-            "identity_revision": identity_rev,
+            "identity_revision": imp.edit_version,
         })
 
     return {"detections": results, "total": total}
@@ -1422,31 +1355,7 @@ def get_corrected_tracks(
     if imp is None:
         return {"items": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
 
-    suppressed_ids = _get_suppressed_detection_ids(db, imp.id, video.identity_revision)
-    query = (
-        db.query(
-            CorrectedTrack.display_track_id,
-            func.min(RawDetection.frame_index).label("first_frame"),
-            func.max(RawDetection.frame_index).label("last_frame"),
-            func.count(RawDetection.id).label("detection_count"),
-        )
-        .join(
-            CorrectedDetectionAssignment,
-            CorrectedDetectionAssignment.corrected_track_id == CorrectedTrack.id,
-        )
-        .join(RawDetection, RawDetection.id == CorrectedDetectionAssignment.raw_detection_id)
-        .filter(
-            CorrectedTrack.detection_import_id == imp.id,
-            CorrectedTrack.active == True,
-            CorrectedDetectionAssignment.identity_revision == video.identity_revision,
-        )
-    )
-    if suppressed_ids:
-        query = query.filter(~RawDetection.id.in_(suppressed_ids))
-
-    summaries = query.group_by(
-        CorrectedTrack.id, CorrectedTrack.display_track_id
-    ).order_by(CorrectedTrack.display_track_id).all()
+    summaries = effective_track_summary_query(db, imp.id).order_by("display_track_id").all()
     if search:
         summaries = [row for row in summaries if str(row.display_track_id).startswith(search)]
 
@@ -1459,16 +1368,12 @@ def get_corrected_tracks(
         visible = None
         if current_frame is not None:
             visible = (
-                db.query(CorrectedDetectionAssignment.id)
-                .join(RawDetection, RawDetection.id == CorrectedDetectionAssignment.raw_detection_id)
-                .join(CorrectedTrack, CorrectedTrack.id == CorrectedDetectionAssignment.corrected_track_id)
-                .filter(
-                    CorrectedTrack.detection_import_id == imp.id,
-                    CorrectedTrack.display_track_id == row.display_track_id,
-                    CorrectedTrack.active == True,
-                    CorrectedDetectionAssignment.identity_revision == video.identity_revision,
-                    RawDetection.frame_index == current_frame,
-                    ~RawDetection.id.in_(suppressed_ids) if suppressed_ids else True,
+                effective_detection_query(
+                    db,
+                    imp.id,
+                    start_frame=current_frame,
+                    end_frame=current_frame,
+                    display_track_id=row.display_track_id,
                 )
                 .first()
                 is not None
@@ -1483,37 +1388,6 @@ def get_corrected_tracks(
         })
 
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": pages}
-
-
-def _get_suppressed_detection_ids(db: Session, imp_id: int, identity_rev: int) -> set[int]:
-    active_sups = (
-        db.query(DetectionSuppression.id)
-        .filter(
-            DetectionSuppression.detection_import_id == imp_id,
-            DetectionSuppression.base_identity_revision <= identity_rev,
-            DetectionSuppression.reverted_suppression_id == None,
-        )
-    )
-    reverted_ids = set(
-        r[0]
-        for r in db.query(DetectionSuppression.reverted_suppression_id)
-        .filter(
-            DetectionSuppression.detection_import_id == imp_id,
-            DetectionSuppression.result_identity_revision <= identity_rev,
-            DetectionSuppression.reverted_suppression_id != None,
-        )
-        .all()
-    )
-    sup_ids = {r[0] for r in active_sups.all()}
-    active_unreverted = sup_ids - reverted_ids
-    if not active_unreverted:
-        return set()
-    return set(
-        r[0]
-        for r in db.query(SuppressionDetection.raw_detection_id)
-        .filter(SuppressionDetection.suppression_id.in_(active_unreverted))
-        .all()
-    )
 
 
 def _load_import_pose_metadata(
@@ -1547,39 +1421,38 @@ def generate_corrected_tracks(
     id_rev: int,
     detection_imports_dir: Path | None = None,
 ) -> dict | None:
-    suppressed_ids = _get_suppressed_detection_ids(db, imp.id, id_rev)
+    if not imp.active or id_rev != imp.edit_version:
+        raise HTTPException(
+            status_code=409,
+            detail="Only the current active detection import/edit version can be exported",
+        )
+    rows = effective_detection_query(db, imp.id).order_by(
+        RawDetection.frame_index, RawDetection.frame_detection_index, RawDetection.id
+    ).yield_per(500)
 
-    query = (
-        db.query(
-            RawDetection,
-            CorrectedTrack.display_track_id,
-        )
-        .join(
-            CorrectedDetectionAssignment,
-            CorrectedDetectionAssignment.raw_detection_id == RawDetection.id,
-        )
-        .join(
-            CorrectedTrack,
-            CorrectedTrack.id == CorrectedDetectionAssignment.corrected_track_id,
-        )
-        .filter(
-            RawDetection.detection_import_id == imp.id,
-            CorrectedDetectionAssignment.identity_revision == id_rev,
-        )
-    )
-    if suppressed_ids:
-        query = query.filter(
-            ~CorrectedDetectionAssignment.raw_detection_id.in_(suppressed_ids)
-        )
+    jsonl_buffer = io.StringIO()
+    current_frame = 0
+    current_detections: list[dict] = []
 
-    rows = query.order_by(RawDetection.frame_index, RawDetection.frame_detection_index).all()
+    def emit(frame_index: int, detections: list[dict]) -> None:
+        jsonl_buffer.write(json.dumps({
+            "schema_version": imp.schema_version,
+            "video_id": str(video.id),
+            "frame_index": frame_index,
+            "timestamp_sec": frame_index / imp.fps if imp.fps else None,
+            "detection_count": len(detections),
+            "detections": detections,
+        }, ensure_ascii=False))
+        jsonl_buffer.write("\n")
 
-    frames: dict[int, list[dict]] = {}
-    for raw, display_track_id in rows:
-        frame_index = raw.frame_index
-        if frame_index not in frames:
-            frames[frame_index] = []
-        frames[frame_index].append({
+    for row in rows:
+        raw = row.RawDetection
+        display_track_id = row.display_track_id
+        while current_frame < raw.frame_index:
+            emit(current_frame, current_detections)
+            current_frame += 1
+            current_detections = []
+        current_detections.append({
             "track_id": display_track_id,
             "box_xyxy_px": (
                 [raw.box["x1"], raw.box["y1"], raw.box["x2"], raw.box["y2"]]
@@ -1593,21 +1466,13 @@ def generate_corrected_tracks(
             "keypoints": raw.keypoints,
         })
 
-    jsonl_lines = []
-    for fi in range(imp.frame_count or 0):
-        dets = frames.get(fi, [])
-        line = {
-            "schema_version": imp.schema_version,
-            "video_id": str(video.id),
-            "frame_index": fi,
-            "timestamp_sec": fi / imp.fps if imp.fps else None,
-            "detection_count": len(dets),
-            "detections": dets,
-        }
-        jsonl_lines.append(json.dumps(line, ensure_ascii=False))
+    while current_frame < (imp.frame_count or 0):
+        emit(current_frame, current_detections)
+        current_frame += 1
+        current_detections = []
 
     tracks_sha256 = hashlib.sha256()
-    tracks_content = "\n".join(jsonl_lines) + "\n"
+    tracks_content = jsonl_buffer.getvalue()
     tracks_sha256.update(tracks_content.encode("utf-8"))
     output_sha256 = tracks_sha256.hexdigest()
 
@@ -1629,7 +1494,7 @@ def generate_corrected_tracks(
         "skeleton_edges": pose_metadata["skeleton_edges"],
     }
     return {
-        "tracks_corrected": jsonl_lines,
+        "tracks_corrected": tracks_content.splitlines(),
         "tracks_corrected_text": tracks_content,
         "manifest": manifest,
     }
@@ -1649,28 +1514,33 @@ def export_corrected_detections(
     _project, membership = access
     video = _require_video(db, video_id, project_id)
 
-    if import_revision is not None:
-        imp = (
-            db.query(DetectionImport)
-            .filter(DetectionImport.video_id == video_id, DetectionImport.revision == import_revision)
-            .first()
-        )
-        if imp is None:
-            raise HTTPException(status_code=404, detail=f"DetectionImport revision {import_revision} not found")
-        id_rev = identity_revision if identity_revision is not None else 0
-    else:
-        imp = (
-            db.query(DetectionImport)
-            .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)
-            .first()
-        )
-        if imp is None:
-            raise HTTPException(status_code=404, detail="No active detection import for this video")
-        id_rev = identity_revision if identity_revision is not None else video.identity_revision
+    imp = db.query(DetectionImport).filter(
+        DetectionImport.video_id == video_id, DetectionImport.active == True
+    ).first()
+    if imp is None:
+        raise HTTPException(status_code=404, detail="No active detection import for this video")
+    if import_revision is not None and import_revision != imp.revision:
+        raise HTTPException(status_code=409, detail="Historical detection imports require Phase 3 snapshots")
+    id_rev = identity_revision if identity_revision is not None else imp.edit_version
+    if id_rev != imp.edit_version:
+        raise HTTPException(status_code=409, detail="Historical identity revisions require Phase 3 snapshots")
 
+    initial_import_id = imp.id
+    initial_detection_revision = video.detection_import_revision
+    initial_edit_version = imp.edit_version
     result = generate_corrected_tracks(
         db, video, imp, id_rev, request.app.state.settings.detection_imports_dir
     )
+    db.rollback()
+    _after_corrected_export_candidate()
+    with video_write_gate(
+        db, project_id=project_id, video_id=video_id, require_active_import=True,
+        expected_active_import_id=initial_import_id,
+        expected_detection_revision=initial_detection_revision,
+        expected_edit_version=initial_edit_version,
+        allow_submitted=True,
+    ):
+        db.commit()
     if result is None:
         return {"tracks_corrected": [], "manifest": {}}
 

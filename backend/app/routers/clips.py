@@ -19,12 +19,12 @@ from math import ceil
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
-from ..models import Annotation, BehaviorCategory, Clip, User, Video
+from ..models import Annotation, BehaviorCategory, Clip, Submission, SubmissionAnnotation, User, Video
 from ..schemas import ClipCategoryCount, ClipItem, ClipPageOut
 
 router = APIRouter(tags=["clips"])
@@ -99,65 +99,52 @@ def list_clips(
     db: Session = Depends(get_db),
 ) -> ClipPageOut:
     """项目成员分页浏览跨视频审核通过片段库（仅成员；不校验 active）。"""
-    conds = _base_filters(
-        project_id,
-        category_id=category_id,
-        video_id=video_id,
-        annotator_id=annotator_id,
-        search=search,
-    )
-    # 稳定分页排序：start_time 主序 + id 次序
-    order = (Annotation.start_time.asc(), Annotation.id.asc())
-
-    # 轻量查询：先 COUNT + 取本页 annotation id（不加载关联列 / 大字段）
-    id_query = (
-        db.query(Annotation.id)
-        .join(Video, Video.id == Annotation.video_id)
-        .join(BehaviorCategory, BehaviorCategory.id == Annotation.category_id)
-        .filter(*conds)
-    )
-    total = id_query.count()
-    ids = [
-        row[0]
-        for row in id_query.order_by(*order).offset((page - 1) * page_size).limit(page_size)
-    ]
-
-    # 再取关联列：一次 join 到位（Video/类别/标注者/当前修订 Clip），无 N+1
-    rows = (
-        db.query(
-            Annotation.id.label("annotation_id"),
-            Annotation.video_id,
-            Video.filename.label("video_filename"),
-            Annotation.category_id,
-            BehaviorCategory.name.label("category_name"),
-            Annotation.start_time,
-            Annotation.end_time,
-            Annotation.start_frame,
-            Annotation.end_frame,
-            Annotation.confidence,
-            Annotation.review_status,
-            Annotation.created_at,
+    authority_video_ids = select(Submission.video_id).distinct()
+    conds = [Submission.status == APPROVED, Video.project_id == project_id]
+    if category_id is not None: conds.append(SubmissionAnnotation.category_id == category_id)
+    if video_id is not None: conds.append(Submission.video_id == video_id)
+    if annotator_id is not None: conds.append(Submission.submitted_by == annotator_id)
+    if search: conds.append(or_(SubmissionAnnotation.category_name.ilike(f"%{search}%"), Submission.source_video_filename.ilike(f"%{search}%")))
+    new_query = (
+        select(
+            SubmissionAnnotation.id.label("annotation_id"), Submission.video_id,
+            Submission.source_video_filename.label("video_filename"),
+            SubmissionAnnotation.category_id, SubmissionAnnotation.category_name,
+            SubmissionAnnotation.start_time, SubmissionAnnotation.end_time,
+            SubmissionAnnotation.start_frame, SubmissionAnnotation.end_frame,
+            SubmissionAnnotation.confidence,
+            literal("approved").label("review_status"),
+            Submission.submitted_at.label("created_at"),
             User.username.label("annotator_name"),
             Clip.clip_path,
             Clip.thumbnail_path,
             Clip.status.label("clip_status"),
         )
-        .join(Video, Video.id == Annotation.video_id)
-        .join(BehaviorCategory, BehaviorCategory.id == Annotation.category_id)
-        .join(User, User.id == Annotation.annotator_id)
-        .outerjoin(
-            Clip,
-            and_(
-                Clip.annotation_id == Annotation.id,
-                Clip.source_revision == Video.media_revision,
-            ),
-        )
-        .filter(Annotation.id.in_(ids))
-        .order_by(*order)
-        .all()
+        .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
+        .join(Video, Video.id == Submission.video_id)
+        .outerjoin(User, User.id == Submission.submitted_by)
+        .outerjoin(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
+        .where(*conds)
     )
+    legacy_conds = _base_filters(project_id, category_id=category_id, video_id=video_id,
+                                 annotator_id=annotator_id, search=search)
+    legacy_conds.append(~Annotation.video_id.in_(authority_video_ids))
+    legacy_query = select(
+        Annotation.id.label("annotation_id"), Annotation.video_id, Video.filename.label("video_filename"),
+        Annotation.category_id, BehaviorCategory.name.label("category_name"), Annotation.start_time,
+        Annotation.end_time, Annotation.start_frame, Annotation.end_frame, Annotation.confidence,
+        Annotation.review_status, Annotation.created_at, User.username.label("annotator_name"),
+        Clip.clip_path, Clip.thumbnail_path, Clip.status.label("clip_status"),
+    ).select_from(Annotation).join(Video).join(BehaviorCategory).outerjoin(User, User.id == Annotation.annotator_id).outerjoin(
+        Clip, and_(Clip.annotation_id == Annotation.id, Clip.source_revision == Video.media_revision)
+    ).where(*legacy_conds)
+    mixed = union_all(new_query, legacy_query).subquery("mixed_clip_authority")
+    total = db.execute(select(func.count()).select_from(mixed)).scalar_one()
+    rows = db.execute(select(mixed).order_by(mixed.c.start_time, mixed.c.annotation_id)
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    items = [_to_item(row) for row in rows]
     pages = (total + page_size - 1) // page_size if total else 0
-    return ClipPageOut(total=total, pages=pages, items=[_to_item(row) for row in rows])
+    return ClipPageOut(total=total, pages=pages, items=items)
 
 
 @router.get(
@@ -170,24 +157,29 @@ def clip_categories(
     db: Session = Depends(get_db),
 ) -> list[ClipCategoryCount]:
     """审核通过片段的类别统计（分类筛选 chip）：仅含计数 > 0 的类别，按 sort_order 排序。"""
-    rows = (
+    new_rows = (
         db.query(
-            BehaviorCategory.id.label("category_id"),
-            BehaviorCategory.name.label("category_name"),
-            func.count(Annotation.id).label("cnt"),
+            SubmissionAnnotation.category_id, SubmissionAnnotation.category_name,
+            func.count(SubmissionAnnotation.id).label("cnt"),
         )
-        .join(Annotation, Annotation.category_id == BehaviorCategory.id)
-        .join(Video, Video.id == Annotation.video_id)
-        .filter(
-            Annotation.review_status == APPROVED,
-            Video.workflow_status == APPROVED,
-            Video.project_id == project_id,
-        )
-        .group_by(BehaviorCategory.id, BehaviorCategory.name)
-        .order_by(BehaviorCategory.sort_order, BehaviorCategory.id)
+        .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
+        .join(Video, Video.id == Submission.video_id)
+        .filter(Submission.status == APPROVED, Video.project_id == project_id)
+        .group_by(SubmissionAnnotation.category_id, SubmissionAnnotation.category_name)
+        .order_by(SubmissionAnnotation.category_id)
         .all()
     )
-    return [
-        ClipCategoryCount(category_id=r.category_id, category_name=r.category_name, count=r.cnt)
-        for r in rows
-    ]
+    authority_video_ids = db.query(Submission.video_id).distinct()
+    legacy_rows = db.query(
+        BehaviorCategory.id.label("category_id"), BehaviorCategory.name.label("category_name"),
+        func.count(Annotation.id).label("cnt"),
+    ).join(Annotation).join(Video).filter(
+        Annotation.review_status == APPROVED, Video.workflow_status == APPROVED,
+        Video.project_id == project_id, ~Video.id.in_(authority_video_ids),
+    ).group_by(BehaviorCategory.id, BehaviorCategory.name).all()
+    counts: dict[tuple[int, str], int] = {}
+    for row in [*new_rows, *legacy_rows]:
+        key = (row.category_id, row.category_name)
+        counts[key] = counts.get(key, 0) + row.cnt
+    return [ClipCategoryCount(category_id=key[0], category_name=key[1], count=count)
+            for key, count in sorted(counts.items())]

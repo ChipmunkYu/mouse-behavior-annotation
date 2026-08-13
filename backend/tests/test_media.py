@@ -18,11 +18,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
 from app.media import FfmpegMediaProcessor, MediaCommandError, format_time
-from app.models import Annotation, BackgroundJob, Clip, DetectionImport, ProjectMembership, User, Video
+from app.media_jobs import claim_and_render_submission_clip
+from app.models import (Annotation, BackgroundJob, Clip, DetectionImport, ProjectMembership,
+                        Submission, SubmissionAnnotation, User, Video)
 
 from .conftest import auth_headers
 
@@ -315,20 +319,22 @@ def test_approval_auto_enqueues_and_generates_clips(media_ctx):
     assert job.job_type == "media"
     assert job.status == "succeeded"
     assert job.progress == 100
-    assert job.dedupe_key == f"media:video:{video['id']}:rev:1"
+    with ctx.session_factory() as db:
+        current_revision = db.get(Video, video["id"]).media_revision
+    assert job.dedupe_key == f"media:video:{video['id']}:rev:{current_revision}"
     assert job.payload == {
         "video_id": video["id"],
         "project_id": project["id"],
-        "revision": 1,
+        "revision": current_revision,
     }
 
     clips = _clips(ctx, project["id"])
     assert len(clips) == 1
     clip = clips[0]
     assert clip.status == "ready"
-    assert clip.source_revision == 1
-    assert clip.clip_path == f"clip_{clip.annotation_id}_rev1.mp4"
-    assert clip.thumbnail_path == f"clip_{clip.annotation_id}_rev1.jpg"
+    assert clip.source_revision == current_revision
+    assert clip.clip_path == f"clip_{clip.annotation_id}_rev{current_revision}.mp4"
+    assert clip.thumbnail_path == f"clip_{clip.annotation_id}_rev{current_revision}.jpg"
     assert clip.error is None
     # 实体文件已生成（相对路径位于 clips_dir/thumbnails_dir 内）
     clips_dir = ctx.app.state.settings.clips_dir
@@ -444,7 +450,8 @@ def test_media_status_success_and_counts(media_ctx):
     assert resp.status_code == 200
     body = resp.json()
     assert body["video_id"] == video["id"]
-    assert body["revision"] == 1
+    with ctx.session_factory() as db:
+        assert body["revision"] == db.get(Video, video["id"]).media_revision
     assert body["workflow_status"] == "approved"
     assert body["total"] == 2
     assert body["ready"] == 2
@@ -715,6 +722,57 @@ def test_missing_source_file_fails_job(media_ctx):
         assert "missing on disk" in db.query(Clip).one().error
 
 
+def test_submission_clip_cas_waiter_does_not_overwrite_processing_owner(media_ctx):
+    """Media/export callers share one CAS claim; a waiter never steals processing ownership."""
+    ctx = media_ctx
+    from tests.test_project_export import _approved
+
+    _approved(ctx)
+    entered, release = threading.Event(), threading.Event()
+    original = ctx.processor.render_clip
+    results, errors = [], []
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).filter_by(status="approved").one()
+        annotation = db.query(SubmissionAnnotation).filter_by(submission_id=submission.id).one()
+        clip = db.query(Clip).filter_by(submission_annotation_id=annotation.id).one()
+        for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                             (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+            if stored:
+                (root / stored).unlink(missing_ok=True)
+        clip.status, clip.clip_path, clip.thumbnail_path = "pending", None, None
+        db.commit()
+        submission_id, annotation_id, clip_id = submission.id, annotation.id, clip.id
+        input_path = ctx.app.state.settings.videos_dir / submission.source_storage_key
+
+    def blocking_render(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(**kwargs)
+
+    ctx.processor.render_clip = blocking_render
+
+    def call():
+        try:
+            with ctx.session_factory() as db:
+                results.append(claim_and_render_submission_clip(
+                    db, ctx.processor, ctx.app.state.settings, submission_id, annotation_id,
+                    clip_id, input_path=input_path, wait_seconds=3, poll_seconds=.005))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    owner = threading.Thread(target=call); waiter = threading.Thread(target=call)
+    owner.start(); assert entered.wait(5)
+    waiter.start(); time.sleep(.05)
+    with ctx.session_factory() as db:
+        processing = db.get(Clip, clip_id)
+        assert processing.status == "processing"
+        assert processing.clip_path is None and processing.thumbnail_path is None
+    release.set(); owner.join(5); waiter.join(5)
+    assert not owner.is_alive() and not waiter.is_alive()
+    assert errors == [] and len(results) == 2
+    assert len(ctx.processor.clip_calls) == 2  # one approval render + one shared-owner render
+
+
 # ---------- 重启恢复 ----------
 
 
@@ -725,12 +783,13 @@ def test_restart_requeues_interrupted_running_job(media_ctx):
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
+        revision = v.media_revision
         db.commit()
         db.add(
             Clip(
                 project_id=project["id"],
                 annotation_id=anns[0]["id"],
-                source_revision=1,
+                source_revision=revision,
                 status="processing",  # 模拟任务领取 Clip 后进程崩溃
             )
         )
@@ -739,8 +798,8 @@ def test_restart_requeues_interrupted_running_job(media_ctx):
             job_type="media",
             status="running",  # 模拟崩溃遗留
             progress=0,
-            dedupe_key=f"media:video:{video['id']}:rev:1",
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
         db.add(job)
         db.commit()
@@ -751,7 +810,7 @@ def test_restart_requeues_interrupted_running_job(media_ctx):
     with ctx.session_factory() as db:
         job = db.get(BackgroundJob, job_id)
         assert job.status == "succeeded"  # 中断 → 重排 → 处理完成
-        assert job.attempts == 2  # 中断重排 +1、领取 +1
+        assert job.attempts == 1  # recovery 只重排；实际领取恰好 +1
         assert db.query(Clip).one().status == "ready"
 
 
@@ -762,14 +821,15 @@ def test_restart_marks_exhausted_running_job_failed(media_ctx):
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
+        revision = v.media_revision
         db.commit()
         job = BackgroundJob(
             project_id=project["id"],
             job_type="media",
             status="running",
             attempts=3,  # 已达重试上限（media_max_attempts=3）
-            dedupe_key=f"media:video:{video['id']}:rev:1",
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
         db.add(job)
         db.commit()
@@ -794,12 +854,13 @@ def test_stale_job_cancelled_on_invalidation_without_resurrecting_clips(media_ct
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
+        revision = v.media_revision
         db.commit()
         db.add(
             Clip(
                 project_id=project["id"],
                 annotation_id=anns[0]["id"],
-                source_revision=1,
+                source_revision=revision,
                 status="pending",
             )
         )
@@ -807,8 +868,8 @@ def test_stale_job_cancelled_on_invalidation_without_resurrecting_clips(media_ct
             project_id=project["id"],
             job_type="media",
             status="queued",
-            dedupe_key=f"media:video:{video['id']}:rev:1",
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
         db.add(job)
         db.commit()
@@ -843,12 +904,13 @@ def test_stale_job_cancelled_on_revision_mismatch(media_ctx):
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
+        revision = v.media_revision
         db.commit()
         db.add(
             Clip(
                 project_id=project["id"],
                 annotation_id=anns[0]["id"],
-                source_revision=1,
+                source_revision=revision,
                 status="pending",
             )
         )
@@ -856,15 +918,15 @@ def test_stale_job_cancelled_on_revision_mismatch(media_ctx):
             project_id=project["id"],
             job_type="media",
             status="queued",
-            dedupe_key=f"media:video:{video['id']}:rev:1",
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
         db.add(job)
         db.commit()
         job_id = job.id
         # 媒体修订前进到 2（仍 approved）：遗留任务修订不匹配
         v = db.get(Video, video["id"])
-        v.media_revision = 2
+        v.media_revision = revision + 1
         db.commit()
 
     ctx.app.state.media_worker.start()
@@ -886,13 +948,14 @@ def test_worker_never_creates_clips_for_deleted_annotations(media_ctx):
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
+        revision = v.media_revision
         db.commit()
         job = BackgroundJob(
             project_id=project["id"],
             job_type="media",
             status="queued",
-            dedupe_key=f"media:video:{video['id']}:rev:1",
-            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
         db.add(job)
         db.commit()

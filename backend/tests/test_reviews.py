@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from app.models import Annotation, CorrectedDetectionAssignment, Review, Video
+from app.models import Annotation, DetectionImport, Review, Video
 
 
 _SAMPLE_METADATA = {
@@ -239,7 +239,7 @@ def test_submit_success_sets_submitted_and_resets_annotations(ctx, login_headers
 
     state = _video_state(ctx, video["id"])
     assert state["workflow_status"] == "submitted"
-    assert state["annotation_revision"] == 1
+    assert state["annotation_revision"] == 2
     assert state["submitted_at"] is not None
     assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
 
@@ -252,7 +252,7 @@ def test_submit_revalidates_valid_stale_annotation_and_advances_revisions(ctx, l
     with ctx.session_factory() as db:
         stored_video = db.get(Video, video["id"])
         stored_video.identity_revision = 3
-        db.query(CorrectedDetectionAssignment).update({"identity_revision": 3})
+        db.query(DetectionImport).filter_by(video_id=video["id"], active=True).one().edit_version = 3
         stored_ann = db.get(Annotation, ann["id"])
         stored_ann.mouse_id_status = "valid"
         stored_ann.detection_import_revision = 1
@@ -288,12 +288,7 @@ def test_submit_does_not_change_invalid_stale_annotation(ctx, login_headers):
 
     resp = _submit(ctx, headers, project, video)
     assert resp.status_code == 400
-    assert resp.json()["detail"]["invalid_annotations"] == [
-        {
-            "annotation_id": ann["id"],
-            "reason": "Track ID 1 has no unsuppressed detections in frame range [0, 1]",
-        }
-    ]
+    assert "projection is stale" in resp.json()["detail"]
 
     with ctx.session_factory() as db:
         stored_video = db.get(Video, video["id"])
@@ -317,7 +312,7 @@ def test_submit_invalid_mixed_annotations_changes_neither(ctx, login_headers):
     with ctx.session_factory() as db:
         stored_video = db.get(Video, video["id"])
         stored_video.identity_revision = 3
-        db.query(CorrectedDetectionAssignment).update({"identity_revision": 3})
+        db.query(DetectionImport).filter_by(video_id=video["id"], active=True).one().edit_version = 3
         first = db.get(Annotation, valid_ann["id"])
         first.mouse_id_status = "valid"
         first.detection_import_revision = 0
@@ -395,12 +390,12 @@ def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, lo
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
     assert _submit(ctx, headers, project, video).status_code == 200
-    assert _submit(ctx, headers, project, video).status_code == 400
+    assert _submit(ctx, headers, project, video).status_code == 409
 
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "rejected"
     assert _submit(ctx, headers, project, video).status_code == 200
-    assert _submit(ctx, headers, project, video).status_code == 400
+    assert _submit(ctx, headers, project, video).status_code == 409
 
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "approved"
@@ -551,7 +546,7 @@ def test_review_history_member_readable_and_order(ctx, login_headers):
     assert len(rows) == 1
     assert rows[0]["result"] == "rejected"
     assert rows[0]["comment"] == "改一下"
-    assert rows[0]["annotation_revision"] == 1
+    assert rows[0]["annotation_revision"] == 2
     assert rows[0]["reviewer"] == "reviewer1"
 
     annot_id = ctx.create_user("annot4")
@@ -582,14 +577,14 @@ def test_review_history_accumulates_across_revisions(ctx, login_headers):
         headers=headers,
     )
     assert patch.status_code == 200
-    assert _video_state(ctx, video["id"])["annotation_revision"] == 2
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 3
 
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
 
     rows = _history(ctx, headers, project, video).json()
     assert len(rows) == 2
-    assert [r["annotation_revision"] for r in rows] == [1, 2]
+    assert [r["annotation_revision"] for r in rows] == [2, 3]
     assert [r["result"] for r in rows] == ["rejected", "approved"]
 
 
@@ -609,7 +604,7 @@ def test_review_approve_syncs_video_and_annotations(ctx, login_headers):
     body = resp.json()
     assert body["result"] == "approved"
     assert body["comment"] == "通过"
-    assert body["annotation_revision"] == 1
+    assert body["annotation_revision"] == 2
     assert body["reviewer"] == "reviewer1"
 
     state = _video_state(ctx, video["id"])

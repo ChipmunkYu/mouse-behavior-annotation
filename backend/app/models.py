@@ -11,8 +11,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -21,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .track_ids import TRACK_ID_UPPER_BOUND
 
 
 def utcnow() -> datetime:
@@ -230,7 +233,15 @@ class Review(Base):
     """审核记录：保留完整审核历史，用户删除后 reviewer_id 置空。"""
 
     __tablename__ = "reviews"
-    __table_args__ = (Index("ix_reviews_video_revision", "video_id", "annotation_revision"),)
+    __table_args__ = (
+        Index("ix_reviews_video_revision", "video_id", "annotation_revision"),
+        Index(
+            "uq_reviews_submission_not_null",
+            "submission_id",
+            unique=True,
+            sqlite_where=text("submission_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(
@@ -248,11 +259,18 @@ class Review(Base):
     # v0.6 审核快照补足三类语义修订；旧审核记录迁移为 0
     detection_import_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     identity_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Phase 1 兼容列：新审核将在后续阶段绑定不可变 Submission；旧记录保持 NULL。
+    submission_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("submissions.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     project: Mapped["Project"] = relationship()
     video: Mapped["Video"] = relationship(back_populates="reviews")
     reviewer: Mapped[Optional["User"]] = relationship()
+    submission: Mapped[Optional["Submission"]] = relationship(
+        back_populates="review", foreign_keys=[submission_id]
+    )
 
 
 class Clip(Base):
@@ -265,18 +283,28 @@ class Clip(Base):
     __table_args__ = (
         UniqueConstraint("annotation_id", "source_revision", name="uq_clip_annotation_revision"),
         Index("ix_clips_status", "status"),
+        Index(
+            "uq_clips_submission_annotation_not_null",
+            "submission_annotation_id",
+            unique=True,
+            sqlite_where=text("submission_annotation_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    project_id: Mapped[int] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    project_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    annotation_id: Mapped[int] = mapped_column(
-        ForeignKey("annotations.id", ondelete="CASCADE"), nullable=False, index=True
+    annotation_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("annotations.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    source_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # v0.6：媒体修订与语义修订拆分——仅源媒体变化时才需要重编码 Clip
     media_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Phase 1 兼容列：后续片段权威关系；旧 Clip 保留 annotation/revision 字段。
+    submission_annotation_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("submission_annotations.id", ondelete="CASCADE"), nullable=True
+    )
     # pending / processing / ready / failed / stale
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     clip_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
@@ -287,7 +315,10 @@ class Clip(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     project: Mapped["Project"] = relationship()
-    annotation: Mapped["Annotation"] = relationship(back_populates="clips")
+    annotation: Mapped[Optional["Annotation"]] = relationship(back_populates="clips")
+    submission_annotation: Mapped[Optional["SubmissionAnnotation"]] = relationship(
+        back_populates="clip", foreign_keys=[submission_annotation_id]
+    )
 
 
 class BackgroundJob(Base):
@@ -377,6 +408,11 @@ class DetectionImport(Base):
             unique=True,
             sqlite_where=text("active = 1"),
         ),
+        CheckConstraint("edit_version >= 0", name="ck_detection_imports_edit_version"),
+        CheckConstraint(
+            f"next_display_track_id >= 0 AND next_display_track_id <= {TRACK_ID_UPPER_BOUND}",
+            name="ck_detection_imports_next_display_track_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -407,6 +443,12 @@ class DetectionImport(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    edit_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    next_display_track_id: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     created_by: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -418,6 +460,15 @@ class DetectionImport(Base):
     )
     corrected_tracks: Mapped[list["CorrectedTrack"]] = relationship(
         back_populates="detection_import", cascade="all, delete-orphan", passive_deletes=True
+    )
+    state_overrides: Mapped[list["DetectionStateOverride"]] = relationship(
+        back_populates="detection_import", cascade="all, delete-orphan", passive_deletes=True
+    )
+    draft_identity_edits: Mapped[list["DraftIdentityEdit"]] = relationship(
+        back_populates="detection_import", cascade="all, delete-orphan", passive_deletes=True
+    )
+    detection_snapshots: Mapped[list["DetectionSnapshot"]] = relationship(
+        back_populates="detection_import", passive_deletes=True
     )
     creator: Mapped[Optional["User"]] = relationship(foreign_keys=[created_by])
 
@@ -433,8 +484,23 @@ class RawDetection(Base):
             "frame_detection_index",
             name="uq_raw_detections_import_frame_index",
         ),
+        UniqueConstraint("id", "detection_import_id", name="uq_raw_detections_id_import"),
+        CheckConstraint("frame_index >= 0", name="ck_raw_detections_frame_index"),
+        CheckConstraint(
+            "frame_detection_index >= 0", name="ck_raw_detections_frame_detection_index"
+        ),
+        CheckConstraint(
+            f"raw_track_id >= 0 AND raw_track_id < {TRACK_ID_UPPER_BOUND}",
+            name="ck_raw_detections_track_id",
+        ),
         Index("ix_raw_detections_import_frame", "detection_import_id", "frame_index"),
         Index("ix_raw_detections_import_track", "detection_import_id", "raw_track_id"),
+        Index(
+            "ix_raw_detections_import_track_frame",
+            "detection_import_id",
+            "raw_track_id",
+            "frame_index",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -452,6 +518,12 @@ class RawDetection(Base):
     detection_import: Mapped["DetectionImport"] = relationship(back_populates="raw_detections")
     assignments: Mapped[list["CorrectedDetectionAssignment"]] = relationship(
         back_populates="raw_detection", cascade="all, delete-orphan", passive_deletes=True
+    )
+    state_override: Mapped[Optional["DetectionStateOverride"]] = relationship(
+        back_populates="raw_detection",
+        uselist=False,
+        passive_deletes=True,
+        overlaps="detection_import,state_overrides",
     )
 
 
@@ -599,3 +671,420 @@ class SuppressionDetection(Base):
 
     suppression: Mapped["DetectionSuppression"] = relationship(back_populates="detections")
     raw_detection: Mapped["RawDetection"] = relationship()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 additive target schema.  Legacy read/write paths remain authoritative
+# until the later cutover phases; these tables are intentionally not wired into
+# current routers yet.
+# ---------------------------------------------------------------------------
+
+
+class DetectionStateOverride(Base):
+    """Current draft state differing from the immutable RawDetection baseline."""
+
+    __tablename__ = "detection_state_overrides"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["raw_detection_id", "detection_import_id"],
+            ["raw_detections.id", "raw_detections.detection_import_id"],
+            ondelete="CASCADE",
+            name="fk_detection_state_overrides_raw_import",
+        ),
+        CheckConstraint(
+            f"display_track_id >= 0 AND display_track_id < {TRACK_ID_UPPER_BOUND}",
+            name="ck_detection_state_overrides_display",
+        ),
+        CheckConstraint(
+            "updated_edit_version >= 1", name="ck_detection_state_overrides_edit_version"
+        ),
+        Index(
+            "ix_detection_state_overrides_import_display_suppressed",
+            "detection_import_id",
+            "display_track_id",
+            "suppressed",
+        ),
+        Index(
+            "ix_detection_state_overrides_import_version",
+            "detection_import_id",
+            "updated_edit_version",
+        ),
+    )
+
+    raw_detection_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    detection_import_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    display_track_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    suppressed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_edit_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    detection_import: Mapped["DetectionImport"] = relationship(
+        back_populates="state_overrides",
+        foreign_keys=[detection_import_id],
+        overlaps="raw_detection,state_override",
+    )
+    raw_detection: Mapped["RawDetection"] = relationship(
+        back_populates="state_override",
+        foreign_keys=[raw_detection_id, detection_import_id],
+        overlaps="detection_import,state_overrides",
+    )
+
+
+class DraftIdentityEdit(Base):
+    """Current draft's compact LIFO undo stack, not permanent audit history."""
+
+    __tablename__ = "draft_identity_edits"
+    __table_args__ = (
+        UniqueConstraint(
+            "detection_import_id",
+            "applied_edit_version",
+            name="uq_draft_identity_edits_import_version",
+        ),
+        UniqueConstraint("id", "detection_import_id", name="uq_draft_identity_edits_id_import"),
+        CheckConstraint(
+            "applied_edit_version >= 1", name="ck_draft_identity_edits_applied_version"
+        ),
+        CheckConstraint(
+            "operation IN ('split', 'merge', 'suppress_track')",
+            name="ck_draft_identity_edits_operation",
+        ),
+        Index(
+            "ix_draft_identity_edits_import_version",
+            "detection_import_id",
+            text("applied_edit_version DESC"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    detection_import_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    applied_edit_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    params: Mapped[dict] = mapped_column(JSON, nullable=False)
+    operator_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    detection_import: Mapped["DetectionImport"] = relationship(
+        back_populates="draft_identity_edits"
+    )
+    operator: Mapped[Optional["User"]] = relationship(foreign_keys=[operator_id])
+    changes: Mapped[list["DraftDetectionChange"]] = relationship(
+        back_populates="edit",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        overlaps="raw_detection",
+    )
+
+
+class DraftDetectionChange(Base):
+    """Before/after sparse override state for detections touched by one draft edit."""
+
+    __tablename__ = "draft_detection_changes"
+    __table_args__ = (
+        PrimaryKeyConstraint("edit_id", "raw_detection_id"),
+        ForeignKeyConstraint(
+            ["edit_id", "detection_import_id"],
+            ["draft_identity_edits.id", "draft_identity_edits.detection_import_id"],
+            ondelete="CASCADE",
+            name="fk_draft_detection_changes_edit_import",
+        ),
+        ForeignKeyConstraint(
+            ["raw_detection_id", "detection_import_id"],
+            ["raw_detections.id", "raw_detections.detection_import_id"],
+            ondelete="CASCADE",
+            name="fk_draft_detection_changes_raw_import",
+        ),
+        CheckConstraint(
+            "(before_override_exists = 0 AND before_display_track_id IS NULL "
+            "AND before_suppressed IS NULL) OR "
+            f"(before_override_exists = 1 AND before_display_track_id >= 0 "
+            f"AND before_display_track_id < {TRACK_ID_UPPER_BOUND} "
+            "AND before_suppressed IS NOT NULL)",
+            name="ck_draft_detection_changes_before",
+        ),
+        CheckConstraint(
+            "(after_override_exists = 0 AND after_display_track_id IS NULL "
+            "AND after_suppressed IS NULL) OR "
+            f"(after_override_exists = 1 AND after_display_track_id >= 0 "
+            f"AND after_display_track_id < {TRACK_ID_UPPER_BOUND} "
+            "AND after_suppressed IS NOT NULL)",
+            name="ck_draft_detection_changes_after",
+        ),
+        Index(
+            "ix_draft_detection_changes_import_raw",
+            "detection_import_id",
+            "raw_detection_id",
+        ),
+    )
+
+    edit_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_detection_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_import_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    before_override_exists: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    before_display_track_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    before_suppressed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    after_override_exists: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    after_display_track_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    after_suppressed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    edit: Mapped["DraftIdentityEdit"] = relationship(
+        back_populates="changes",
+        foreign_keys=[edit_id, detection_import_id],
+        overlaps="raw_detection",
+    )
+    raw_detection: Mapped["RawDetection"] = relationship(
+        foreign_keys=[raw_detection_id, detection_import_id], overlaps="changes,edit"
+    )
+
+
+class DetectionSnapshot(Base):
+    """Immutable submit-time detection and pose metadata snapshot."""
+
+    __tablename__ = "detection_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "detection_import_id",
+            "source_edit_version",
+            name="uq_detection_snapshots_import_version",
+        ),
+        UniqueConstraint("id", "detection_import_id", name="uq_detection_snapshots_id_import"),
+        CheckConstraint("source_edit_version >= 0", name="ck_detection_snapshots_edit_version"),
+        CheckConstraint("raw_detection_count >= 0", name="ck_detection_snapshots_raw_count"),
+        CheckConstraint(
+            "override_count >= 0 AND override_count <= raw_detection_count",
+            name="ck_detection_snapshots_override_count",
+        ),
+        CheckConstraint("schema_version >= 1", name="ck_detection_snapshots_schema_version"),
+        CheckConstraint("fps > 0", name="ck_detection_snapshots_fps"),
+        CheckConstraint("width > 0 AND height > 0", name="ck_detection_snapshots_dimensions"),
+        CheckConstraint("frame_count >= 0", name="ck_detection_snapshots_frame_count"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    detection_import_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_imports.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_edit_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_detection_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    override_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    fps: Mapped[float] = mapped_column(Float, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    frame_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    keypoint_names: Mapped[list] = mapped_column(JSON, nullable=False)
+    skeleton_edges: Mapped[list] = mapped_column(JSON, nullable=False)
+    raw_digest: Mapped[str] = mapped_column(String(64), default=lambda: "0" * 64, nullable=False)
+    state_digest: Mapped[str] = mapped_column(String(64), default=lambda: "0" * 64, nullable=False)
+    metadata_digest: Mapped[str] = mapped_column(String(64), default=lambda: "0" * 64, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    detection_import: Mapped["DetectionImport"] = relationship(
+        back_populates="detection_snapshots"
+    )
+    states: Mapped[list["DetectionSnapshotState"]] = relationship(
+        back_populates="snapshot", passive_deletes=True, overlaps="raw_detection"
+    )
+    submissions: Mapped[list["Submission"]] = relationship(back_populates="detection_snapshot")
+
+
+class DetectionSnapshotState(Base):
+    """Sparse immutable override rows copied from a draft at submit time."""
+
+    __tablename__ = "detection_snapshot_states"
+    __table_args__ = (
+        PrimaryKeyConstraint("snapshot_id", "raw_detection_id"),
+        ForeignKeyConstraint(
+            ["snapshot_id", "detection_import_id"],
+            ["detection_snapshots.id", "detection_snapshots.detection_import_id"],
+            ondelete="RESTRICT",
+            name="fk_detection_snapshot_states_snapshot_import",
+        ),
+        ForeignKeyConstraint(
+            ["raw_detection_id", "detection_import_id"],
+            ["raw_detections.id", "raw_detections.detection_import_id"],
+            ondelete="RESTRICT",
+            name="fk_detection_snapshot_states_raw_import",
+        ),
+        CheckConstraint(
+            f"display_track_id >= 0 AND display_track_id < {TRACK_ID_UPPER_BOUND}",
+            name="ck_detection_snapshot_states_display",
+        ),
+        Index(
+            "ix_detection_snapshot_states_snapshot_display_suppressed",
+            "snapshot_id",
+            "display_track_id",
+            "suppressed",
+        ),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_detection_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_import_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_imports.id", ondelete="RESTRICT"), nullable=False
+    )
+    display_track_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    snapshot: Mapped["DetectionSnapshot"] = relationship(
+        back_populates="states",
+        foreign_keys=[snapshot_id, detection_import_id],
+        overlaps="raw_detection",
+    )
+    raw_detection: Mapped["RawDetection"] = relationship(
+        foreign_keys=[raw_detection_id, detection_import_id], overlaps="snapshot,states"
+    )
+
+
+class Submission(Base):
+    """Immutable review attempt authority; lifecycle services arrive in Phase 3."""
+
+    __tablename__ = "submissions"
+    __table_args__ = (
+        UniqueConstraint("video_id", "attempt_no", name="uq_submissions_video_attempt"),
+        CheckConstraint("attempt_no >= 1", name="ck_submissions_attempt_no"),
+        CheckConstraint(
+            "source_annotation_version >= 0", name="ck_submissions_annotation_version"
+        ),
+        CheckConstraint("source_media_revision >= 0", name="ck_submissions_media_revision"),
+        CheckConstraint(
+            "status IN ('submitted', 'withdrawn', 'approved', 'rejected', 'superseded')",
+            name="ck_submissions_status",
+        ),
+        CheckConstraint(
+            "length(source_video_sha256) = 64 "
+            "AND source_video_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_submissions_video_sha256",
+        ),
+        CheckConstraint(
+            "length(source_storage_key) > 0 AND substr(source_storage_key, 1, 1) <> '/' "
+            "AND source_storage_key NOT LIKE '%\\%' "
+            "AND instr(source_storage_key, ':') = 0 "
+            "AND source_storage_key NOT LIKE '%//%' "
+            "AND ('/' || source_storage_key || '/') NOT LIKE '%/./%' "
+            "AND ('/' || source_storage_key || '/') NOT LIKE '%/../%'",
+            name="ck_submissions_storage_key",
+        ),
+        Index(
+            "uq_submissions_video_submitted",
+            "video_id",
+            unique=True,
+            sqlite_where=text("status = 'submitted'"),
+        ),
+        Index(
+            "uq_submissions_video_approved",
+            "video_id",
+            unique=True,
+            sqlite_where=text("status = 'approved'"),
+        ),
+        Index("ix_submissions_detection_snapshot_id", "detection_snapshot_id"),
+        Index("ix_submissions_status_submitted_at", "status", "submitted_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    detection_snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("detection_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_annotation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_media_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_video_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_video_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_file_size: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    source_mtime_ns: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    source_device: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    source_inode: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    submitted_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    legacy_backfill: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+
+    video: Mapped["Video"] = relationship(foreign_keys=[video_id])
+    detection_snapshot: Mapped["DetectionSnapshot"] = relationship(
+        back_populates="submissions"
+    )
+    submitter: Mapped[Optional["User"]] = relationship(foreign_keys=[submitted_by])
+    annotations: Mapped[list["SubmissionAnnotation"]] = relationship(
+        back_populates="submission", cascade="all, delete-orphan", passive_deletes=True
+    )
+    review: Mapped[Optional["Review"]] = relationship(
+        back_populates="submission", uselist=False, foreign_keys="Review.submission_id"
+    )
+
+
+class SubmissionAnnotation(Base):
+    """Immutable annotation copy attached to one Submission attempt."""
+
+    __tablename__ = "submission_annotations"
+    __table_args__ = (
+        CheckConstraint(
+            "start_time >= 0 AND end_time > start_time",
+            name="ck_submission_annotations_time_range",
+        ),
+        CheckConstraint(
+            "start_frame >= 0 AND end_frame >= start_frame",
+            name="ck_submission_annotations_frame_range",
+        ),
+        CheckConstraint(
+            "confidence IN ('certain', 'uncertain', 'occluded')",
+            name="ck_submission_annotations_confidence",
+        ),
+        Index(
+            "ix_submission_annotations_submission_category", "submission_id", "category_id"
+        ),
+        Index(
+            "ix_submission_annotations_category_submission", "category_id", "submission_id"
+        ),
+        Index(
+            "uq_submission_annotations_submission_source",
+            "submission_id",
+            "source_annotation_id",
+            unique=True,
+            sqlite_where=text("source_annotation_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    submission_id: Mapped[int] = mapped_column(
+        ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False
+    )
+    source_annotation_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("annotations.id", ondelete="SET NULL"), nullable=True
+    )
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("behavior_categories.id", ondelete="RESTRICT"), nullable=False
+    )
+    category_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_time: Mapped[float] = mapped_column(Float, nullable=False)
+    end_time: Mapped[float] = mapped_column(Float, nullable=False)
+    start_frame: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_frame: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    crop_region: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    mouse_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    submission: Mapped["Submission"] = relationship(back_populates="annotations")
+    source_annotation: Mapped[Optional["Annotation"]] = relationship(
+        foreign_keys=[source_annotation_id]
+    )
+    category: Mapped["BehaviorCategory"] = relationship(foreign_keys=[category_id])
+    clip: Mapped[Optional["Clip"]] = relationship(
+        back_populates="submission_annotation",
+        uselist=False,
+        foreign_keys="Clip.submission_annotation_id",
+    )

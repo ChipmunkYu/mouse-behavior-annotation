@@ -7,16 +7,20 @@
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
-from ..media_jobs import clip_entities_ready, enqueue_media_job, media_dedupe_key
-from ..models import Annotation, BackgroundJob, Clip, Video
+from ..media_jobs import (clip_entities_ready, enqueue_media_job, enqueue_submission_media,
+                          media_dedupe_key, submission_media_dedupe_key)
+from ..models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
 from ..schemas import JobOut, MediaStatusOut
 
 router = APIRouter(tags=["media"])
+logger = logging.getLogger(__name__)
 
 # 触发生成角色：与审核角色一致（reviewer 只可审核与触发，不可改标注）
 _GENERATE_ROLES = {"owner", "admin", "reviewer"}
@@ -59,13 +63,15 @@ def media_status(
 ) -> MediaStatusOut:
     """项目成员可读：当前修订的片段生成进度与该视频对应任务。"""
     video = _get_video_in_project(db, project_id, video_id)
-    revision = video.media_revision
+    submission = db.query(Submission).filter_by(video_id=video.id, status="approved").first()
+    revision = submission.source_media_revision if submission else video.media_revision
     clips = (
         db.query(Clip)
-        .join(Annotation, Annotation.id == Clip.annotation_id)
-        .filter(Annotation.video_id == video.id, Clip.source_revision == revision)
+        .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
+        .filter(SubmissionAnnotation.submission_id == submission.id)
         .all()
-    )
+    ) if submission else db.query(Clip).join(Annotation, Annotation.id == Clip.annotation_id).filter(
+        Annotation.video_id == video.id, Clip.source_revision == revision).all()
     counts = {"total": len(clips), "ready": 0, "processing": 0, "failed": 0, "pending": 0}
     for clip in clips:
         status = clip.status
@@ -74,9 +80,10 @@ def media_status(
         counts[status] = counts.get(status, 0) + 1
     job = (
         db.query(BackgroundJob)
-        .filter(BackgroundJob.dedupe_key == media_dedupe_key(video.id, revision))
+        .filter(BackgroundJob.dedupe_key == submission_media_dedupe_key(submission.id))
         .first()
-    )
+    ) if submission else db.query(BackgroundJob).filter_by(
+        dedupe_key=media_dedupe_key(video.id, revision)).first()
     return MediaStatusOut(
         video_id=video.id,
         revision=revision,
@@ -109,13 +116,21 @@ def generate_media(
             detail="Only owner/admin/reviewer can generate media",
         )
     video = _get_video_in_project(db, project_id, video_id)
-    if video.workflow_status != "approved":
+    submission = db.query(Submission).filter_by(video_id=video.id, status="approved").first()
+    if submission is None and video.workflow_status != "approved":
         raise HTTPException(
             status_code=400,
             detail="Only approved videos can generate media",
         )
-    job = enqueue_media_job(db, video, request.app.state.settings)
-    request.app.state.media_worker.schedule(job.id)
+    if submission is not None:
+        job = enqueue_submission_media(db, submission)
+        db.commit(); db.refresh(job)
+    else:
+        job = enqueue_media_job(db, video, request.app.state.settings)
+    try:
+        request.app.state.media_worker.schedule(job.id)
+    except Exception:
+        logger.exception("Schedule media job %s failed; queued row remains recoverable", job.id)
     db.refresh(job)
     return _to_job_out(job)
 

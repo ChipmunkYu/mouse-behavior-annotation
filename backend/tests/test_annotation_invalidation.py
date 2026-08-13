@@ -210,7 +210,7 @@ def _reach_state(ctx, headers, project, video, reviewer_headers, state):
 
 
 def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
-    for state in ("submitted", "approved", "rejected"):
+    for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
             setup["headers"],
@@ -238,14 +238,14 @@ def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         assert resp.status_code == 201, state
         st = _video_state(ctx, video["id"])
         assert st["workflow_status"] == "draft", state
-        assert st["annotation_revision"] == 2, state
+        assert st["annotation_revision"] == 3, state
         assert st["submitted_at"] is None, state
         assert st["approved_at"] is None, state
         assert st["approved_by"] is None, state
 
 
 def test_patch_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
-    for state in ("submitted", "approved", "rejected"):
+    for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
             setup["headers"],
@@ -262,13 +262,13 @@ def test_patch_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         assert resp.json()["end_time"] == 5.0
         st = _video_state(ctx, video["id"])
         assert st["workflow_status"] == "draft", state
-        assert st["annotation_revision"] == 2, state
+        assert st["annotation_revision"] == 3, state
         assert st["submitted_at"] is None, state
         assert st["approved_at"] is None, state
 
 
 def test_delete_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
-    for state in ("submitted", "approved", "rejected"):
+    for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
             setup["headers"],
@@ -284,7 +284,7 @@ def test_delete_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         assert _delete(ctx, headers, project, video, ann1["id"]).status_code == 204
         st = _video_state(ctx, video["id"])
         assert st["workflow_status"] == "draft", state
-        assert st["annotation_revision"] == 2, state
+        assert st["annotation_revision"] == 4, state
         assert st["submitted_at"] is None, state
         # 另一条标注保留
         with ctx.session_factory() as db:
@@ -294,7 +294,7 @@ def test_delete_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
 # ---------- revision 只增一次 ----------
 
 
-def test_revision_increments_once_and_stays_stable_while_draft(ctx, login_headers):
+def test_each_content_change_increments_once_while_draft_and_noop_stays_stable(ctx, login_headers):
     setup = ctx.make_project_with_video()
     headers, project, categories, video = (
         setup["headers"],
@@ -305,17 +305,21 @@ def test_revision_increments_once_and_stays_stable_while_draft(ctx, login_header
     ann = _annotate(ctx, headers, project, video, categories[0]["id"])
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
 
-    _reach_state(ctx, headers, project, video, None, "submitted")
-    assert _video_state(ctx, video["id"])["annotation_revision"] == 1
-
-    # 首次 PATCH 触发失效：revision 1 → 2
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
     assert _video_state(ctx, video["id"])["annotation_revision"] == 2
+
+    # 首次 PATCH 触发失效：revision 2 → 3
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 3
     assert _video_state(ctx, video["id"])["workflow_status"] == "draft"
 
-    # 已 draft 后连续修改：revision 保持 2，不再递增
+    # 已 draft 后每次实际内容修改仍推进 revision。
     assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 6.0}).status_code == 200
-    assert _video_state(ctx, video["id"])["annotation_revision"] == 2
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 4
+    # 空 PATCH 与同值 PATCH 均为 no-op。
+    assert _patch(ctx, headers, project, video, ann["id"], {}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 6.0}).status_code == 200
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 4
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
@@ -328,13 +332,13 @@ def test_revision_increments_once_and_stays_stable_while_draft(ctx, login_header
         headers=headers,
     )
     assert resp.status_code == 201
-    assert _video_state(ctx, video["id"])["annotation_revision"] == 2
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 5
     assert _delete(ctx, headers, project, video, ann["id"]).status_code == 204
-    assert _video_state(ctx, video["id"])["annotation_revision"] == 2
+    assert _video_state(ctx, video["id"])["annotation_revision"] == 6
 
 
-def test_patch_empty_body_does_not_invalidate(ctx, login_headers):
-    """只含 review_status 之外的"实际字段"缺失时，PATCH 不触发失效。"""
+def test_patch_empty_body_cannot_bypass_submitted_hard_lock(ctx, login_headers):
+    """空 PATCH 同样不得绕过 submitted 硬锁。"""
     setup = ctx.make_project_with_video()
     headers, project, categories, video = (
         setup["headers"],
@@ -346,10 +350,10 @@ def test_patch_empty_body_does_not_invalidate(ctx, login_headers):
     _reach_state(ctx, headers, project, video, None, "submitted")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {})
-    assert resp.status_code == 200
+    assert resp.status_code == 409
     st = _video_state(ctx, video["id"])
     assert st["workflow_status"] == "submitted"
-    assert st["annotation_revision"] == 1
+    assert st["annotation_revision"] == 2
 
 
 # ---------- Clip 行与实体文件删除 ----------
@@ -367,7 +371,7 @@ def test_invalidation_deletes_clip_rows_and_files(ctx, login_headers, tmp_path):
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "a.mp4", "a.jpg", source_revision=1)
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "b.mp4", "b.jpg", source_revision=2)
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    _reach_state(ctx, headers, project, video, None, "submitted")
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
     assert _count_clips(ctx, video["id"]) == 2
 
     assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
@@ -412,8 +416,8 @@ def test_invalidation_only_affects_video_own_clips(ctx, login_headers, tmp_path)
     _add_clip(ctx, tmp_path, project["id"], ann1["id"], "v1.mp4", "v1.jpg")
     _add_clip(ctx, tmp_path, project["id"], ann2["id"], "v2.mp4", "v2.jpg")
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    _reach_state(ctx, headers, project, video, None, "submitted")
-    _reach_state(ctx, headers, project, video2, None, "submitted")
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
+    _reach_state(ctx, headers, project, video2, reviewer_headers, "rejected")
 
     assert _patch(ctx, headers, project, video, ann1["id"], {"end_time": 9.0}).status_code == 200
 
@@ -464,7 +468,7 @@ def test_out_of_bounds_paths_not_deleted_but_recorded(ctx, login_headers, tmp_pa
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "../outside-traversal.txt", "ok2.jpg", source_revision=2)
 
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    _reach_state(ctx, headers, project, video, None, "submitted")
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
     assert resp.status_code == 200
@@ -498,7 +502,7 @@ def test_file_delete_failure_recorded_without_blocking(ctx, login_headers, tmp_p
     # clip 路径指向一个目录 → unlink 必然失败（OSError）
     _add_clip(ctx, tmp_path, project["id"], ann["id"], "dirclip.mp4", "ok.jpg", clip_as_dir=True)
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
-    _reach_state(ctx, headers, project, video, None, "submitted")
+    _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
 
     resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
     assert resp.status_code == 200  # 删除失败不阻断请求

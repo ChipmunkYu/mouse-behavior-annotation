@@ -3,9 +3,9 @@
 审核工作流联动（批次 3）：
 - 标注写入（创建/修改/删除）仅 owner/admin/annotator 角色可执行；reviewer 只审核不可改标注。
 - 创建标注固定 `review_status=pending`；用户直接写 review_status 一律 422（创建/更新均拒绝）。
-- 视频处于 submitted/approved/rejected 时，任何标注写入都先使视频回到 draft：
-  `annotation_revision +1`、清空 submitted/approved 字段，并删除该视频所有 Clip 记录及
-  对应实体 clip/thumbnail 文件，Review 历史保留。已处于 draft 时不再递增修订号。
+- 每次实际标注内容写入都使 `annotation_revision +1`；媒体区间/crop 实际变化时另使
+  `media_revision +1`。非 draft 视频同时回到 draft 并执行审核/Clip 失效清理；draft
+  视频不重复清理，但修订号仍推进。
 - 实体文件删除策略（单机原型，见 `_cleanup_files`）：DB 事务先行提交，再删除实体文件；
   删除失败/越界路径绝不无声——写入 `data_dir/cleanup-issues.log`（JSONL）并记入应用日志，
   越界路径一律不删除。
@@ -26,19 +26,16 @@ from ..config import Settings
 from ..cleanup_io import append_cleanup_issues, remove_checked, safe_path
 from ..database import get_db
 from ..deps import project_access
-from ..export_jobs import _event_record
+from ..effective_detections import has_effective_detection
 from ..models import (
     Annotation,
     BehaviorCategory,
     Clip,
-    CorrectedDetectionAssignment,
-    CorrectedTrack,
     DetectionImport,
-    RawDetection,
-    SuppressionDetection,
     Video,
 )
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
+from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["annotations"])
 
@@ -59,6 +56,32 @@ EDITABLE_FIELDS = (
     "detection_import_revision",
     "identity_revision",
 )
+
+
+def _legacy_event_record(annotation: Annotation, clip_file: str | None = None) -> dict:
+    """Serialize the legacy single-video export contract.
+
+    This compatibility representation intentionally stays at the legacy route boundary; the
+    Submission-authority project ZIP has its own independent four-file contract.
+    """
+    return {
+        "annotation_id": annotation.id,
+        "video_id": f"video_{annotation.video_id}",
+        "clip_file": clip_file,
+        "start_time": annotation.start_time,
+        "end_time": annotation.end_time,
+        "start_frame": annotation.start_frame,
+        "end_frame": annotation.end_frame,
+        "behavior": annotation.category.name if annotation.category else None,
+        "mouse_ids": annotation.mouse_ids or [],
+        "detection_import_revision": annotation.detection_import_revision,
+        "identity_revision": annotation.identity_revision,
+        "crop_region": annotation.crop_region,
+        "confidence": annotation.confidence,
+        "annotator": annotation.annotator.username if annotation.annotator else None,
+        "reviewer": annotation.reviewer.username if annotation.reviewer else None,
+        "review_status": annotation.review_status,
+    }
 
 
 def _validate_interval(
@@ -107,32 +130,9 @@ def _has_unsuppressed_detections(
     end_frame: int,
     identity_revision: int,
 ) -> bool:
-    count = (
-        db.query(RawDetection)
-        .join(
-            CorrectedDetectionAssignment,
-            CorrectedDetectionAssignment.raw_detection_id == RawDetection.id,
-        )
-        .join(
-            CorrectedTrack,
-            CorrectedTrack.id == CorrectedDetectionAssignment.corrected_track_id,
-        )
-        .outerjoin(
-            SuppressionDetection,
-            SuppressionDetection.raw_detection_id == RawDetection.id,
-        )
-        .filter(
-            RawDetection.detection_import_id == imp_id,
-            CorrectedTrack.active == True,
-            CorrectedTrack.display_track_id == display_track_id,
-            RawDetection.frame_index >= start_frame,
-            RawDetection.frame_index <= end_frame,
-            SuppressionDetection.raw_detection_id == None,
-            CorrectedDetectionAssignment.identity_revision == identity_revision,
-        )
-        .count()
+    return has_effective_detection(
+        db, imp_id, display_track_id, start_frame, end_frame
     )
-    return count > 0
 
 
 def _validate_mouse_ids(
@@ -158,25 +158,13 @@ def _validate_mouse_ids(
         )
 
     for tid in normalized:
-        track = (
-            db.query(CorrectedTrack)
-            .filter(
-                CorrectedTrack.detection_import_id == imp.id,
-                CorrectedTrack.display_track_id == tid,
-                CorrectedTrack.active == True,
-            )
-            .first()
-        )
-        if track is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Track ID {tid} is not an active corrected track in the current detection import",
-            )
-
         if not _has_unsuppressed_detections(db, imp.id, tid, start_frame, end_frame, identity_revision):
             raise HTTPException(
                 status_code=400,
-                detail=f"Track ID {tid} has no unsuppressed detections in frame range [{start_frame}, {end_frame}]",
+                detail=(
+                    f"Track ID {tid} is not an active corrected track or has no unsuppressed "
+                    f"detections in frame range [{start_frame}, {end_frame}]"
+                ),
             )
 
 
@@ -223,7 +211,7 @@ def _resolve_stored_file(
 
 
 def _invalidate_video(db: Session, video: Video, settings: Settings, *, increment_media: bool = True) -> _InvalidationPlan:
-    """视频非 draft 时的失效处理（与标注写入同一事务，由调用方统一 commit）。
+    """标注内容变更的修订推进与非 draft 工作流失效处理。
 
     - 使视频回到 draft；annotation_revision +1；清空 submitted/approved 字段。
     - 若 `increment_media=True`（时间/帧/crop_region 变化）：递增 media_revision，
@@ -233,10 +221,14 @@ def _invalidate_video(db: Session, video: Video, settings: Settings, *, incremen
     - 返回实体文件清理计划：位于 clips_dir/thumbnails_dir 内的文件待删除；
       越界路径进入 `issues` 只记录不删除。
     - Review 历史保留（不删除任何 Review 行）。
-    已处于 draft 时不做任何变更（修订号不重复递增）。
+    已处于 draft 时不重复执行工作流/Clip 清理，但仍推进相应修订号。
     """
     plan = _InvalidationPlan()
-    if video.workflow_status == "draft":
+    was_draft = video.workflow_status == "draft"
+    video.annotation_revision += 1
+    if increment_media:
+        video.media_revision += 1
+    if was_draft:
         return plan
     if increment_media:
         clips = (
@@ -277,9 +269,7 @@ def _invalidate_video(db: Session, video: Video, settings: Settings, *, incremen
                         }
                     )
             db.delete(clip)
-        video.media_revision += 1
     video.workflow_status = "draft"
-    video.annotation_revision += 1
     video.submitted_at = None
     video.approved_at = None
     video.approved_by = None
@@ -389,55 +379,54 @@ def create_annotation(
     db: Session = Depends(get_db),
 ) -> AnnotationOut:
     _require_editor(access[1])
-    video = _get_video_in_project(db, project_id, video_id)
+    observed = _get_video_in_project(db, project_id, video_id)
+    observed_import = _get_active_import(db, video_id)
+    with video_write_gate(
+        db, project_id=project_id, video_id=video_id,
+        expected_active_import_id=observed_import.id if observed_import else None,
+        expected_detection_revision=observed.detection_import_revision,
+        expected_edit_version=observed_import.edit_version if observed_import else None,
+        expected_annotation_revision=observed.annotation_revision,
+    ) as state:
+        video = state.video
+        category = _get_category_in_project(db, project_id, body.category_id)
+        if not category.is_active:
+            raise HTTPException(status_code=400, detail="Category is disabled")
+        if body.confidence not in VALID_CONFIDENCE:
+            raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
+        _validate_interval(body.start_time, body.end_time, body.start_frame, body.end_frame)
 
-    category = _get_category_in_project(db, project_id, body.category_id)
-    if not category.is_active:
-        raise HTTPException(status_code=400, detail="Category is disabled")
-    if body.confidence not in VALID_CONFIDENCE:
-        raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
-    _validate_interval(body.start_time, body.end_time, body.start_frame, body.end_frame)
+        imp = state.detection_import
+        mouse_ids: list[int] = []
+        mouse_id_status = "needs_mouse_ids"
+        di_rev = imp.revision if imp else 0
+        id_rev = video.identity_revision
+        if body.mouse_ids is not None:
+            if imp is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot specify mouse_ids without an active detection import",
+                )
+            deduped = sorted(set(body.mouse_ids))
+            _validate_mouse_ids(db, imp, deduped, body.start_frame, body.end_frame, category, id_rev)
+            mouse_ids = deduped
+            mouse_id_status = "valid"
 
-    imp = _get_active_import(db, video_id)
-    mouse_ids: list[int] = []
-    mouse_id_status = "needs_mouse_ids"
-    di_rev = imp.revision if imp else 0
-    id_rev = video.identity_revision
-
-    if body.mouse_ids is not None:
-        if imp is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot specify mouse_ids without an active detection import",
-            )
-        deduped = sorted(set(body.mouse_ids))
-        _validate_mouse_ids(db, imp, deduped, body.start_frame, body.end_frame, category, id_rev)
-        mouse_ids = deduped
-        mouse_id_status = "valid"
-
-    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
-
-    annotation = Annotation(
-        video_id=video_id,
-        annotator_id=access[1].user_id,
-        category_id=category.id,
-        start_time=body.start_time,
-        end_time=body.end_time,
-        start_frame=body.start_frame,
-        end_frame=body.end_frame,
-        confidence=body.confidence,
-        review_status="pending",
-        crop_region=body.crop_region,
-        mouse_ids=mouse_ids,
-        mouse_id_status=mouse_id_status,
-        detection_import_revision=di_rev,
-        identity_revision=id_rev,
-    )
-    db.add(annotation)
-    db.commit()
+        plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
+        annotation = Annotation(
+            video_id=video_id, annotator_id=access[1].user_id, category_id=category.id,
+            start_time=body.start_time, end_time=body.end_time,
+            start_frame=body.start_frame, end_frame=body.end_frame,
+            confidence=body.confidence, review_status="pending", crop_region=body.crop_region,
+            mouse_ids=mouse_ids, mouse_id_status=mouse_id_status,
+            detection_import_revision=di_rev, identity_revision=id_rev,
+        )
+        db.add(annotation)
+        db.commit()
+        db.refresh(annotation)
+        result = _to_out(annotation)
     _cleanup_files(plan, request.app.state.settings)
-    db.refresh(annotation)
-    return _to_out(annotation)
+    return result
 
 
 @router.get("/api/projects/{project_id}/videos/{video_id}/annotations/export")
@@ -459,7 +448,7 @@ def export_annotations(
     for ann in rows:
         ready_clips = [clip for clip in ann.clips if clip.status == "ready" and clip.clip_path]
         clip_file = max(ready_clips, key=lambda clip: clip.source_revision).clip_path if ready_clips else None
-        events.append(_event_record(ann, clip_file=clip_file))
+        events.append(_legacy_event_record(ann, clip_file=clip_file))
     return events
 
 
@@ -477,93 +466,95 @@ def update_annotation(
     db: Session = Depends(get_db),
 ) -> AnnotationOut:
     _require_editor(access[1])
-    video = _get_video_in_project(db, project_id, video_id)
-    annotation = _get_annotation_in_video(db, video_id, annotation_id)
-    if not _can_modify(access[1].role, annotation, access[1].user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the annotator or project owner/admin can modify this annotation",
-        )
-
-    # 如果客户端提供了 revisions，与当前 annotation 的存储值比较；
-    # 不匹配则返回 409（乐观锁）
-    if body.detection_import_revision is not None:
-        if body.detection_import_revision != annotation.detection_import_revision:
+    observed = _get_video_in_project(db, project_id, video_id)
+    observed_import = _get_active_import(db, video_id)
+    with video_write_gate(
+        db, project_id=project_id, video_id=video_id,
+        expected_active_import_id=observed_import.id if observed_import else None,
+        expected_detection_revision=observed.detection_import_revision,
+        expected_edit_version=observed_import.edit_version if observed_import else None,
+        expected_annotation_revision=observed.annotation_revision,
+    ) as state:
+        video = state.video
+        annotation = _get_annotation_in_video(db, video_id, annotation_id)
+        if not _can_modify(access[1].role, annotation, access[1].user_id):
             raise HTTPException(
-                status_code=409,
-                detail=f"detection_import_revision mismatch: expected {annotation.detection_import_revision}, got {body.detection_import_revision}",
+                status_code=403,
+                detail="Only the annotator or project owner/admin can modify this annotation",
             )
-    if body.identity_revision is not None:
-        if body.identity_revision != annotation.identity_revision:
-            raise HTTPException(
-                status_code=409,
-                detail=f"identity_revision mismatch: expected {annotation.identity_revision}, got {body.identity_revision}",
-            )
+        if (body.detection_import_revision is not None
+                and body.detection_import_revision != annotation.detection_import_revision):
+            raise HTTPException(status_code=409, detail=(
+                f"detection_import_revision mismatch: expected {annotation.detection_import_revision}, "
+                f"got {body.detection_import_revision}"
+            ))
+        if body.identity_revision is not None and body.identity_revision != annotation.identity_revision:
+            raise HTTPException(status_code=409, detail=(
+                f"identity_revision mismatch: expected {annotation.identity_revision}, got {body.identity_revision}"
+            ))
+        if body.category_id is not None:
+            category = _get_category_in_project(db, project_id, body.category_id)
+            if not category.is_active:
+                raise HTTPException(status_code=400, detail="Category is disabled")
+        if body.confidence is not None and body.confidence not in VALID_CONFIDENCE:
+            raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
 
-    if body.category_id is not None:
-        category = _get_category_in_project(db, project_id, body.category_id)
-        if not category.is_active:
-            raise HTTPException(status_code=400, detail="Category is disabled")
-    if body.confidence is not None and body.confidence not in VALID_CONFIDENCE:
-        raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
+        changed_fields = {
+            field for field in ("category_id", "start_time", "end_time", "start_frame",
+                                "end_frame", "confidence", "crop_region")
+            if getattr(body, field) is not None
+            and getattr(body, field) != getattr(annotation, field)
+        }
+        normalized_mouse_ids = (sorted(set(body.mouse_ids)) if body.mouse_ids is not None else None)
+        if normalized_mouse_ids is not None and normalized_mouse_ids != (annotation.mouse_ids or []):
+            changed_fields.add("mouse_ids")
+        media_changed = bool(changed_fields.intersection(
+            {"start_time", "end_time", "start_frame", "end_frame", "crop_region"}))
+        plan = (_invalidate_video(db, video, request.app.state.settings, increment_media=media_changed)
+                if changed_fields else _InvalidationPlan())
+        if body.category_id is not None:
+            annotation.category_id = body.category_id
+        if body.confidence is not None:
+            annotation.confidence = body.confidence
+        if body.crop_region is not None:
+            annotation.crop_region = body.crop_region
+        for field in ("start_time", "end_time", "start_frame", "end_frame"):
+            value = getattr(body, field)
+            if value is not None:
+                setattr(annotation, field, value)
+        _validate_interval(annotation.start_time, annotation.end_time,
+                           annotation.start_frame, annotation.end_frame)
 
-    has_editable_change = any(getattr(body, field) is not None for field in EDITABLE_FIELDS)
-    media_changed = has_editable_change and any(
-        getattr(body, field) is not None
-        for field in ("start_time", "end_time", "start_frame", "end_frame", "crop_region")
-    )
-    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=media_changed) if has_editable_change else _InvalidationPlan()
-
-    if body.category_id is not None:
-        annotation.category_id = body.category_id
-    if body.confidence is not None:
-        annotation.confidence = body.confidence
-    if body.crop_region is not None:
-        annotation.crop_region = body.crop_region
-
-    for field in ("start_time", "end_time", "start_frame", "end_frame"):
-        value = getattr(body, field)
-        if value is not None:
-            setattr(annotation, field, value)
-
-    _validate_interval(
-        annotation.start_time,
-        annotation.end_time,
-        annotation.start_frame,
-        annotation.end_frame,
-    )
-
-    if body.mouse_ids is not None:
-        imp = _get_active_import(db, video_id)
-        if imp is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot specify mouse_ids without an active detection import",
-            )
-        cat = (
-            db.get(BehaviorCategory, body.category_id)
-            if body.category_id is not None
-            else annotation.category
-        )
-        deduped = sorted(set(body.mouse_ids))
-        _validate_mouse_ids(db, imp, deduped, annotation.start_frame, annotation.end_frame, cat, video.identity_revision)
-        annotation.mouse_ids = deduped
-        annotation.mouse_id_status = "valid"
-        annotation.detection_import_revision = imp.revision
-        annotation.identity_revision = video.identity_revision
-    elif (body.category_id is not None or body.start_frame is not None or body.end_frame is not None) and annotation.mouse_ids:
-        imp = _get_active_import(db, video_id)
-        if imp is not None:
-            cat = db.get(BehaviorCategory, body.category_id) if body.category_id is not None else annotation.category
-            try:
-                _validate_mouse_ids(db, imp, annotation.mouse_ids, annotation.start_frame, annotation.end_frame, cat, video.identity_revision)
-            except HTTPException:
-                annotation.mouse_id_status = "needs_mouse_ids"
-
-    db.commit()
+        if body.mouse_ids is not None:
+            imp = state.detection_import
+            if imp is None:
+                raise HTTPException(status_code=400,
+                                    detail="Cannot specify mouse_ids without an active detection import")
+            cat = (db.get(BehaviorCategory, body.category_id)
+                   if body.category_id is not None else annotation.category)
+            deduped = normalized_mouse_ids
+            _validate_mouse_ids(db, imp, deduped, annotation.start_frame,
+                                annotation.end_frame, cat, video.identity_revision)
+            annotation.mouse_ids = deduped
+            annotation.mouse_id_status = "valid"
+            annotation.detection_import_revision = imp.revision
+            annotation.identity_revision = video.identity_revision
+        elif ((body.category_id is not None or body.start_frame is not None or body.end_frame is not None)
+              and annotation.mouse_ids):
+            imp = state.detection_import
+            if imp is not None:
+                cat = (db.get(BehaviorCategory, body.category_id)
+                       if body.category_id is not None else annotation.category)
+                try:
+                    _validate_mouse_ids(db, imp, annotation.mouse_ids, annotation.start_frame,
+                                        annotation.end_frame, cat, video.identity_revision)
+                except HTTPException:
+                    annotation.mouse_id_status = "needs_mouse_ids"
+        db.commit()
+        db.refresh(annotation)
+        result = _to_out(annotation)
     _cleanup_files(plan, request.app.state.settings)
-    db.refresh(annotation)
-    return _to_out(annotation)
+    return result
 
 
 @router.delete(
@@ -579,14 +570,23 @@ def delete_annotation(
     db: Session = Depends(get_db),
 ) -> None:
     _require_editor(access[1])
-    video = _get_video_in_project(db, project_id, video_id)
-    annotation = _get_annotation_in_video(db, video_id, annotation_id)
-    if not _can_modify(access[1].role, annotation, access[1].user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the annotator or project owner/admin can delete this annotation",
-        )
-    plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
-    db.delete(annotation)
-    db.commit()
+    observed = _get_video_in_project(db, project_id, video_id)
+    observed_import = _get_active_import(db, video_id)
+    with video_write_gate(
+        db, project_id=project_id, video_id=video_id,
+        expected_active_import_id=observed_import.id if observed_import else None,
+        expected_detection_revision=observed.detection_import_revision,
+        expected_edit_version=observed_import.edit_version if observed_import else None,
+        expected_annotation_revision=observed.annotation_revision,
+    ) as state:
+        video = state.video
+        annotation = _get_annotation_in_video(db, video_id, annotation_id)
+        if not _can_modify(access[1].role, annotation, access[1].user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the annotator or project owner/admin can delete this annotation",
+            )
+        plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
+        db.delete(annotation)
+        db.commit()
     _cleanup_files(plan, request.app.state.settings)

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -38,8 +39,8 @@ def _stderr_text(stderr: str | bytes | None) -> str:
 
 
 def format_time(value: float) -> str:
-    """秒 → 命令行时间文本：保留两位小数并去掉多余尾零（0.5 → '0.5'）。"""
-    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    """秒 → 命令行时间文本；纳秒级小数避免 30/60 FPS 边界量化。"""
+    text = f"{value:.9f}".rstrip("0").rstrip(".")
     return text if text else "0"
 
 
@@ -47,12 +48,17 @@ class MediaProcessor(Protocol):
     """媒体执行器协议：测试可注入 FakeMediaProcessor / 其它替换实现。"""
 
     def render_clip(
-        self, *, input_path: str, start: float, end: float, output_path: str
+        self, *, input_path: str, start: float, end: float, output_path: str,
+        crop: tuple[int, int, int, int] | None = None,
     ) -> None:
         """把 input_path 的 [start, end) 秒片段重编码为 H.264 MP4 写至 output_path（临时文件）。"""
 
-    def render_thumbnail(self, *, input_path: str, at: float, output_path: str) -> None:
+    def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
+                         crop: tuple[int, int, int, int] | None = None) -> None:
         """在 at 秒处抽取一帧 JPEG 缩略图写至 output_path（临时文件）。"""
+
+    def probe_clip(self, path: str, *, expected: dict | None = None) -> dict:
+        """Return decoded video fps, dimensions and frame count; failure is fatal."""
 
 
 class FfmpegMediaProcessor:
@@ -76,7 +82,8 @@ class FfmpegMediaProcessor:
         self.map_audio = map_audio
 
     def build_clip_command(
-        self, input_path: str, start: float, end: float, output_path: str
+        self, input_path: str, start: float, end: float, output_path: str,
+        crop: tuple[int, int, int, int] | None = None,
     ) -> list[str]:
         """精确重编码命令：-ss 前置输入定位（重编码下帧精确）+ libx264 + yuv420p + faststart。"""
         cmd = [
@@ -104,14 +111,18 @@ class FfmpegMediaProcessor:
         if self.map_audio:
             # 可选音频映射（? 后缀：无音轨不报错），aac 编码
             cmd += ["-map", "0:a:0?", "-c:a", "aac"]
+        if crop is not None:
+            x, y, w, h = crop
+            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
         cmd.append(output_path)
         return cmd
 
     def build_thumbnail_command(
-        self, input_path: str, at: float, output_path: str
+        self, input_path: str, at: float, output_path: str,
+        crop: tuple[int, int, int, int] | None = None,
     ) -> list[str]:
         """片段中点抽帧 JPEG 缩略图命令。"""
-        return [
+        cmd = [
             self.ffmpeg,
             "-y",
             "-ss",
@@ -122,8 +133,12 @@ class FfmpegMediaProcessor:
             "1",
             "-q:v",
             "2",
-            output_path,
         ]
+        if crop is not None:
+            x, y, w, h = crop
+            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+        cmd.append(output_path)
+        return cmd
 
     def _run(self, cmd: list[str]) -> None:
         try:
@@ -155,10 +170,33 @@ class FfmpegMediaProcessor:
                 f"{truncate_text(_stderr_text(proc.stderr))}"
             )
 
-    def render_clip(
-        self, *, input_path: str, start: float, end: float, output_path: str
-    ) -> None:
-        self._run(self.build_clip_command(str(input_path), start, end, str(output_path)))
+    def probe_clip(self, path: str, *, expected: dict | None = None) -> dict:
+        cmd = [self.ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
+               "-show_entries", "stream=width,height,avg_frame_rate,nb_read_frames:format=duration",
+               "-of", "json", path]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=self.timeout, shell=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MediaCommandError(f"ffprobe failed: {exc}") from exc
+        if proc.returncode != 0:
+            raise MediaCommandError(f"ffprobe failed: {truncate_text(proc.stderr)}")
+        try:
+            document = json.loads(proc.stdout)
+            stream = document["streams"][0]
+            numerator, denominator = stream["avg_frame_rate"].split("/", 1)
+            return {"fps": float(numerator) / float(denominator), "width": int(stream["width"]),
+                    "height": int(stream["height"]), "frame_count": int(stream["nb_read_frames"]),
+                    "duration": float(document["format"]["duration"])}
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MediaCommandError("ffprobe returned incomplete video properties") from exc
 
-    def render_thumbnail(self, *, input_path: str, at: float, output_path: str) -> None:
-        self._run(self.build_thumbnail_command(str(input_path), at, str(output_path)))
+    def render_clip(
+        self, *, input_path: str, start: float, end: float, output_path: str,
+        crop: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        self._run(self.build_clip_command(str(input_path), start, end, str(output_path), crop))
+
+    def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
+                         crop: tuple[int, int, int, int] | None = None) -> None:
+        self._run(self.build_thumbnail_command(str(input_path), at, str(output_path), crop))

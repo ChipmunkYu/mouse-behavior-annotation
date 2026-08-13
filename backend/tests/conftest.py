@@ -105,6 +105,8 @@ class FakeMediaProcessor:
     def __init__(self) -> None:
         self.clip_calls: list[tuple[str, float, float, str]] = []
         self.thumb_calls: list[tuple[str, float, str]] = []
+        self.clip_crops: list[tuple | None] = []
+        self.thumb_crops: list[tuple | None] = []
         self.fail_clips: set[int] = set()
         self.fail_thumbnails: set[int] = set()
 
@@ -116,8 +118,9 @@ class FakeMediaProcessor:
         end = name.index("_rev", start)
         return int(name[start:end])
 
-    def render_clip(self, *, input_path: str, start: float, end: float, output_path: str) -> None:
+    def render_clip(self, *, input_path: str, start: float, end: float, output_path: str, crop=None) -> None:
         self.clip_calls.append((input_path, start, end, output_path))
+        self.clip_crops.append(crop)
         ann_id = self._annotation_id(output_path)
         if ann_id in self.fail_clips:
             raise MediaCommandError(
@@ -126,8 +129,9 @@ class FakeMediaProcessor:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_bytes(b"FAKE-MP4-DATA")
 
-    def render_thumbnail(self, *, input_path: str, at: float, output_path: str) -> None:
+    def render_thumbnail(self, *, input_path: str, at: float, output_path: str, crop=None) -> None:
         self.thumb_calls.append((input_path, at, output_path))
+        self.thumb_crops.append(crop)
         ann_id = self._annotation_id(output_path)
         if ann_id in self.fail_thumbnails:
             raise MediaCommandError(
@@ -135,6 +139,11 @@ class FakeMediaProcessor:
             )
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_bytes(b"FAKE-JPG-DATA")
+
+    def probe_clip(self, path: str, *, expected: dict | None = None) -> dict:
+        if expected is None:
+            raise MediaCommandError("fake probe requires expected media properties")
+        return {**expected, "duration": expected["frame_count"] / expected["fps"]}
 
 
 class MediaAppContext(AppContext):
