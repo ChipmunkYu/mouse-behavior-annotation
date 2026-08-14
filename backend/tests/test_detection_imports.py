@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1382,6 +1383,31 @@ def test_replace_bumps_revision_and_resets_annotations(ctx, login_headers):
 # ---------------------------------------------------------------------------
 # Fix 5: Import size limits
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("role", "filename"),
+    [("video", "clip.mp4"), ("tracks", "tracks.jsonl"), ("metadata", "metadata.json")],
+)
+def test_batch_upload_disk_reserve_returns_507_and_cleans_part(
+    ctx, login_headers, monkeypatch, role, filename
+):
+    from app.routers import detection_imports as imports_router
+
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    monkeypatch.setattr(
+        imports_router.shutil, "disk_usage",
+        lambda _path: SimpleNamespace(total=100, used=100, free=0),
+    )
+
+    response = _upload_file(
+        ctx.client, pid, batch["id"], role, filename, b"content", headers
+    )
+    assert response.status_code == 507
+    settings = ctx.client.app.state.settings
+    target = settings.videos_dir if role == "video" else settings.detection_imports_dir
+    assert list(target.glob("*.part")) == []
+
 
 def test_oversized_file_rejected(ctx, login_headers, monkeypatch):
     """超过大小限制的文件上传应返回 413。"""

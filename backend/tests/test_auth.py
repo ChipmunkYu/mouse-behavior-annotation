@@ -21,6 +21,24 @@ def test_login_unknown_user(ctx):
     assert resp.status_code == 401
 
 
+def test_auth_me_returns_current_user(ctx, login_headers):
+    resp = ctx.client.get("/api/auth/me", headers=login_headers())
+    assert resp.status_code == 200
+    assert resp.json()["id"] == 1
+    assert resp.json()["username"] == "demo"
+
+
+def test_auth_me_without_token_returns_401(ctx):
+    assert ctx.client.get("/api/auth/me").status_code == 401
+
+
+def test_auth_me_with_invalid_token_returns_401(ctx):
+    resp = ctx.client.get(
+        "/api/auth/me", headers={"Authorization": "Bearer invalid-token"}
+    )
+    assert resp.status_code == 401
+
+
 def test_projects_requires_auth(ctx):
     assert ctx.client.get("/api/projects").status_code == 401
 

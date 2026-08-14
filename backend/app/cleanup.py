@@ -291,6 +291,7 @@ def run_retention_cleanup(
 
     for root, pattern, directories in (
         (settings.videos_dir, _VIDEO_TEMP, False),
+        (settings.detection_imports_dir, _VIDEO_TEMP, False),
         (settings.clips_dir, _CLIP_TEMP, False),
         (settings.thumbnails_dir, _THUMB_TEMP, False),
         (settings.exports_dir, _EXPORT_STAGING, True),

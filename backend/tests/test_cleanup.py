@@ -29,6 +29,7 @@ def _settings(tmp_path: Path) -> Settings:
         settings.clips_dir,
         settings.thumbnails_dir,
         settings.exports_dir,
+        settings.detection_imports_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
     db_mod.configure_engine(settings.resolved_database_url)
@@ -75,22 +76,25 @@ def test_known_temps_orphan_and_original_video_retention(tmp_path):
     original = settings.videos_dir / "original.mp4"
     unknown = settings.clips_dir / "random.part"
     media_temp = settings.clips_dir / (".clip_1_rev1." + "c" * 32 + ".mp4.part")
+    detection_temp = settings.detection_imports_dir / ("d" * 32 + ".part")
+    outside_detection_temp = tmp_path.parent / ("e" * 32 + ".part")
     orphan = settings.exports_dir / "export_project_9_8.zip"
     referenced = settings.exports_dir / "export_project_9_9.zip"
     staging = settings.exports_dir / ".export_9_8.staging"
     staging.mkdir()
-    for path in (old_temp, boundary, original, unknown, media_temp, orphan, referenced):
+    for path in (old_temp, boundary, original, unknown, media_temp, detection_temp, outside_detection_temp, orphan, referenced):
         path.write_bytes(b"x")
-    for path in (old_temp, media_temp, orphan, staging):
+    for path in (old_temp, media_temp, detection_temp, outside_detection_temp, orphan, staging):
         _age(path, now, 25)
     _age(boundary, now, 24)
     with db_mod.SessionLocal() as db:
         db.add(BackgroundJob(job_type="export", status="succeeded", result_path=referenced.name))
         db.commit()
         run_retention_cleanup(db, settings, now=now)
-    assert not old_temp.exists() and not media_temp.exists() and not orphan.exists()
+    assert not old_temp.exists() and not media_temp.exists() and not detection_temp.exists() and not orphan.exists()
     assert not staging.exists()
     assert boundary.exists() and original.exists() and unknown.exists() and referenced.exists()
+    assert outside_detection_temp.exists()
 
 
 def test_issue_retry_requires_program_name_and_db_proof(tmp_path, monkeypatch):

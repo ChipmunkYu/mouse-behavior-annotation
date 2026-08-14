@@ -9,6 +9,7 @@ import io
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -748,7 +749,10 @@ async def upload_batch_file(
     _check_non_empty(file)
 
     try:
-        final_path, written = await _atomic_save_async(file, dir_path, suffix, settings.upload_chunk_size)
+        final_path, written = await _atomic_save_async(
+            file, dir_path, suffix, settings.upload_chunk_size,
+            settings.upload_disk_reserve_bytes,
+        )
     except HTTPException:
         raise
     except Exception:
@@ -788,8 +792,15 @@ async def upload_batch_file(
     return batch
 
 
-async def _atomic_save_async(file: UploadFile, dir_path: Path, suffix: str, chunk_size: int) -> tuple[Path, int]:
-    """异步版本的原子保存。"""
+def _check_upload_disk_space(dir_path: Path, reserve: int, extra: int = 0) -> None:
+    if shutil.disk_usage(dir_path).free - reserve < extra:
+        raise HTTPException(status_code=507, detail="Insufficient disk space to store upload")
+
+
+async def _atomic_save_async(
+    file: UploadFile, dir_path: Path, suffix: str, chunk_size: int, reserve: int
+) -> tuple[Path, int]:
+    """按块检查容量并原子保存上传。"""
     dir_path.mkdir(parents=True, exist_ok=True)
     uid = uuid4().hex
     temp_path = dir_path / f"{uid}.part"
@@ -798,11 +809,13 @@ async def _atomic_save_async(file: UploadFile, dir_path: Path, suffix: str, chun
     written = 0
     temp_file = None
     try:
+        _check_upload_disk_space(dir_path, reserve)
         temp_file = open(temp_path, "wb")
         while True:
             chunk = await file.read(chunk_size)
             if not chunk:
                 break
+            _check_upload_disk_space(dir_path, reserve, len(chunk))
             temp_file.write(chunk)
             written += len(chunk)
         temp_file.flush()
@@ -1108,8 +1121,14 @@ async def replace_detection_import(
     tracks_final: Path | None = None
     metadata_final: Path | None = None
     try:
-        tracks_final, _tw = await _atomic_save_async(tracks_file, detection_imports_dir, ALLOWED_TRACKS_EXT, settings.upload_chunk_size)
-        metadata_final, _mw = await _atomic_save_async(metadata_file, detection_imports_dir, ALLOWED_METADATA_EXT, settings.upload_chunk_size)
+        tracks_final, _tw = await _atomic_save_async(
+            tracks_file, detection_imports_dir, ALLOWED_TRACKS_EXT,
+            settings.upload_chunk_size, settings.upload_disk_reserve_bytes,
+        )
+        metadata_final, _mw = await _atomic_save_async(
+            metadata_file, detection_imports_dir, ALLOWED_METADATA_EXT,
+            settings.upload_chunk_size, settings.upload_disk_reserve_bytes,
+        )
     except HTTPException:
         if tracks_final is not None:
             _remove_if_exists(tracks_final)
