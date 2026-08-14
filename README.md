@@ -150,6 +150,7 @@ cd /d D:\lab\行为识别\标注网站\backend
 ## 详见
 
 - 生产部署配置、路径边界与执行顺序：`deploy/README.md`
+- 本次部署复盘、从零部署 SOP、运维与回滚：[`deploy/部署复盘与运维指南.md`](deploy/部署复盘与运维指南.md)
 - 后端启动、配置、API 一览与测试：`backend/README.md`
 - 前端功能与技术要点：`frontend/README.md`
 - 需求、数据模型与 P1/P2 边界：`需求文档.md`

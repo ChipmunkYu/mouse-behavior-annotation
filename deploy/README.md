@@ -1,14 +1,14 @@
 # 网站服务器生产部署
 
-本目录提供网站的生产部署配置模板，不代表部署已经执行。唯一服务器依据是仓库外的 `网站服务器文件清单.md`。任何实际服务器命令（包括只读命令）执行前，都必须逐条展示命令、用中文说明用途并获得用户明确确认。
+首次部署、故障复盘、日常运维、发布与回滚详见 [`部署复盘与运维指南.md`](部署复盘与运维指南.md)。
+
+本目录维护网站的生产部署配置模板和操作流程；模板描述不用于断言服务器实时状态。唯一服务器事实依据是仓库外的 `网站服务器文件清单.md`。任何实际服务器命令（包括只读命令）执行前，都必须逐条展示命令、用中文说明用途并获得用户明确确认。
 
 ## 路径与当前边界
 
-- 已确认存在：`/opt/mouse-annotation/`、`/opt/mouse-annotation/releases/`、`/data/mouse-annotation/data/`、`/data/mouse-annotation/backups/`。
-- 计划发布目录：`/opt/mouse-annotation/releases/<commit>/`；尚未创建。
-- 计划软链接：`/opt/mouse-annotation/current`；尚未创建。
-- 计划数据库：`/data/mouse-annotation/data/annotation.db`；尚未创建。
-- Nginx、网站代码、数据库、域名站点和 HTTPS 的实际部署状态以服务器清单为准；本目录只维护部署模板和操作流程。
+- 部署根目录：`/opt/mouse-annotation/`；固定提交发布到 `/opt/mouse-annotation/releases/<commit>/`。
+- 当前版本入口：`/opt/mouse-annotation/current`；运行时数据：`/data/mouse-annotation/data/`；备份目标：`/data/mouse-annotation/backups/`。
+- Nginx、网站代码、数据库、域名站点和 HTTPS 的实际部署状态以服务器清单为准，不在通用命令模板中重复维护当前值。
 
 运行时数据固定放在 `/data/mouse-annotation/data/`，备份目标放在 `/data/mouse-annotation/backups/`；发布代码和每个发布版本自己的虚拟环境放在 `/opt/mouse-annotation/releases/<commit>/`。
 
@@ -31,3 +31,5 @@
 13. 部署完成后按既定策略配置并验证 `/data/mouse-annotation/backups/` 下的数据库一致性备份和媒体备份；未验证前不得声称备份已生效。
 
 回滚时将 `current` 切回已验证 release，并重启单进程服务；涉及数据库版本不兼容时，应先依据对应迁移与备份制定回滚步骤，不能仅切换代码。
+
+完整的上线检查清单、故障定位决策树和本次真实验收证据见 [`部署复盘与运维指南.md`](部署复盘与运维指南.md)。
