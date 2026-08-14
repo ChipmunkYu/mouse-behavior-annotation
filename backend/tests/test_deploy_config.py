@@ -28,6 +28,19 @@ def test_nginx_upload_regex_covers_only_actual_upload_routes():
 
 def test_nginx_auth_limits_hosts_and_buffering_contract():
     config = NGINX.read_text(encoding="utf-8")
+    auth_block = re.search(r"location = /_auth \{(?P<body>.*?)\n    \}", config, re.S)
+    assert auth_block is not None
+    auth_body = auth_block.group("body")
+    assert "internal;" in auth_body
+    assert "client_max_body_size 0;" in auth_body
+    assert "proxy_pass_request_body off;" in auth_body
+    assert 'proxy_set_header Content-Length "";' in auth_body
+    upload_block = re.search(
+        r"location ~ \^/api/projects/[^ ]+ \{(?P<body>.*?)\n    \}", config, re.S
+    )
+    api_block = re.search(r"location /api/ \{(?P<body>.*?)\n    \}", config, re.S)
+    assert upload_block is not None and "client_max_body_size 20g;" in upload_block.group("body")
+    assert api_block is not None and "client_max_body_size 10m;" in api_block.group("body")
     assert "limit_conn_zone $binary_remote_addr zone=upload_per_ip:10m;" in config
     assert "return 308 https://jerrylab.xyz$request_uri;" in config
     assert "location = /api/health" in config
