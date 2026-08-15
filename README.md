@@ -39,6 +39,6 @@ npm run dev
 
 - 正式项目 ZIP 中，每个 `SubmissionAnnotation` 对应一个独立目录，固定包含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`；不包含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。
 - 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
-- 后端最终证据为 `397 passed, 3 skipped`；真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
+- 当前媒体修复此前自动测试为全量 `399 passed, 8 skipped`、聚焦 `63 passed, 5 skipped`；这两项统计早于本次只运行的真实集成测试。本次使用 imageio-ffmpeg `7.1-essentials_build-www.gyan.dev` 运行 `test_media_ffmpeg_integration.py`，结果 `2 passed, 3 skipped`：已真实验证 `.mp4.part`/`.jpg.part` 显式 muxer、缩略图失败不发布最终文件，以及 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。因无 ffprobe，25/30/60 FPS 及 codec、pixel format、尺寸、帧数、时长属性仍未验证；该二进制不是生产服务器 FFmpeg 4.4.2，本修复亦尚未部署。
 - 服务器本机与 SSH 隧道验收不等于完整公网验收；多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成。
 - SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。

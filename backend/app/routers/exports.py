@@ -11,10 +11,12 @@ from ..database import get_db
 from ..deps import project_access
 from ..export_jobs import (
     JOB_TYPE_EXPORT,
+    ExportScheduleError,
     _resolve_within,
     approved_rows,
     enqueue_export_job,
     latest_export_job,
+    schedule_export_job,
 )
 from ..models import BackgroundJob, BehaviorCategory
 from ..schemas import ExportRequest, ExportStatusOut, JobOut, MissingClipOut
@@ -63,7 +65,10 @@ def create_export(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if job is None:
         raise HTTPException(status_code=409, detail="An export is already queued or running")
-    request.app.state.export_worker.schedule(job.id)
+    try:
+        schedule_export_job(db, request.app.state.export_worker, job)
+    except ExportScheduleError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.refresh(job)
     return _job_out(job)
 
