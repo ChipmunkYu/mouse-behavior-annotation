@@ -1,6 +1,7 @@
 # track 修正与行为标注业务逻辑伪代码
-> 面向实现维护者；依据当前 worktree `spatial-annotation` 的代码整理。
-> 本文按最终产品能力描述调用链；《YOLO检测结果接入与track修正设计.md》用于解释契约。代码中保留的历史兼容分支不构成当前产品能力。
+> **历史伪代码，非当前权威。** 本文保留旧实现调用链与回滚脉络。`CorrectedTrack`、`CorrectedDetectionAssignment`（CDA）、`IdentityEdit`、`DetectionSuppression` 和 `SuppressionDetection` 仅是迁移兼容背景，不代表当前运行时 authority。当前权威见[现行架构设计](../设计/检测状态、提交审核与独立行为视频片段导出设计.md)。
+>
+> 历史依据：[旧 YOLO 设计](YOLO检测结果接入与track修正设计.md)。代码中保留的兼容分支不构成当前产品能力。
 ## 1. 目的、范围与术语
 本文覆盖：逐帧检测叠加、行为事件增删改、审核、项目 ZIP 导出，以及 Split、Merge、检测抑制和撤销。
 不覆盖：YOLO 训练、跨视频真实身份、框/关键点坐标编辑、自动 actor/target 推断。
@@ -515,5 +516,5 @@ commit：<100 的 CDA 继续归 ID 8；>=100 的 CDA 改归 ID 39。
 | `frontend/src/pages/ReviewPage.tsx` | `handleReview`、只读事件/修订、审核后媒体状态。 |
 | `frontend/src/pages/ExportPage.tsx` | `handleExport`、4 秒轮询、`handleDownload`、导出范围。 |
 | `frontend/src/api/index.ts` | 所有 wrapper 与 HTTP 路径映射。 |
-| `YOLO检测结果接入与track修正设计.md` | 正式产品契约、当前实现边界与验收标准。 |
+| [旧 YOLO 设计](YOLO检测结果接入与track修正设计.md) | 被替换方案的历史契约、实现边界与回滚背景。 |
 维护时先沿“React 函数 → wrapper → endpoint → internal → model → refresh”链路定位；不要把 display ID 当作跨视频真实身份，也不要通过修改或删除 `RawDetection` 实现 ID 修正。

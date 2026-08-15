@@ -2,7 +2,7 @@
 
 模块化单体的最小后端，服务于多人在线行为标注网站（对应 `../需求文档.md`）。
 
-> 当前技术文档术语遵循 `../项目术语表.md`；代码/API 标识符保持不变。
+> 当前技术文档术语遵循[项目术语表](../项目术语表.md)；现行架构见[检测状态、提交审核与独立行为视频片段导出设计](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md)。代码/API 标识符保持不变。
 
 - 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
@@ -14,7 +14,7 @@
 - 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
   含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
-- YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核、修正后 track 结果与带 `clip_file` 的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
+- YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核，以及每个 `SubmissionAnnotation` 独立四文件的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
 - 正式项目导出是每片段固定 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的四文件 ZIP；单视频 `/annotations/export` 仅为 legacy 兼容 JSON API，两者不是同一契约。
 
 ## 目录结构
@@ -32,7 +32,11 @@ backend/
 │ ├── 0004_background_job_dedupe_attempts.py # 增量：BackgroundJob 幂等去重键 + 重试计数
 │ ├── 0005_detection_import_foundation.py # YOLO 导入、修正后 track、IdentityEdit/抑制及多修订模型
 │ ├── 0006_detection_import_batch_paths.py # 三文件批次及导入文件路径
-│ └── 0007_detection_import_source_relative.py # DetectionImport.source_relative 前向迁移
+│ ├── 0007_detection_import_source_relative.py # DetectionImport.source_relative 前向迁移
+│ ├── 0008_detection_submission_foundation.py # sparse draft、Submission 与 DetectionSnapshot 基础
+│ ├── 0009_submission_media_authority.py # Submission 媒体 authority 与独立片段关系
+│ ├── 0010_submission_integrity_digests.py # snapshot 完整性 digest
+│ └── 0011_immutable_authority_file_identity.py # authority 不可变 trigger 与源文件 identity
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -46,7 +50,7 @@ backend/
 │ ├── media.py # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
 │ ├── media_jobs.py # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
 │ ├── export_jobs.py # 项目分类导出：缺失片段补生成、ZIP 打包、任务恢复
-│ └── routers/ # health / auth / projects / categories / videos / annotations / reviews / clips / media / exports
+│ └── routers/ # health / auth / projects / categories / videos / annotations / reviews / clips / media / exports / detection_imports / identity_edits / suppressions
 ├── scripts/ # 本地工具脚本（仅开发，不注册到应用）
 │ ├── migrate.py # 数据库迁移 CLI（全新库 / P1 旧库升级 / 幂等）
 │ └── seed_demo.py # 幂等演示数据脚本（第一阶段本地演示）
@@ -114,9 +118,9 @@ baseline（0001）再升级到 head（0011），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键，0005～0007 增加检测导入，0008 增加 sparse draft/提交基础）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002 增量，0003 外键策略显式化，0004 任务去重键，0005～0007 增加检测导入；0008 增加 sparse detection state 与不可变提交基础并回填可恢复的当前有效状态；0009 允许新 Clip 仅关联不可变 `SubmissionAnnotation`；0010 校验既有 0009 authority 后增加并回填 DetectionSnapshot 完整性 digest；0011 增加稳定源文件 identity 与 SQLite authority 不可变 trigger）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0007 已版本化库 → 增量 `upgrade head` 到 0008；0008 严格预检 legacy current state，不完整时硬失败。
+- 0002～0010 已版本化库 → 按迁移链增量 `upgrade head` 到 0011；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -130,8 +134,8 @@ INSERT/UPDATE/DELETE 数据库 trigger，并保护 frozen Submission authority�
 Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Windows handle 前后取得；
 短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
 已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
-该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。合并前
-仍必须在提供真实 ffmpeg/ffprobe 的环境补做 25/30/60 FPS 实际帧数证据。
+该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。
+25/30/60 FPS 已在真实 ffmpeg/ffprobe 环境完成实际帧数、尺寸、时长、首末帧和缩略图验收。
 
 ### Sparse writer 切换维护命令
 
@@ -280,13 +284,13 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 以 sparse override 整轨抑制当前未抑制 detection；不写旧 suppression 表 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 仅在该 suppression edit 为栈顶时撤销，否则返回 409 |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | 导出 `tracks.corrected.jsonl` 与 manifest |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | legacy 兼容的修正后 track JSONL/manifest 接口；不属于正式项目 ZIP |
 
 `metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。`source_relative` 按 basename 与视频文件名匹配。新视频成功导入时同步 FPS、宽、高和 `duration=frame_count/fps`；已有视频替换时校验 source basename、FPS、宽、高和当前导入 `frame_count`。预览及失败均清理候选文件，只有 `confirm=true` 成功才保留。原始 YOLO 文件与 RawDetection 保持不可变。
 
-Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。`submitted`（含未来 Submission submitted）锁定编辑并要求先 withdraw；`approved/rejected` 的当前兼容投影在新编辑后回到 draft，但不会修改未来不可变快照。撤销严格限栈顶，cursor 不回退、display ID 不复用。
+Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。当前 `Submission` authority 处于 `submitted` 时锁定编辑并要求先 withdraw；`approved/rejected` 的 `Video` 兼容投影在新编辑后回到 draft，但不会修改已冻结的 Submission/DetectionSnapshot。撤销严格限栈顶，cursor 不回退、display ID 不复用。
 
-Detection edit、Annotation create/update/delete、submit 和 detection replacement 统一先执行 Video no-op UPDATE 获取 SQLite 写门禁，再在锁内重读 active import、detection/edit/annotation revision 与 submitted 状态；锁竞争的 busy/locked 统一返回可重试 409。submitted 对 Annotation 与 replacement 同样是硬锁，不再隐式退回 draft。当前 corrected export 只接受 active import 的当前 `edit_version`，历史 import/revision 明确返回 409；JSONL 按 frame/detection/raw ID 稳定排序并以 `yield_per(500)` + `StringIO` 有界读取构造，Phase 4 再改为直接流式写文件。
+Detection edit、Annotation create/update/delete、submit 和 detection replacement 统一先执行 Video no-op UPDATE 获取 SQLite 写门禁，再在锁内重读 active import、detection/edit/annotation revision 与 submitted 状态；锁竞争的 busy/locked 统一返回可重试 409。submitted 对 Annotation 与 replacement 同样是硬锁，不再隐式退回 draft。当前 corrected export 只接受 active import 的当前 `edit_version`，历史 import/revision 明确返回 409；legacy JSONL 按 frame/detection/raw ID 稳定排序并以 `yield_per(500)` + `StringIO` 有界读取构造，正式项目 ZIP 内每个 `SubmissionAnnotation` 的 `tracks.json` 已实现按帧直接流式写入 staging 文件。
 
 ### 真实视频上传（批次 2）
 
@@ -335,11 +339,11 @@ Detection edit、Annotation create/update/delete、submit 和 detection replacem
   `rejected` → 视频 `rejected`、清空 approved 字段、标注 `rejected/reviewer_id`。
 
 Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是新提交与裁决的唯一
-
-0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 代码实现完成，待真实媒体与合并验收。
 权威数据；`Video.workflow_status`、`Annotation.review_status` 仅作 UI 兼容投影。submit 由服务端计算
 受控源媒体 SHA-256；withdraw 允许 owner/admin/annotator 或原 submitter，且仅限无 Review 的 submitted
 attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
+
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现并完成合并，真实 ffmpeg/ffprobe 的 25/30/60 FPS 媒体验收已通过。
 
 Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
 并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
@@ -531,7 +535,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 - `User`：独立登录账号，**无全局角色**。
 - `ProjectMembership`：`user_id + project_id` 唯一，`role ∈ {owner, admin, annotator, reviewer}`。
 - `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；创建项目时初始化北医 12 类。
-- `DetectionImport` / `RawDetection` / `CorrectedTrack` / `CorrectedDetectionAssignment`：保存不可变导入、逐帧原始检测和当前修正身份视图。
+- `DetectionImport` / `RawDetection`：保存不可变导入与逐帧原始检测；当前修正状态由 sparse override 表达。
 - `DetectionStateOverride`：当前 draft 相对 RawDetection baseline 的稀疏 display/suppressed 状态。
 - `DraftIdentityEdit` / `DraftDetectionChange`：当前 draft 的紧凑 LIFO undo 栈与受影响 detection before/after；不是永久审计。
 - 旧 `CorrectedTrack` / CDA / `IdentityEdit` / suppression 表仅保留迁移兼容，当前运行时不再写入。
@@ -550,7 +554,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
   `reviewer_id` 可空并 `ON DELETE SET NULL`，删除用户不销毁审核历史。
 - `Clip`：标注片段（project/annotation/source_revision/status/clip_path/thumbnail_path/error/
   generated_at/created_at/updated_at）；`annotation_id + source_revision` 唯一，支持修订隔离——
-  已审核标注被修改后按新修订生成新 clip，旧 clip 由未来生命周期显式删除。
+  已审核标注被修改后按新修订生成新 clip，旧 clip 由已实现的批次 7 生命周期清理规则处理。
   `status ∈ {pending, processing, ready, failed, stale}`（默认 `pending`）。
 - `BackgroundJob`：后台任务（clip 生成 / export / cleanup 共用）——
   job_type/status/progress 0..100/payload/result_path/error/started_at/finished_at/expires_at；
@@ -605,10 +609,10 @@ cd backend
 pytest -q
 ```
 
-当前全量结果：`301 passed, 3 skipped, 1 warning`。前端 `npm run build` 通过。该证据不替代真实 ffmpeg、真实长视频浏览器流程或生产部署验收。
+当前最终全量结果：`397 passed, 3 skipped`。前端 `npm run build` 通过。真实 ffmpeg/ffprobe 的 25/30/60 FPS 验收也已通过；这些证据不替代公网入口、备份恢复或持续的浏览器回归验收。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
-三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、完整单视频 ExportEvent 和 `clip_file` ZIP 完整性，
+三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
 视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
 写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
 批次 3 提交与审核（提交角色/状态门/至少一条标注/标注审核字段重置、队列角色与 submitted 过滤、
@@ -625,9 +629,11 @@ pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状�
 category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类别统计、成员权限、
 ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
-missing 自动补生成与失败不发布、真实 ZIP/annotations、下载过期/越界/缺文件、重跑保留历史），
-以及迁移验收（全新库建全表 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-0002～0006 已版本化库到 0007 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
+missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
+以及迁移验收（全新库建至 head 0011 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010）升级至 head 0011 /
+0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
+0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
 被 created_by、annotator_id 引用时删除被拒绝 / 新模型约束：唯一性、外键级联、状态默认与检查约束 /
 dedupe_key 唯一约束防重复任务）。

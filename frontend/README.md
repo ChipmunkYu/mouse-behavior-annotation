@@ -3,7 +3,7 @@
 多小鼠社会行为标注网站的前端实现：Vite + React 18 + TypeScript + React Router。
 对应后端 `../backend`（FastAPI，接口见 `../backend/README.md`）。
 
-> 当前界面与文档术语遵循 `../项目术语表.md`。
+> 当前界面与文档术语遵循[项目术语表](../项目术语表.md)；全站分类见[文档地图](../docs/README.md)。
 
 ## 功能
 
@@ -53,7 +53,7 @@
 - **导出** `/projects/:projectId/export`（**批次 6**，owner / admin 可见）：
   - **统计摘要**：可导出总数（审核通过行为标注）/ 就绪视频片段 / 缺失视频片段 + 就绪进度条（aria progressbar）；缺失明细显示类别、视频文件名和标注 ID。导出页面本身只创建并监控后台任务，不同步调用 ffmpeg；项目导出 worker 会在打包前尝试补生成缺失的已通过视频片段，任一补生成失败则不发布 ZIP。
   - **导出范围**：按类别多选 chips（复用 `GET .../clips/categories` 计数 + `GET .../categories` 取色；「全部」= 不传 `category_ids`）；「开始导出 ZIP」按钮仅 owner / admin 可见，非导出角色显示角色提示。
-  - **导出内容预览**：待生成目录结构树（集中 `annotations.json`、`clips/<group>/<category>/...`、修正后 track 结果/manifest）及字段摘要；ZIP 行为事件展示 `annotation_id`、`mouse_ids`、三类审核修订和安全非空的必填 `clip_file`。修正后 track 结果保留 `0..frame_count-1` 全部帧，空帧为 `detection_count=0`、`detections=[]`，可重新导入。预览不声称 ffmpeg 已执行。
+  - **导出内容预览**：按冻结类别展示每个 `SubmissionAnnotation` 的独立目录；目录固定为 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`，不展示或生成集中索引、manifest 或 `corrected_tracks/`。预览不声称任务已执行。
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
@@ -64,7 +64,7 @@
 
 - 无额外状态管理库与 UI 框架，仅 React 内置能力。
 - API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理 + 友好错误补充，`types.ts` 与后端 Pydantic schema 对齐，含审核工作流字段、Review、Job / MediaStatus 类型与任务状态文案；批次 4/5/6 字段以后端最终实现为准，核对时仅在 `types.ts` 修正）。片段列表过滤与分页参数类型化为 `ClipListParams`，仅发送已声明的查询参数；导出（批次 6）新增 `ExportRequestInput` / `MissingClip` / `ExportStatus` 类型、`createExport` / `getExportStatus` / `fetchExportDownload`（Bearer blob + Content-Disposition 文件名解析，与视频流同一模式）。
-- 导出页面 `src/pages/ExportPage.tsx`：统计摘要 + 类别多选范围 + 待生成目录树 / annotations.json 字段预览 + 任务轮询（仅导出中轮询，组件卸载即清理）与下载（blob object URL 延迟回收）。
+- 导出页面 `src/pages/ExportPage.tsx`：统计摘要 + 类别多选范围 + 独立四文件目录预览 + 任务轮询（仅导出中轮询，组件卸载即清理）与下载（blob object URL 延迟回收）。
 - 片段库页面 `src/pages/ClipsPage.tsx`：预览区加载源视频复用 `fetchVideoStreamUrl`，缩略图经 `fetchClipThumbnailUrl`（Bearer blob，失败回退占位）；轮询仅在有「待生成」片段时进行，组件卸载即清理。
 - 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
 - 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
@@ -91,7 +91,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：`npm run build` 通过；本地前端页面 HTTP 200。三文件导入批次的真实长视频、浏览器完整操作、真实 ffmpeg 和生产部署仍待人工验收。
+当前验证：`npm run build` 通过；后端最终证据为 `397 passed, 3 skipped`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。公网仍受阿里云备案接入阻塞；浏览器交互和长视频性能仍需持续回归。
 
 ## 目录结构
 

@@ -1,31 +1,18 @@
-# 数据标注网站（标注网站/）
+# 数据标注网站
 
-多小鼠社会行为在线标注网站，替代 BORIS 桌面单机方案，为行为识别阶段提供多人在线协作标注能力。当前 `feature/spatial-annotation` 已在生产扩展闭环上完成检测结果导入、叠加、参与对象标注、track 修正、三类修订审核与修正后 track 结果/项目 ZIP 导出；尚待真实视频端到端人工验收、生产部署及合并到 `main`。
+多小鼠社会行为在线标注网站，提供视频导入、行为标注、track 修正、提交审核、视频片段生成与项目导出。
 
-> 对应工作项：WI-20260805-22 ｜ 需求与边界：`需求文档.md`
->
-> 当前项目的权威术语与写作规则见 `项目术语表.md`；其他文档与其冲突时以术语表为准。
+## 文档入口
 
-## 目录
+- [需求文档](需求文档.md)：当前产品范围与正式契约。
+- [项目术语表](项目术语表.md)：全站 canonical wording 与状态定义。
+- [全站文档地图](docs/README.md)：现行设计、计划、历史和运维文档的分类与权威优先级。
+- [后端说明](backend/README.md) / [前端说明](frontend/README.md)：实现、接口与开发命令。
+- [生产部署](deploy/README.md)：部署模板与运维入口。
 
-```
-标注网站/
-├── backend/ # FastAPI + SQLite 后端（含 tests/、scripts/seed_demo.py）
-├── frontend/ # React + TypeScript + Vite 前端
-├── deploy/ # systemd、Nginx 与生产部署步骤模板
-├── 参考文档/ # AUTO_PIPELINE.md、VIDEO_ANNOTATION_TOOL.md
-├── 需求文档.md # 需求文档（v0.6）
-├── 项目术语表.md # 当前项目权威术语基线
-├── 服务器规格估算.md # 用户负载、存储、带宽与费用的参数化估算
-├── README.md # 本文件
-└── boris-9.13.0-win64-setup.exe # BORIS 桌面版安装包（参考用）
-```
+## 快速开始
 
-> `backend/data/`（数据库、演示视频、导出片段）为 gitignored 运行时数据，不作为资产登记。
-
-## 快速开始（Windows，首次安装）
-
-终端 1（后端）：
+后端（Windows）：
 
 ```bat
 cd /d D:\lab\行为识别\标注网站\backend
@@ -34,125 +21,24 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env
 .venv\Scripts\python scripts\migrate.py
+uvicorn app.main:app --reload --port 8000
 ```
 
-终端 2（前端）：
+前端：
 
 ```bat
 cd /d D:\lab\行为识别\标注网站\frontend
 npm install
 copy .env.example .env
-```
-
-## 最短启动步骤（两个终端）
-
-终端 1（后端，默认 http://127.0.0.1:8000）：
-
-```bat
-cd /d D:\lab\行为识别\标注网站\backend
-.venv\Scripts\activate
-uvicorn app.main:app --reload --port 8000
-```
-
-终端 2（前端，默认 http://localhost:5173）：
-
-```bat
-cd /d D:\lab\行为识别\标注网站\frontend
 npm run dev
 ```
 
-应用在单进程启动时会自动执行幂等数据库迁移。部署或 CI 推荐先从 `backend` 目录显式迁移；多 worker 启动前必须先执行该命令：
+默认入口：前端 `http://localhost:5173`，后端 API `http://127.0.0.1:8000/api`，Swagger `http://127.0.0.1:8000/docs`。Demo 账号 `demo/demo123` 仅供开发使用。
 
-```bat
-cd /d D:\lab\行为识别\标注网站\backend
-.venv\Scripts\activate
-.venv\Scripts\python scripts\migrate.py
-```
+## 当前边界
 
-## ffmpeg 配置
-
-精确片段、缩略图和缺失片段补生成依赖 ffmpeg/ffprobe。可将其加入 `PATH`，或在 `backend/.env` 中配置可执行文件的绝对路径：
-
-```dotenv
-FFMPEG_PATH=C:\path\to\ffmpeg.exe
-FFPROBE_PATH=C:\path\to\ffprobe.exe
-```
-
-当前开发机未安装 ffmpeg；自动化测试使用 Fake processor，因此只验证任务编排、命令契约和失败处理，不代表真实媒体编码已经验收。
-
-## 演示数据
-
-从 `backend` 目录运行；不指定 `--video-source` 时仅创建 Mock 视频元数据，指定后以硬链接优先放入 `backend/data/videos/demo_attack.mov`：
-
-```bat
-cd /d D:\lab\行为识别\标注网站\backend
-.venv\Scripts\python scripts\seed_demo.py
-.venv\Scripts\python scripts\seed_demo.py --video-source "D:\lab\行为识别\data\北医标注-行为例子\社交行为\5.攻击行为\社交-攻击1.mov"
-```
-
-## 访问地址与 Demo 账号
-
-- 前端：http://localhost:5173
-- 后端 API：http://127.0.0.1:8000/api
-- Swagger 接口文档：http://127.0.0.1:8000/docs
-
-| 用户名 | 密码 | 说明 |
-|---|---|---|
-| `demo` | `demo123` | 仅开发使用；部署前须通过环境变量 `DEMO_USERNAME` / `DEMO_PASSWORD` 覆盖 |
-
-## 测试
-
-```bat
-cd /d D:\lab\行为识别\标注网站\backend
-.venv\Scripts\activate
-pytest -q :: 当前 301 passed, 3 skipped, 1 warning
-
-cd /d D:\lab\行为识别\标注网站\frontend
-npm run build :: 生产构建验证
-```
-
-当前验证结果：后端全量 `301 passed, 3 skipped, 1 warning`；前端 `npm run build` 通过。
-
-当前提交/审核实现中，`submit` 与通过审核前调用的 `_revalidate_annotations` 只返回校验问题与待同步修订，不写 Annotation。语义无效时分别返回 400/409，Annotation 状态和数据库保持不变；语义有效时，即使已存检测结果导入/track 修正修订过期，也会在同一成功事务内将已验证 Annotation 置为 `valid`、推进其修订，再提交为 `workflow_status=submitted` 或完成通过审核。track 修正操作本身仍会重校验视频内全部 Annotation。
-
-## 生命周期清理
-
-清理原视频以外的过期导出 ZIP、已知临时文件、清理异常和过期任务记录前，先从 `backend` 目录执行 dry-run：
-
-```bat
-cd /d D:\lab\行为识别\标注网站\backend
-.venv\Scripts\activate
-.venv\Scripts\python scripts\cleanup_retention.py --dry-run
-```
-
-确认报告后，去掉 `--dry-run` 才会执行实际清理。脚本会先确保数据库 schema，因此 dry-run 的零副作用范围不包含数据库迁移或建表。
-
-## 当前能力与边界
-
-**已实现**：登录与项目角色、行为标注、审核、片段库、检测导入与 track 修正、三类修订审核及项目 ZIP。正式项目 ZIP 中每个行为片段是仅含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的独立目录，不含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。单视频 `/annotations/export` 继续提供 legacy 兼容 JSON。原始检测始终不可变。
-
-**本地 / 生产边界**：当前仍是未部署、未合并分支，不声称完成真实 ffmpeg 编码、真实长视频浏览器流程或生产部署验收。正式输入应使用原始 `社交-攻击1.mov`；已上传的 `社交-攻击1_all_ids.mp4` 是烧录调试视频。生产使用前还须完成完整人工流程并配置强密钥、账号、CORS、持久化 `DATA_DIR`、数据库备份和 ffmpeg/ffprobe。
-
-**进程边界**：媒体、导出与周期清理共用当前应用内的单进程 executor/worker 设计，不得直接让多个应用进程共享同一任务库和数据目录。多进程部署前除显式执行数据库迁移外，还必须为任务领取增加持久化 lease/owner、heartbeat 与过期回收机制。
-
-空间标注生产能力已整合到 `main`；后续界面与数据库优化分别在 `feature/spatial-ui-optimization`、`feature/spatial-db-optimization` 开展。旧演示与阶段性功能分支不再维护，确认无保留价值后删除。
-
-## 部署带宽优化点（规划，未实施）
-
-以下为生产部署前计划实施的带宽优化方向，均未实施，供后续排期参考：
-
-1. 视频播放改为 HTTP Range 流式（现状为前端整包下载 blob，单次打开即下载整个文件）。
-2. 播放用低码率副本：存储母版，标注/审核走转码后的低码率版本（如 H.264 CRF 28–30，或 H.265，注意 Firefox 桌面不支持 HEVC 需回退）。
-3. 缓存：视频与缩略图增加浏览器缓存头（Cache-Control/ETag）；反向代理层加 proxy_cache 或 CDN，多人重复观看同一视频时命中缓存。
-4. 前端加载策略：视频 `preload="metadata"`、缩略图懒加载并压缩为 WebP、修复前端 `/thumbnails/` 无对应后端路由的问题。
-5. 播放版本按需异步生成（复用现有 MediaWorker 队列），避免预转全部视频。
-
-## 详见
-
-- 生产部署配置、路径边界与执行顺序：`deploy/README.md`
-- 本次部署复盘、从零部署 SOP、运维与回滚：[`deploy/部署复盘与运维指南.md`](deploy/部署复盘与运维指南.md)
-- 后端启动、配置、API 一览与测试：`backend/README.md`
-- 前端功能与技术要点：`frontend/README.md`
-- 需求、数据模型与 P1/P2 边界：`需求文档.md`
-- 权威术语、状态与修订定义：`项目术语表.md`
-- 用户负载到服务器规格的参数化估算：`服务器规格估算.md`
+- 正式项目 ZIP 中，每个 `SubmissionAnnotation` 对应一个独立目录，固定包含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`；不包含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。
+- 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
+- 后端最终证据为 `397 passed, 3 skipped`；真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
+- 服务器本机与 SSH 隧道验收不等于公网验收；公网入口仍受阿里云备案接入阻塞。
+- SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。
