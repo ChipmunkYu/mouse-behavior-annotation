@@ -40,5 +40,5 @@ npm run dev
 - 正式项目 ZIP 中，每个 `SubmissionAnnotation` 对应一个独立目录，固定包含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`；不包含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。
 - 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
 - 后端最终证据为 `397 passed, 3 skipped`；真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
-- 服务器本机与 SSH 隧道验收不等于公网验收；公网入口仍受阿里云备案接入阻塞。
+- 服务器本机与 SSH 隧道验收不等于完整公网验收；多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成。
 - SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。

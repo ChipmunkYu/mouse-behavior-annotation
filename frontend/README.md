@@ -91,7 +91,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：`npm run build` 通过；后端最终证据为 `397 passed, 3 skipped`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。公网仍受阿里云备案接入阻塞；浏览器交互和长视频性能仍需持续回归。
+当前验证：`npm run build` 通过；后端最终证据为 `397 passed, 3 skipped`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成；浏览器交互和长视频性能仍需持续回归。
 
 ## 目录结构
 
