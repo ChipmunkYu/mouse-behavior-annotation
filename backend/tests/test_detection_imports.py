@@ -7,10 +7,13 @@ replacement import / detections query / corrected-tracks / errors / access contr
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.track_ids import TRACK_ID_UPPER_BOUND
 
@@ -431,6 +434,65 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
 
         video = db.get(models.Video, body["video_id"])
         assert video.detection_import_revision == 1
+
+
+def test_three_file_complete_assignee_race_is_retryable_409(monkeypatch, ctx, login_headers):
+    from app.assignee_triggers import ASSIGNEE_CONFLICT_DETAIL
+    from app.models import ProjectMembership, Video, VideoImportBatch
+
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    alice_id = ctx.create_user("import-race-alice")
+    bob_id = ctx.create_user("import-race-bob")
+    ctx.add_member(pid, alice_id)
+    ctx.add_member(pid, bob_id)
+    with ctx.session_factory() as db:
+        alice_mid = db.query(ProjectMembership.id).filter_by(project_id=pid, user_id=alice_id).scalar()
+        bob_mid = db.query(ProjectMembership.id).filter_by(project_id=pid, user_id=bob_id).scalar()
+
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+
+    original_flush = Session.flush
+    fail_once = True
+
+    def race_flush(session, *args, **kwargs):
+        nonlocal fail_once
+        if fail_once and any(
+            isinstance(item, Video) and item.assignee_membership_id == alice_mid
+            for item in session.new
+        ):
+            fail_once = False
+            raise IntegrityError(
+                "video assignee write", {},
+                sqlite3.IntegrityError("assignee must be an active membership in the video project"),
+            )
+        return original_flush(session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", race_flush)
+    failed = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete",
+        params={"assignee_membership_id": alice_mid}, headers=headers,
+    )
+    assert failed.status_code == 409
+    assert failed.json()["detail"] == ASSIGNEE_CONFLICT_DETAIL
+    with ctx.session_factory() as db:
+        row = db.get(VideoImportBatch, batch["id"])
+        assert row.status == "uploading"
+        assert row.created_video_id is None
+        assert row.validation_errors == {"assignee_conflict": ASSIGNEE_CONFLICT_DETAIL}
+        assert db.query(Video).filter_by(project_id=pid).count() == 0
+
+    retried = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete",
+        params={"assignee_membership_id": bob_mid}, headers=headers,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "ready"
+    with ctx.session_factory() as db:
+        assert db.get(Video, retried.json()["video_id"]).assignee_membership_id == bob_mid
+        assert db.get(VideoImportBatch, batch["id"]).validation_errors is None
 
 
 # ---------------------------------------------------------------------------
@@ -1680,7 +1742,7 @@ def test_inactive_membership_403(ctx, login_headers):
     alice_headers = login_headers(username="alice_di", password="pw123")
     with ctx.session_factory() as db:
         from app.models import ProjectMembership
-        db.add(ProjectMembership(project_id=pid, user_id=alice_id, role="annotator", status="inactive"))
+        db.add(ProjectMembership(project_id=pid, user_id=alice_id, role="member", status="inactive"))
         db.commit()
 
     resp = ctx.client.get(

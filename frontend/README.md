@@ -8,7 +8,7 @@
 ## 功能
 
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
-- **项目列表** `/projects`：展示当前用户成员项目及项目内角色，支持创建项目（自动初始化 12 类行为类别）。
+- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。
 - **视频库** `/projects/:projectId/videos`：
   - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
   - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
@@ -18,8 +18,10 @@
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
   - 搜索 + 视频工作流状态筛选；筛选字段严格为 `workflow_status`，不是媒体 `status` 或单条 `Annotation.review_status`。列表卡片显示时长 / 帧率 / 分辨率 / 媒体状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
+  - 分工提供“我的任务 / 待领取 / 全部”三视图；卡片显示当前负责人，项目成员可领取未分配视频，当前负责人可释放 draft 视频，owner/admin 可按负责人筛选并事务批量分配、改派或清空。
+  - 单视频上传和三文件导入完成时，owner/admin 可从精简负责人目录选择负责人；不选择则进入未分配状态。
   - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
-  - **审核入口**：owner / admin / reviewer 角色显示「✓ 审核工作台」入口（角色来自 `listProjects`）。
+  - **审核入口**：owner/admin 或 `can_review=true` 的 member 显示「✓ 审核工作台」入口。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
@@ -42,7 +44,8 @@
   - 媒体面板仅 approved 显示统计，非 approved 显示「审核通过后将自动开始生成片段」；刷新 / 离开页面 / 切换视频即停止轮询；401 / 403 沿用全局 client 处理。
   - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）。
   - 审核时只读展示 `mouse_ids`、修正后叠加层及 annotation/detection import/identity 三类修订，避免审核旧身份结果。
-- **片段库** `/projects/:projectId/clips`（**批次 5**，owner / admin / annotator / reviewer 均可见）：
+  - owner/admin 和具备审核能力的 member 可裁决，允许审核自己负责或参与标注的视频。
+- **片段库** `/projects/:projectId/clips`（**批次 5**，全部项目成员可见）：
   - 数据来自 `GET /api/projects/:pid/clips`（分页 + 类别/视频筛选 + 关键词搜索）与 `GET /api/projects/:pid/clips/categories`（类别计数 chips）；库内仅含「标注 approved 且视频 approved」的有效片段。
   - **类别计数 chips 筛选**（全部 + 各类别计数，颜色来自类别 API）+ **搜索框**（按文件名 / 类别名，服务端过滤，300ms 防抖，输入限长 128 与后端一致）+ **视频选择器**；分页默认 20 条/页（可切 50 / 100），筛选 / 搜索变化自动回到第 1 页，页码超出实际页数时自动回落。
   - **顶部共享预览区**：点击片段后按需拉取该视频源 blob（带 Bearer，与视频流同一封装），跳转到片段 `start_time`，播放范围限制在 `[start_time, end_time]`（到点自动暂停并提示）；一次只播放一个，切换片段撤销上一个 object URL，绝不批量预加载视频。范围条高亮片段区间，点击 / 键盘（←/→）自由跳转。
@@ -57,7 +60,8 @@
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
-- **项目内导航**：视频库 / 片段库 / 审核 / 导出，按项目角色显示合理入口（owner/admin/reviewer 可见审核，owner/admin 可见导出，片段库全员可见）。
+- **项目管理** `/projects/:projectId/manage`（owner/admin）：管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
+- **项目内导航**：视频库 / 片段库 / 审核 / 导出 / 项目管理；审核入口按有效审核能力显示，导出和项目管理仅 owner/admin，片段库全员可见。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 
 ## 技术要点
@@ -91,7 +95,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：`npm run build` 通过；后端最终证据为 `397 passed, 3 skipped`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成；浏览器交互和长视频性能仍需持续回归。
+当前验证：production `npm run build` 通过；后端最终证据为 `414 passed, 3 skipped`，分工模块最后一次 focused 结果为 `17 passed`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。分工变更尚未部署；既有服务器状态不因本次仓库实现而改变，浏览器交互和长视频性能仍需持续回归。
 
 ## 目录结构
 
@@ -108,7 +112,7 @@ frontend/
  ├── api/ # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
  ├── auth/ # AuthContext / ProtectedRoute / storage / 401 事件
  ├── components/ # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
- ├── pages/ # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
+ ├── pages/ # LoginPage / ProjectsPage / VideosPage / ProjectManagementPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化
 ```

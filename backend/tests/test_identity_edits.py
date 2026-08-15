@@ -153,7 +153,7 @@ def test_raw_baseline_and_effective_read_have_no_legacy_rows(ctx, login_headers)
         assert db.query(models.SuppressionDetection).count() == 0
 
 
-@pytest.mark.parametrize(("role", "expected"), [("admin", 200), ("annotator", 200), ("reviewer", 403), ("viewer", 403)])
+@pytest.mark.parametrize(("role", "expected"), [("admin", 200), ("annotator", 200), ("reviewer", 200), ("viewer", 403)])
 def test_identity_edit_permissions(ctx, login_headers, role, expected):
     _headers, project_id, video_id = _setup(ctx, login_headers)
     username = f"phase2_{role}"
@@ -167,7 +167,7 @@ def test_identity_edit_permissions(ctx, login_headers, role, expected):
     assert response.status_code == expected
 
 
-@pytest.mark.parametrize("role", ["reviewer", "viewer"])
+@pytest.mark.parametrize("role", ["viewer"])
 def test_all_identity_and_suppression_mutations_reject_readonly_roles(
     ctx, login_headers, role
 ):

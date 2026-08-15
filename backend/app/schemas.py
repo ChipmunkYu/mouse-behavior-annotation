@@ -40,6 +40,52 @@ class ProjectOut(BaseModel):
     status: str
     created_at: datetime
     role: str
+    membership_id: int
+    can_review: bool
+
+
+class MembershipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    user_id: int
+    username: str
+    role: Literal["owner", "admin", "member"]
+    can_review: bool
+    status: str
+    created_at: datetime
+
+
+class MembershipUpdate(BaseModel):
+    role: Optional[Literal["admin", "member"]] = None
+    can_review: Optional[bool] = None
+
+
+class InviteOut(BaseModel):
+    invite_code: str
+
+
+class JoinProjectRequest(BaseModel):
+    invite_code: str = Field(min_length=20, max_length=64)
+
+
+class AssigneeDirectoryItem(BaseModel):
+    membership_id: int
+    username: str
+
+
+class AssigneeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    user_id: int
+    username: str
+    role: Literal["owner", "admin", "member"]
+    can_review: bool = Field(validation_alias="effective_can_review")
+    status: str
+    created_at: datetime
 
 
 # ---------- 行为类别 ----------
@@ -67,6 +113,7 @@ class VideoCreate(BaseModel):
     height: Optional[int] = Field(default=None, ge=0)
     status: Optional[str] = None
     storage_path: Optional[str] = None
+    assignee_membership_id: Optional[int] = None
 
 
 class VideoOut(BaseModel):
@@ -89,7 +136,34 @@ class VideoOut(BaseModel):
     submitted_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     approved_by: Optional[int] = None
+    assignee_membership_id: Optional[int] = None
+    assignee: Optional[AssigneeOut] = None
     created_at: datetime
+
+
+class AssignmentBatchRequest(BaseModel):
+    video_ids: list[int] = Field(min_length=1)
+    assignee_membership_id: Optional[int] = None
+
+
+class AssignmentStatsItem(BaseModel):
+    assignee_membership_id: int
+    username: str
+    total: int
+    draft: int
+    submitted: int
+    approved: int
+    rejected: int
+
+
+class AssignmentStatsOut(BaseModel):
+    total: int
+    draft: int
+    submitted: int
+    approved: int
+    rejected: int
+    unassigned: int
+    by_assignee: list[AssignmentStatsItem]
 
 
 # ---------- 标注 ----------

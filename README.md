@@ -1,12 +1,13 @@
 # 数据标注网站
 
-多小鼠社会行为在线标注网站，提供视频导入、行为标注、track 修正、提交审核、视频片段生成与项目导出。
+多小鼠社会行为在线标注网站，提供项目成员与视频分工、视频导入、行为标注、track 修正、提交审核、视频片段生成与项目导出。
 
 ## 文档入口
 
 - [需求文档](需求文档.md)：当前产品范围与正式契约。
 - [项目术语表](项目术语表.md)：全站 canonical wording 与状态定义。
 - [全站文档地图](docs/README.md)：现行设计、计划、历史和运维文档的分类与权威优先级。
+- [分工标注模块设计](docs/设计/分工标注模块设计.md)：角色、成员、负责人、接口、迁移与并发规则。
 - [后端说明](backend/README.md) / [前端说明](frontend/README.md)：实现、接口与开发命令。
 - [生产部署](deploy/README.md)：部署模板与运维入口。
 
@@ -39,6 +40,8 @@ npm run dev
 
 - 正式项目 ZIP 中，每个 `SubmissionAnnotation` 对应一个独立目录，固定包含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`；不包含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。
 - 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
-- 后端最终证据为 `397 passed, 3 skipped`；真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
+- 项目角色为 `owner/admin/member`；审核能力通过 `can_review` 与角色共同决定。分工只表示责任归属，active 成员仍可编辑和提交。
+- 视频库提供“我的任务 / 待领取 / 全部”，项目管理提供成员、邀请码和分工统计；迁移 head 为 `0012`。
+- 后端最终证据为 `414 passed, 3 skipped`，分工模块最后一次 focused 测试为 `17 passed`；前端 production build 与真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
 - 服务器本机与 SSH 隧道验收不等于完整公网验收；多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成。
 - SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。

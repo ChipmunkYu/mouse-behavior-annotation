@@ -17,15 +17,12 @@ from ..export_jobs import (
     latest_export_job,
 )
 from ..models import BackgroundJob, BehaviorCategory
+from ..permissions import require_manager
 from ..schemas import ExportRequest, ExportStatusOut, JobOut, MissingClipOut
 
 router = APIRouter(tags=["exports"])
-_EXPORT_ROLES = {"owner", "admin"}
-
-
 def _require_export_role(access: tuple) -> None:
-    if access[1].role not in _EXPORT_ROLES:
-        raise HTTPException(status_code=403, detail="Only owner/admin can manage exports")
+    require_manager(access[1], "Only owner/admin can manage exports")
 
 
 def _job_out(job: BackgroundJob) -> JobOut:

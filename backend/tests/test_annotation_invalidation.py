@@ -524,7 +524,7 @@ def test_file_delete_failure_recorded_without_blocking(ctx, login_headers, tmp_p
 # ---------- 角色与直接 review_status ----------
 
 
-def test_reviewer_cannot_write_annotations(ctx, login_headers):
+def test_review_capable_member_can_create_but_not_modify_others_annotations(ctx, login_headers):
     setup = ctx.make_project_with_video()
     headers, project, categories, video = (
         setup["headers"],
@@ -547,7 +547,7 @@ def test_reviewer_cannot_write_annotations(ctx, login_headers):
         },
         headers=reviewer_headers,
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 201
     # reviewer 修改 / 删除 → 403
     assert _patch(ctx, reviewer_headers, project, video, ann["id"], {"end_time": 9.0}).status_code == 403
     assert _delete(ctx, reviewer_headers, project, video, ann["id"]).status_code == 403

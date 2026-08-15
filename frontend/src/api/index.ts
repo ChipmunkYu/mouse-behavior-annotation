@@ -38,6 +38,12 @@ import type {
   SuppressionCreateRequest,
   SuppressionResult,
   VideoImportBatch,
+  AssignmentStats,
+  Membership,
+  MembershipUpdateInput,
+  Invite,
+  VideoListParams,
+  AssigneeDirectoryItem,
 } from "./types";
 
 // ---------- 认证 ----------
@@ -60,14 +66,53 @@ export function createProject(input: ProjectCreateInput): Promise<Project> {
   });
 }
 
+export function joinProject(invite_code: string): Promise<Membership> {
+  return apiFetch<Membership>("/projects/join", { method: "POST", body: JSON.stringify({ invite_code }) });
+}
+export function listMembers(projectId: number | string): Promise<Membership[]> {
+  return apiFetch<Membership[]>(`/projects/${projectId}/members`);
+}
+export function listAssignees(projectId: number | string): Promise<AssigneeDirectoryItem[]> {
+  return apiFetch<AssigneeDirectoryItem[]>(`/projects/${projectId}/assignees`);
+}
+export function updateMember(projectId: number | string, membershipId: number, input: MembershipUpdateInput): Promise<Membership> {
+  return apiFetch<Membership>(`/projects/${projectId}/members/${membershipId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+export function removeMember(projectId: number | string, membershipId: number): Promise<void> {
+  return apiFetch<void>(`/projects/${projectId}/members/${membershipId}`, { method: "DELETE" });
+}
+export function getProjectInvite(projectId: number | string): Promise<Invite> {
+  return apiFetch<Invite>(`/projects/${projectId}/invite`);
+}
+export function resetProjectInvite(projectId: number | string): Promise<Invite> {
+  return apiFetch<Invite>(`/projects/${projectId}/invite/reset`, { method: "POST" });
+}
+
 // ---------- 类别 ----------
 export function listCategories(projectId: number | string): Promise<Category[]> {
   return apiFetch<Category[]>(`/projects/${projectId}/categories`);
 }
 
 // ---------- 视频 ----------
-export function listVideos(projectId: number | string): Promise<Video[]> {
-  return apiFetch<Video[]>(`/projects/${projectId}/videos`);
+export function listVideos(projectId: number | string, params: VideoListParams = {}): Promise<Video[]> {
+  const qs = new URLSearchParams();
+  if (params.view) qs.set("view", params.view);
+  if (params.workflow_status) qs.set("workflow_status", params.workflow_status);
+  if (params.assignee_membership_id != null) qs.set("assignee_membership_id", String(params.assignee_membership_id));
+  return apiFetch<Video[]>(`/projects/${projectId}/videos${qs.size ? `?${qs}` : ""}`);
+}
+
+export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {
+  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/claim`, { method: "POST" });
+}
+export function releaseVideo(projectId: number | string, videoId: number): Promise<Video> {
+  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/release`, { method: "POST" });
+}
+export function batchAssignVideos(projectId: number | string, video_ids: number[], assignee_membership_id: number | null): Promise<Video[]> {
+  return apiFetch<Video[]>(`/projects/${projectId}/videos/assignments`, { method: "POST", body: JSON.stringify({ video_ids, assignee_membership_id }) });
+}
+export function getAssignmentStats(projectId: number | string): Promise<AssignmentStats> {
+  return apiFetch<AssignmentStats>(`/projects/${projectId}/assignment-stats`);
 }
 
 export function createVideo(projectId: number | string, input: VideoCreateInput): Promise<Video> {
@@ -86,13 +131,14 @@ export function createVideo(projectId: number | string, input: VideoCreateInput)
 export function uploadVideo(
   projectId: number | string,
   file: File,
-  options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal }
+  options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal; assigneeMembershipId?: number | null }
 ): Promise<Video> {
   return uploadFile<Video>(`/projects/${projectId}/videos/upload`, file, {
     field: "file",
     filename: file.name,
     onProgress: options.onProgress,
     signal: options.signal,
+    fields: options.assigneeMembershipId != null ? { assignee_membership_id: String(options.assigneeMembershipId) } : undefined,
   });
 }
 
@@ -113,8 +159,9 @@ export function uploadBatchFile(
   });
 }
 
-export function completeImportBatch(projectId: number | string, batchId: number): Promise<VideoImportBatch> {
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete`, { method: "POST" });
+export function completeImportBatch(projectId: number | string, batchId: number, assigneeMembershipId?: number | null): Promise<VideoImportBatch> {
+  const qs = assigneeMembershipId != null ? `?assignee_membership_id=${assigneeMembershipId}` : "";
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete${qs}`, { method: "POST" });
 }
 
 export function getImportBatch(projectId: number | string, batchId: number): Promise<VideoImportBatch> {

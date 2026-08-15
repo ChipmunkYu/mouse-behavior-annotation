@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import secrets
 from typing import Optional
 
 from sqlalchemy import (
@@ -61,6 +62,9 @@ class Project(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    invite_code: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, default=lambda: secrets.token_urlsafe(32)
+    )
 
     members: Mapped[list["ProjectMembership"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -78,7 +82,11 @@ class ProjectMembership(Base):
     """用户在某项目内的身份；user_id + project_id 唯一。"""
 
     __tablename__ = "project_memberships"
-    __table_args__ = (UniqueConstraint("user_id", "project_id", name="uq_membership_user_project"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "project_id", name="uq_membership_user_project"),
+        UniqueConstraint("id", "project_id", name="uq_membership_id_project"),
+        CheckConstraint("role IN ('owner', 'admin', 'member')", name="ck_membership_role"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(
@@ -87,12 +95,23 @@ class ProjectMembership(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    role: Mapped[str] = mapped_column(String(32), default="annotator", nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="member", nullable=False)
+    can_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     user: Mapped["User"] = relationship(back_populates="memberships")
     project: Mapped["Project"] = relationship(back_populates="members")
+
+    @property
+    def username(self) -> str:
+        return self.user.username
+
+    @property
+    def effective_can_review(self) -> bool:
+        return self.role in {"owner", "admin"} or self.can_review
 
 
 class BehaviorCategory(Base):
@@ -130,6 +149,12 @@ class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (
         CheckConstraint("annotation_revision >= 1", name="ck_videos_annotation_revision_min"),
+        ForeignKeyConstraint(
+            ["assignee_membership_id", "project_id"],
+            ["project_memberships.id", "project_memberships.project_id"],
+            ondelete="RESTRICT",
+            name="fk_videos_assignee_project",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -147,6 +172,7 @@ class Video(Base):
     uploaded_by: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    assignee_membership_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     # 工作流字段：媒体 status 之上独立的审核工作流状态
@@ -164,6 +190,9 @@ class Video(Base):
     media_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="videos")
+    assignee: Mapped[Optional["ProjectMembership"]] = relationship(
+        foreign_keys=[assignee_membership_id], passive_deletes=True
+    )
     annotations: Mapped[list["Annotation"]] = relationship(
         back_populates="video", cascade="all, delete-orphan"
     )

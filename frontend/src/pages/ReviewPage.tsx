@@ -6,7 +6,7 @@
  * - 通过后自动开始片段生成：展示「审核已通过，片段生成已排队/处理中」，
  *   媒体状态面板轮询 media-status 直至任务落定（失败可重试生成）
  * - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）
- * - 仅 owner / admin / reviewer 角色可见入口（项目内角色由 project API 提供）
+ * - 仅后端返回 can_review=true 的成员可访问
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -144,14 +144,21 @@ export default function ReviewPage() {
   const timelineDuration =
     elementDuration > 0 ? elementDuration : selectedVideo?.duration && selectedVideo.duration > 0 ? selectedVideo.duration : null;
 
-  const canReview = project ? ["owner", "admin", "reviewer"].includes(project.role) : true;
+  const canReview = project?.can_review === true;
   const activeMouseIds = annotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time)?.mouse_ids ?? [];
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
     try {
-      const [projs, queued] = await Promise.all([listProjects(), listReviewQueue(pid)]);
-      setProject(projs.find((p) => p.id === pid) ?? null);
+      const projs = await listProjects();
+      const currentProject = projs.find((p) => p.id === pid) ?? null;
+      setProject(currentProject);
+      if (!currentProject?.can_review) {
+        setQueue([]);
+        setErrorMsg(null);
+        return;
+      }
+      const queued = await listReviewQueue(pid);
       const sorted = [...queued].sort((a, b) => {
         const ta = a.submitted_at ? new Date(a.submitted_at).getTime() : 0;
         const tb = b.submitted_at ? new Date(b.submitted_at).getTime() : 0;
@@ -394,7 +401,7 @@ export default function ReviewPage() {
         <Card>
           <EmptyState
             title="当前角色无法审核"
-            hint={`你在该项目中的角色为「${ROLE_LABELS[project.role] ?? "未知角色"}」，仅项目所有者、管理员和审核者可访问审核工作台。`}
+            hint={`你在该项目中的角色为「${ROLE_LABELS[project.role] ?? "未知角色"}」，当前未启用审核权限。请联系项目管理员。`}
           />
         </Card>
       ) : (

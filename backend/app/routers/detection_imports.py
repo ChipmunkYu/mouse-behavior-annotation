@@ -16,9 +16,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..deps import project_access
 from ..effective_detections import effective_detection_query, effective_track_summary_query
 from ..models import (
@@ -32,6 +34,7 @@ from ..models import (
     Video,
     VideoImportBatch,
 )
+from ..permissions import is_manager
 from ..schemas import (
     BatchStatusOut,
     DetectionImportCurrentOut,
@@ -849,12 +852,19 @@ def complete_import_batch(
     project_id: int,
     batch_id: int,
     request: Request,
+    assignee_membership_id: int | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ):
     _project, membership = access
     if membership.status != "active":
         raise HTTPException(status_code=403, detail="Project membership is not active")
+    if assignee_membership_id is not None:
+        if not is_manager(membership):
+            raise HTTPException(status_code=403, detail="Only owner/admin may specify an assignee")
+        assignee = db.get(ProjectMembership, assignee_membership_id)
+        if assignee is None or assignee.project_id != project_id or assignee.status != "active":
+            raise HTTPException(status_code=400, detail="Assignee must be an active member of this project")
 
     batch = _require_batch(db, batch_id, project_id)
 
@@ -889,6 +899,7 @@ def complete_import_batch(
 
     # Fix 1: 先标记 processing 防止并发
     batch.status = "processing"
+    batch.validation_errors = None
     db.commit()
 
     # Fix 1: 使用已有 video_id，避免重复创建视频
@@ -920,12 +931,26 @@ def complete_import_batch(
             annotation_revision=1,
             detection_import_revision=0,
             identity_revision=0,
+            assignee_membership_id=assignee_membership_id,
         )
-        db.add(video)
-        db.flush()
-        video_id_created = video.id
-        batch.created_video_id = video_id_created
-        db.commit()
+        try:
+            db.add(video)
+            db.flush()
+            video_id_created = video.id
+            batch.created_video_id = video_id_created
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            if not is_assignee_write_conflict(exc):
+                raise
+            # ``processing`` was committed before video creation. Restore the
+            # retryable pre-completion state instead of stranding the batch.
+            batch = _require_batch(db, batch_id, project_id)
+            batch.status = "uploading"
+            batch.created_video_id = None
+            batch.validation_errors = {"assignee_conflict": ASSIGNEE_CONFLICT_DETAIL}
+            db.commit()
+            raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
     else:
         video_id_created = video.id
 

@@ -34,15 +34,14 @@ from ..models import (
     DetectionImport,
     Video,
 )
+from ..permissions import MANAGER_ROLES, require_editor as require_edit_permission
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
 from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["annotations"])
 
 VALID_CONFIDENCE = {"certain", "uncertain", "occluded"}
-_OWNER_ADMIN = {"owner", "admin"}
-# 标注写入角色：reviewer 只审核不可改标注
-_EDITOR_ROLES = {"owner", "admin", "annotator"}
+_OWNER_ADMIN = MANAGER_ROLES
 # PATCH 中属于"实际用户可编辑字段"的字段；任一出现即视为修改尝试
 EDITABLE_FIELDS = (
     "category_id",
@@ -176,12 +175,7 @@ def _get_annotation_in_video(db: Session, video_id: int, annotation_id: int) -> 
 
 
 def _require_editor(membership) -> None:
-    """标注创建/修改/删除仅 owner/admin/annotator 角色；reviewer 被拒绝。"""
-    if membership.role not in _EDITOR_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail="Only owner/admin/annotator can modify annotations",
-        )
+    require_edit_permission(membership)
 
 
 class _InvalidationPlan:

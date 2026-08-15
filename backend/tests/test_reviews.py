@@ -364,18 +364,19 @@ def test_submit_roles(ctx, login_headers):
 
     reviewer_id = _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
-    assert _submit(ctx, reviewer_headers, project, video).status_code == 403
+    assert _submit(ctx, reviewer_headers, project, video).status_code == 200
 
     outsider_id = ctx.create_user("outsider")
     outsider_headers = login_headers(username="outsider", password="pw123")
     assert _submit(ctx, outsider_headers, project, video).status_code == 403
 
+    assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     annotator_id = ctx.create_user("annot1")
     ctx.add_member(project["id"], annotator_id, role="annotator")
     annotator_headers = login_headers(username="annot1", password="pw123")
     assert _submit(ctx, annotator_headers, project, video).status_code == 200
 
-    _review(ctx, reviewer_headers, project, video, "rejected")
+    assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     admin_id = ctx.create_user("admin1")
     ctx.add_member(project["id"], admin_id, role="admin")
     admin_headers = login_headers(username="admin1", password="pw123")

@@ -14,16 +14,13 @@ from ..draft_detection_edits import (
     undo_latest,
 )
 from ..models import DetectionImport, DraftIdentityEdit, Video
+from ..permissions import require_editor as require_edit_permission
 from ..schemas import IdentityEditCheckRequest, IdentityEditCommitRequest, IdentityEditRevertRequest
 from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["identity-edits"])
-_EDIT_ROLES = {"owner", "admin", "annotator"}
-
-
 def _require_editor(membership) -> None:
-    if membership.role not in _EDIT_ROLES:
-        raise HTTPException(status_code=403, detail="Only owner/admin/annotator can edit tracks")
+    require_edit_permission(membership, "Only active project members can edit tracks")
 
 
 def _require_video(db: Session, video_id: int, project_id: int) -> Video:

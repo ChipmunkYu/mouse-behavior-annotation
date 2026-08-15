@@ -7,10 +7,12 @@ Content-Type 仅辅助、无固定大小限制配置、JSON Mock 接口并存。
 from __future__ import annotations
 
 import collections
+import sqlite3
 from pathlib import Path
 
 import pytest
 import starlette.datastructures as sd
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
@@ -259,7 +261,7 @@ def test_upload_inactive_membership_rejected(ctx, login_headers):
     alice_headers = login_headers(username="alice", password="pw123")
     with ctx.session_factory() as db:
         db.add(
-            ProjectMembership(project_id=pid, user_id=alice_id, role="annotator", status="inactive")
+            ProjectMembership(project_id=pid, user_id=alice_id, role="member", status="inactive")
         )
         db.commit()
     resp = _upload(ctx.client, pid, alice_headers)
@@ -359,6 +361,51 @@ def test_upload_db_failure_cleans_orphan(ctx, login_headers, monkeypatch):
     assert not list(_videos_dir(ctx).glob("*.part"))
     assert _files_in(_videos_dir(ctx)) == []  # 最终孤儿已清理
     assert _video_rows(ctx) == []
+
+
+def test_upload_assignee_race_returns_409_cleans_file_and_retries(ctx, login_headers, monkeypatch):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    alice_id = ctx.create_user("upload-race-alice")
+    bob_id = ctx.create_user("upload-race-bob")
+    ctx.add_member(pid, alice_id)
+    ctx.add_member(pid, bob_id)
+    with ctx.session_factory() as db:
+        alice_mid = db.query(ProjectMembership.id).filter_by(project_id=pid, user_id=alice_id).scalar()
+        bob_mid = db.query(ProjectMembership.id).filter_by(project_id=pid, user_id=bob_id).scalar()
+
+    original_commit = Session.commit
+    fail_once = True
+
+    def race_commit(session):
+        nonlocal fail_once
+        if fail_once and any(
+            isinstance(item, models.Video) and item.assignee_membership_id == alice_mid
+            for item in session.new
+        ):
+            fail_once = False
+            raise IntegrityError(
+                "video assignee write", {},
+                sqlite3.IntegrityError("assignee must be an active membership in the video project"),
+            )
+        return original_commit(session)
+
+    monkeypatch.setattr(Session, "commit", race_commit)
+    failed = ctx.client.post(
+        f"/api/projects/{pid}/videos/upload",
+        files={"file": ("race.mp4", b"race", "video/mp4")},
+        data={"assignee_membership_id": str(alice_mid)}, headers=headers,
+    )
+    assert failed.status_code == 409
+    assert failed.json()["detail"] == videos_module.ASSIGNEE_CONFLICT_DETAIL
+    assert _files_in(_videos_dir(ctx)) == []
+    retried = ctx.client.post(
+        f"/api/projects/{pid}/videos/upload",
+        files={"file": ("retry.mp4", b"retry", "video/mp4")},
+        data={"assignee_membership_id": str(bob_mid)}, headers=headers,
+    )
+    assert retried.status_code == 201
+    assert retried.json()["assignee_membership_id"] == bob_mid
 
 
 # ---------- Content-Type 仅辅助 ----------

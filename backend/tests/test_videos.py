@@ -213,7 +213,7 @@ def test_stream_inactive_membership_rejected(ctx, tmp_path, login_headers):
     with ctx.session_factory() as db:
         db.add(
             ProjectMembership(
-                project_id=project["id"], user_id=alice_id, role="annotator", status="inactive"
+                project_id=project["id"], user_id=alice_id, role="member", status="inactive"
             )
         )
         db.commit()

@@ -23,9 +23,68 @@ export interface Project {
   description: string | null;
   status: string;
   created_at: string;
-  /** 当前用户在该项目内的角色：owner / admin / annotator / reviewer */
-  role: string;
+  role: ProjectRole;
+  membership_id: number;
+  can_review: boolean;
 }
+
+export type ProjectRole = "owner" | "admin" | "member";
+
+export interface Membership {
+  id: number;
+  project_id: number;
+  user_id: number;
+  username: string;
+  role: ProjectRole;
+  can_review: boolean;
+  status: string;
+  created_at: string;
+}
+
+/** 所有 active 项目成员都可读取的负责人精简目录。 */
+export interface AssigneeDirectoryItem {
+  membership_id: number;
+  username: string;
+}
+
+/** VideoOut.assignee 的完整嵌套结构；can_review 为后端计算后的有效权限。 */
+export interface Assignee {
+  id: number;
+  project_id: number;
+  user_id: number;
+  username: string;
+  role: ProjectRole;
+  can_review: boolean;
+  status: string;
+  created_at: string;
+}
+
+export interface MembershipUpdateInput {
+  role?: "admin" | "member";
+  can_review?: boolean;
+}
+
+export interface Invite { invite_code: string }
+export interface AssignmentStatsItem {
+  assignee_membership_id: number;
+  username: string;
+  total: number;
+  draft: number;
+  submitted: number;
+  approved: number;
+  rejected: number;
+}
+export interface AssignmentStats {
+  total: number;
+  draft: number;
+  submitted: number;
+  approved: number;
+  rejected: number;
+  unassigned: number;
+  by_assignee: AssignmentStatsItem[];
+}
+export type VideoView = "mine" | "unassigned" | "all";
+export interface VideoListParams { view?: VideoView; workflow_status?: string; assignee_membership_id?: number }
 
 export interface ProjectCreateInput {
   name: string;
@@ -64,6 +123,8 @@ export interface Video {
   submitted_at: string | null;
   approved_at: string | null;
   approved_by: number | null;
+  assignee_membership_id: number | null;
+  assignee: Assignee | null;
   created_at: string;
 }
 
@@ -75,6 +136,7 @@ export interface VideoCreateInput {
   height?: number | null;
   status?: string | null;
   storage_path?: string | null;
+  assignee_membership_id?: number | null;
 }
 
 // ---------- 标注 ----------
@@ -144,6 +206,7 @@ export interface Review {
   created_at: string;
   /** 便捷字段：审核人用户名（后端返回时显示） */
   reviewer: string | null;
+  submission_id: number | null;
 }
 
 export interface ReviewCreateInput {
@@ -469,8 +532,7 @@ export const DEFAULT_PAGE_SIZE = 20;
 export const ROLE_LABELS: Record<string, string> = {
   owner: "所有者",
   admin: "管理员",
-  annotator: "标注者",
-  reviewer: "审核者",
+  member: "成员",
 };
 
 export const DEFAULT_FPS = 30;

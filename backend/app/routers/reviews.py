@@ -14,6 +14,7 @@ from ..models import (
     Annotation, DetectionImport, DraftIdentityEdit, Review, Submission,
     SubmissionAnnotation, Video,
 )
+from ..permissions import require_editor, require_reviewer
 from ..schemas import ReviewCreate, ReviewOut, VideoOut
 from ..submission_service import (create_submission, resolve_and_hash_source,
                                   validate_snapshot_integrity)
@@ -21,9 +22,6 @@ from ..video_write_gate import video_write_gate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reviews"])
-_SUBMIT_ROLES = {"owner", "admin", "annotator"}
-_REVIEW_ROLES = {"owner", "admin", "reviewer"}
-_WITHDRAW_ROLES = {"owner", "admin", "annotator"}
 
 
 def _now() -> datetime:
@@ -53,8 +51,7 @@ def _to_review_out(review: Review) -> ReviewOut:
 def submit_video(project_id: int, video_id: int, request: Request,
                  access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> Video:
     membership = access[1]
-    if membership.role not in _SUBMIT_ROLES:
-        raise HTTPException(status_code=403, detail="Only owner/admin/annotator can submit")
+    require_editor(membership, "Only active project members can submit")
     observed = _get_video(db, project_id, video_id)
     observed_import = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
     if observed_import is None:
@@ -113,8 +110,7 @@ def withdraw_video(project_id: int, video_id: int, access: tuple = Depends(proje
         submission = db.query(Submission).filter_by(video_id=video_id, status="submitted").one_or_none()
         if submission is None:
             raise HTTPException(status_code=409, detail="Video has no submitted attempt to withdraw")
-        if membership.role not in _WITHDRAW_ROLES and submission.submitted_by != membership.user_id:
-            raise HTTPException(status_code=403, detail="Only owner/admin/annotator or original submitter can withdraw")
+        require_editor(membership, "Only active project members can withdraw")
         if submission.review is not None:
             raise HTTPException(status_code=409, detail="A reviewed submission cannot be withdrawn")
         changed = db.query(Submission).filter(
@@ -131,8 +127,7 @@ def withdraw_video(project_id: int, video_id: int, access: tuple = Depends(proje
 @router.get("/api/projects/{project_id}/reviews/queue", response_model=list[VideoOut])
 def review_queue(project_id: int, access: tuple = Depends(project_access),
                  db: Session = Depends(get_db)) -> list[Video]:
-    if access[1].role not in _REVIEW_ROLES:
-        raise HTTPException(status_code=403, detail="Only owner/admin/reviewer can view the review queue")
+    require_reviewer(access[1], "Review permission is required to view the review queue")
     return db.query(Video).join(Submission, Submission.video_id == Video.id).filter(
         Video.project_id == project_id, Submission.status == "submitted"
     ).order_by(Submission.submitted_at.desc(), Submission.id.desc()).all()
@@ -150,8 +145,7 @@ def review_history(project_id: int, video_id: int, access: tuple = Depends(proje
 def create_review(project_id: int, video_id: int, body: ReviewCreate, request: Request,
                   access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> ReviewOut:
     membership = access[1]
-    if membership.role not in _REVIEW_ROLES:
-        raise HTTPException(status_code=403, detail="Only owner/admin/reviewer can review")
+    require_reviewer(membership)
     observed = _get_video(db, project_id, video_id)
     observed_was_submitted = observed.workflow_status == "submitted"
     observed_import = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
