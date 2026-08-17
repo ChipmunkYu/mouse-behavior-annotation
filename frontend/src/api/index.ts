@@ -112,6 +112,7 @@ export function batchAssignVideos(projectId: number | string, video_ids: number[
   return apiFetch<Video[]>(`/projects/${projectId}/videos/assignments`, { method: "POST", body: JSON.stringify({ video_ids, assignee_membership_id }) });
 }
 export function getAssignmentStats(projectId: number | string): Promise<AssignmentStats> {
+  // 响应同时包含 unassigned（全部未分配）与 claimable（未分配草稿）。
   return apiFetch<AssignmentStats>(`/projects/${projectId}/assignment-stats`);
 }
 

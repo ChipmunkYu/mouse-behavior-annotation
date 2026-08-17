@@ -41,7 +41,7 @@ def test_claim_competition_release_filters_and_stats(ctx, login_headers):
     winner_h = alice_h if winner == alice_mid else bob_h
     assert len(ctx.client.get(f"/api/projects/{project['id']}/videos?view=mine", headers=winner_h).json()) == 1
     stats = ctx.client.get(f"/api/projects/{project['id']}/assignment-stats", headers=owner_h).json()
-    assert stats["total"] == 1 and stats["unassigned"] == 0
+    assert stats["total"] == 1 and stats["unassigned"] == 0 and stats["claimable"] == 0
     assert len(stats["by_assignee"]) == 3
     winner_stats = next(item for item in stats["by_assignee"] if item["assignee_membership_id"] == winner)
     assert winner_stats == {
@@ -90,6 +90,82 @@ def test_claim_assignee_write_race_returns_stable_409_and_can_retry(
     retried = ctx.client.post(path, headers=bob_h)
     assert retried.status_code == 200
     assert retried.json()["assignee_membership_id"] == bob_mid
+
+
+@pytest.mark.parametrize(
+    ("workflow_status", "expected_status"),
+    (("draft", 200), ("submitted", 409), ("approved", 409), ("rejected", 409)),
+)
+def test_claim_only_accepts_unassigned_draft(
+    workflow_status, expected_status, ctx, login_headers
+):
+    project, owner_h, alice_h, _bob_h, alice_mid, _bob_mid = _setup(ctx, login_headers)
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": f"claim-{workflow_status}.mp4"},
+        headers=owner_h,
+    ).json()
+    with ctx.session_factory() as db:
+        db.get(Video, video["id"]).workflow_status = workflow_status
+        db.commit()
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/claim", headers=alice_h
+    )
+    assert response.status_code == expected_status
+    with ctx.session_factory() as db:
+        expected_assignee = alice_mid if workflow_status == "draft" else None
+        assert db.get(Video, video["id"]).assignee_membership_id == expected_assignee
+
+
+def test_claim_cas_rejects_status_change_at_update(monkeypatch, ctx, login_headers):
+    project, owner_h, alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "claim-status-race.mp4"},
+        headers=owner_h,
+    ).json()
+    original_update = Query.update
+    injected = False
+
+    def submit_at_claim_update(query, values, *args, **kwargs):
+        nonlocal injected
+        if not injected and any(
+            getattr(key, "key", key) == "assignee_membership_id" for key in values
+        ):
+            injected = True
+            query.session.execute(
+                update(Video).where(Video.id == video["id"]).values(workflow_status="submitted")
+            )
+        return original_update(query, values, *args, **kwargs)
+
+    monkeypatch.setattr(Query, "update", submit_at_claim_update)
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/claim", headers=alice_h
+    )
+    assert response.status_code == 409
+
+
+def test_assignment_stats_distinguishes_unassigned_and_claimable(ctx, login_headers):
+    project, owner_h, _alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+    videos = [
+        ctx.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={"filename": f"stats-{status}.mp4"},
+            headers=owner_h,
+        ).json()
+        for status in ("draft", "submitted", "approved", "rejected")
+    ]
+    with ctx.session_factory() as db:
+        for video, status in zip(videos, ("draft", "submitted", "approved", "rejected")):
+            db.get(Video, video["id"]).workflow_status = status
+        db.commit()
+
+    stats = ctx.client.get(
+        f"/api/projects/{project['id']}/assignment-stats", headers=owner_h
+    ).json()
+    assert stats["unassigned"] == 4
+    assert stats["claimable"] == 1
 
 
 def test_batch_assignment_validates_all_before_mutation_and_preserves_revisions(ctx, login_headers):

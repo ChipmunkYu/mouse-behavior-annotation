@@ -18,7 +18,9 @@
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
   - 搜索 + 视频工作流状态筛选；筛选字段严格为 `workflow_status`，不是媒体 `status` 或单条 `Annotation.review_status`。列表卡片显示时长 / 帧率 / 分辨率 / 媒体状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
-  - 分工提供“我的任务 / 待领取 / 全部”三视图；卡片显示当前负责人，项目成员可领取未分配视频，当前负责人可释放 draft 视频，owner/admin 可按负责人筛选并事务批量分配、改派或清空。
+  - 分工提供“我的任务 / 待领取 / 全部”三视图；“待领取”固定只显示未分配 `draft`，页签使用 `claimable`“可领取数”，与管理统计的全部未分配 `unassigned` 区分。项目成员可领取待领取视频，当前负责人可释放 draft 视频，owner/admin 可按负责人筛选并事务批量分配、改派或清空。
+  - owner/admin 在三个视图的桌面精细指针环境可框选当前可见的 `draft/rejected` 卡片；普通单击替换选择，Shift 追加，Ctrl/Cmd 切换，checkbox 保持逐项切换，并支持当前结果全选、Esc 取消和边缘自动滚动。member（包括 `can_review=true`）不启用框选。
+  - 粗指针或 `≤760px` 关闭框选和卡片单击选择，保留 checkbox 与全选；触屏关键目标扩大。工具栏、批量栏和短标签防内部换行，长用户名省略、文件名保持两行截断，中窄屏允许按逻辑顺序换行或堆叠。
   - 单视频上传和三文件导入完成时，owner/admin 可从精简负责人目录选择负责人；不选择则进入未分配状态。
   - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
   - **审核入口**：owner/admin 或 `can_review=true` 的 member 显示「✓ 审核工作台」入口。
@@ -72,6 +74,7 @@
 - 片段库页面 `src/pages/ClipsPage.tsx`：预览区加载源视频复用 `fetchVideoStreamUrl`，缩略图经 `fetchClipThumbnailUrl`（Bearer blob，失败回退占位）；轮询仅在有「待生成」片段时进行，组件卸载即清理。
 - 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
 - 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
+- 视频库框选状态机集中在 `src/hooks/useVideoMarqueeSelection.ts`，处理阈值、中心点命中、组合键集合、pointer capture、自动滚动、Esc/取消清理及设备降级；页面负责可选资格、筛选后选择清理和 aria-live 反馈。
 - 认证上下文在 `src/auth/`（AuthContext / ProtectedRoute / storage / 401 事件）。
 - 确认对话框：`src/components/ConfirmDialog.tsx` 的 `useConfirm()`（键盘可达，Esc / 遮罩取消，焦点归还）。
 - 时间轴：共享组件 `src/components/Timeline.tsx`（标注 / 审核共用，含键盘 ←/→）。
@@ -95,7 +98,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：production `npm run build` 通过；后端最终证据为 `414 passed, 3 skipped`，分工模块最后一次 focused 结果为 `17 passed`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。分工变更尚未部署；既有服务器状态不因本次仓库实现而改变，浏览器交互和长视频性能仍需持续回归。
+当前验证：本次框选、触屏降级和布局改动的 production `npm run build` 通过；后端最终证据仍为 `414 passed, 3 skipped`，分工模块及本次领取语义最后一次 focused 结果为 `25 passed`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。人工浏览器矩阵尚未执行，pointer capture、自动滚动、真实焦点、触屏、宽度/缩放、主题和读屏组合不能视为已验收。分工变更尚未部署；既有服务器状态不因本次仓库实现而改变。
 
 ## 目录结构
 
@@ -111,6 +114,7 @@ frontend/
     ├── main.tsx / App.tsx / vite-env.d.ts
  ├── api/ # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
  ├── auth/ # AuthContext / ProtectedRoute / storage / 401 事件
+ ├── hooks/ # useVideoMarqueeSelection 视频库桌面框选状态机
  ├── components/ # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
  ├── pages/ # LoginPage / ProjectsPage / VideosPage / ProjectManagementPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
     ├── styles/global.css

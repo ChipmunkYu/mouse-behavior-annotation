@@ -42,6 +42,6 @@ npm run dev
 - 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
 - 项目角色为 `owner/admin/member`；审核能力通过 `can_review` 与角色共同决定。分工只表示责任归属，active 成员仍可编辑和提交。
 - 视频库提供“我的任务 / 待领取 / 全部”，项目管理提供成员、邀请码和分工统计；迁移 head 为 `0012`。
-- 后端最终证据为 `414 passed, 3 skipped`，分工模块最后一次 focused 测试为 `17 passed`；前端 production build 与真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
+- 后端最终证据为 `414 passed, 3 skipped`，分工模块及本次领取语义最后一次 focused 测试为 `25 passed`；前端 production build 与真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
 - 服务器本机与 SSH 隧道验收不等于完整公网验收；多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成。
 - SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。

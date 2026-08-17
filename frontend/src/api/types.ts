@@ -81,6 +81,8 @@ export interface AssignmentStats {
   approved: number;
   rejected: number;
   unassigned: number;
+  /** 未分配且处于 draft，可由项目成员领取的视频数。 */
+  claimable: number;
   by_assignee: AssignmentStatsItem[];
 }
 export type VideoView = "mine" | "unassigned" | "all";

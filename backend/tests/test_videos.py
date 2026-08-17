@@ -1,7 +1,7 @@
 """验收：视频元数据创建 / 列表 / 流。"""
 from __future__ import annotations
 
-from app.models import ProjectMembership
+from app.models import ProjectMembership, Video
 from app.routers import videos as videos_module
 
 
@@ -42,6 +42,41 @@ def test_create_and_list_video(ctx, login_headers):
     assert (
         ctx.client.get(f"/api/projects/{pid}/videos", headers=alice_headers).status_code == 403
     )
+
+
+def test_unassigned_view_only_lists_drafts_and_combines_workflow_filter(ctx, login_headers):
+    headers = login_headers()
+    project = ctx.client.post(
+        "/api/projects", json={"name": "待领取筛选"}, headers=headers
+    ).json()
+    videos = [
+        ctx.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={"filename": f"{status}.mp4"},
+            headers=headers,
+        ).json()
+        for status in ("draft", "submitted", "approved", "rejected")
+    ]
+    with ctx.session_factory() as db:
+        for video, status in zip(videos, ("draft", "submitted", "approved", "rejected")):
+            db.get(Video, video["id"]).workflow_status = status
+        db.commit()
+
+    unassigned = ctx.client.get(
+        f"/api/projects/{project['id']}/videos?view=unassigned", headers=headers
+    ).json()
+    assert [item["workflow_status"] for item in unassigned] == ["draft"]
+
+    draft = ctx.client.get(
+        f"/api/projects/{project['id']}/videos?view=unassigned&workflow_status=draft",
+        headers=headers,
+    ).json()
+    submitted = ctx.client.get(
+        f"/api/projects/{project['id']}/videos?view=unassigned&workflow_status=submitted",
+        headers=headers,
+    ).json()
+    assert [item["id"] for item in draft] == [videos[0]["id"]]
+    assert submitted == []
 
 
 def test_stream_404_without_storage_path(ctx, login_headers):

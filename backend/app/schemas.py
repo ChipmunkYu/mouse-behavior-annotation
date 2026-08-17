@@ -163,6 +163,7 @@ class AssignmentStatsOut(BaseModel):
     approved: int
     rejected: int
     unassigned: int
+    claimable: int
     by_assignee: list[AssignmentStatsItem]
 
 

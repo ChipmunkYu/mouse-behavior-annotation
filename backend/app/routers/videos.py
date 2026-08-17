@@ -122,7 +122,10 @@ def list_videos(
     if view == "mine":
         query = query.filter(Video.assignee_membership_id == access[1].id)
     elif view == "unassigned":
-        query = query.filter(Video.assignee_membership_id.is_(None))
+        query = query.filter(
+            Video.assignee_membership_id.is_(None),
+            Video.workflow_status == "draft",
+        )
     if workflow_status is not None:
         query = query.filter(Video.workflow_status == workflow_status)
     if assignee_membership_id is not None:
@@ -286,7 +289,10 @@ def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_
                 db: Session = Depends(get_db)) -> Video:
     try:
         changed = db.query(Video).filter(
-            Video.id == video_id, Video.project_id == project_id, Video.assignee_membership_id.is_(None)
+            Video.id == video_id,
+            Video.project_id == project_id,
+            Video.assignee_membership_id.is_(None),
+            Video.workflow_status == "draft",
         ).update({"assignee_membership_id": access[1].id}, synchronize_session=False)
     except IntegrityError as exc:
         _raise_if_assignee_conflict(db, exc)
@@ -294,7 +300,7 @@ def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_
         exists = db.query(Video.id).filter_by(id=video_id, project_id=project_id).first()
         if not exists:
             raise HTTPException(status_code=404, detail="Video not found in this project")
-        raise HTTPException(status_code=409, detail="Video has already been claimed")
+        raise HTTPException(status_code=409, detail="Video is no longer claimable")
     db.commit()
     return db.get(Video, video_id)
 
@@ -368,10 +374,14 @@ def assignment_stats(project_id: int, access: tuple = Depends(project_access),
         func.count(Video.id), status_counts("draft"), status_counts("submitted"),
         status_counts("approved"), status_counts("rejected"),
         func.coalesce(func.sum(case((Video.assignee_membership_id.is_(None), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((
+            Video.assignee_membership_id.is_(None) & (Video.workflow_status == "draft"), 1
+        ), else_=0)), 0),
     ).filter(Video.project_id == project_id).one()
     return AssignmentStatsOut(
         total=totals[0], draft=totals[1], submitted=totals[2],
-        approved=totals[3], rejected=totals[4], unassigned=totals[5], by_assignee=items,
+        approved=totals[3], rejected=totals[4], unassigned=totals[5],
+        claimable=totals[6], by_assignee=items,
     )
 
 
