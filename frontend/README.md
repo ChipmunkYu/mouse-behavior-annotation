@@ -98,7 +98,7 @@ npm run build
 npm run preview
 ```
 
-当前 category-role-schema 验证：production `npm run build` 通过（62 modules）；后端全量 `483 passed, 3 skipped, 1 warning`；runtime smoke 确认 health、OpenAPI 创建必填/minItems 与缺 categories 422，用户确认浏览器可访问且服务正常。本功能人工矩阵已通过创建门禁与原子创建、version 0/保存递增/刷新/永久锁定、真实三文件导入、角色槽位顺序门禁与手动往返、跨角色移动确认、不完整草稿保存与提交门禁、刷新恢复、提交、Review 队列/角色摘要/批准、窄屏及键盘。角色导航实时 accessible/恢复逻辑和 Review queue 两项实测 remediation 均已由用户复测通过。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不阻断本功能。改动未提交、未合并、未推送、未部署；既有服务器状态不因本 worktree 实现而改变。
+当前 category-role-schema 验证：production `npm run build` 通过（62 modules）；后端全量 `483 passed, 3 skipped, 1 warning`；runtime smoke 确认 health、OpenAPI 创建必填/minItems 与缺 categories 422，用户确认浏览器可访问且服务正常。本功能人工矩阵已通过创建门禁与原子创建、version 0/保存递增/刷新/永久锁定、真实三文件导入、角色槽位顺序门禁与手动往返、跨角色移动确认、不完整草稿保存与提交门禁、刷新恢复、提交、Review 队列/角色摘要/批准、窄屏及键盘。角色导航实时 accessible/恢复逻辑和 Review queue 两项实测 remediation 均已由用户复测通过。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不阻断本功能。改动已提交为 `9cececd`，尚未合并、推送或部署；既有服务器状态不因本 worktree 实现而改变。
 
 ## 目录结构
 
