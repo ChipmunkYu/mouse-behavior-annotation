@@ -20,7 +20,15 @@ from ..database import get_db
 from ..deps import project_access
 from ..models import ProjectMembership, User, Video
 from ..permissions import is_manager, require_manager
-from ..schemas import AssignmentBatchRequest, AssignmentStatsItem, AssignmentStatsOut, VideoCreate, VideoOut
+from ..schemas import (
+    AssignmentBatchRequest,
+    AssignmentStatsItem,
+    AssignmentStatsOut,
+    VideoClaimsRequest,
+    VideoClaimsResponse,
+    VideoCreate,
+    VideoOut,
+)
 
 router = APIRouter(tags=["videos"])
 
@@ -38,6 +46,7 @@ ERR_EMPTY_FILE = "Uploaded file is empty"
 ERR_DISK_SPACE = "Insufficient disk space to store video"
 ERR_DB_SAVE = "Failed to save video metadata"
 ERR_MEMBERSHIP_INACTIVE = "Project membership is not active"
+ERR_BATCH_CLAIM_CONFLICT = "One or more videos are no longer claimable"
 
 
 def _validate_assignee(db: Session, project_id: int, membership_id: int | None) -> ProjectMembership | None:
@@ -54,6 +63,21 @@ def _raise_if_assignee_conflict(db: Session, exc: IntegrityError) -> None:
     if is_assignee_write_conflict(exc):
         raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
     raise exc
+
+
+def _claim_videos_cas(
+    db: Session,
+    project_id: int,
+    video_ids: list[int],
+    membership_id: int,
+) -> int:
+    """将仍属于项目、未分配且为 draft 的指定视频原子领取给当前成员。"""
+    return db.query(Video).filter(
+        Video.id.in_(video_ids),
+        Video.project_id == project_id,
+        Video.assignee_membership_id.is_(None),
+        Video.workflow_status == "draft",
+    ).update({"assignee_membership_id": membership_id}, synchronize_session=False)
 
 
 class _InsufficientDiskSpace(Exception):
@@ -284,16 +308,42 @@ async def upload_video(
         await file.close()
 
 
+@router.post(
+    "/api/projects/{project_id}/videos/claims",
+    response_model=VideoClaimsResponse,
+)
+def claim_videos(
+    project_id: int,
+    body: VideoClaimsRequest,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> VideoClaimsResponse:
+    video_ids = list(body.video_ids)
+    try:
+        changed = _claim_videos_cas(db, project_id, video_ids, access[1].id)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=ERR_BATCH_CLAIM_CONFLICT) from None
+    if changed != len(video_ids):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=ERR_BATCH_CLAIM_CONFLICT)
+    db.commit()
+    rows = db.query(Video).filter(
+        Video.project_id == project_id,
+        Video.id.in_(video_ids),
+    ).all()
+    by_id = {video.id: video for video in rows}
+    return VideoClaimsResponse(
+        claimed_count=len(video_ids),
+        videos=[by_id[video_id] for video_id in video_ids],
+    )
+
+
 @router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut)
 def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
                 db: Session = Depends(get_db)) -> Video:
     try:
-        changed = db.query(Video).filter(
-            Video.id == video_id,
-            Video.project_id == project_id,
-            Video.assignee_membership_id.is_(None),
-            Video.workflow_status == "draft",
-        ).update({"assignee_membership_id": access[1].id}, synchronize_session=False)
+        changed = _claim_videos_cas(db, project_id, [video_id], access[1].id)
     except IntegrityError as exc:
         _raise_if_assignee_conflict(db, exc)
     if changed != 1:

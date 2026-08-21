@@ -14,7 +14,7 @@
 - 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
   含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
-- 分工能力：`owner/admin/member` 三角色、member 独立 `can_review`、项目邀请码、视频当前负责人、未分配草稿的 CAS 原子领取、释放、事务批量分配、三视图与 `unassigned/claimable` 双口径统计；分工不隔离 active 成员的编辑权限。
+- 分工能力：`owner/admin/member` 三角色、member 独立 `can_review`、项目邀请码、视频当前负责人、未分配草稿的单个/批量 CAS 自领、释放、管理员事务批量分配、三视图与 `unassigned/claimable` 双口径统计；分工不隔离 active 成员的编辑权限。
 - YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核，以及每个 `SubmissionAnnotation` 独立四文件的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
 - 正式项目导出是每片段固定 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的四文件 ZIP；单视频 `/annotations/export` 仅为 legacy 兼容 JSON API，两者不是同一契约。
 
@@ -279,6 +279,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `POST` | `/api/projects/{project_id}/videos` | JSON 创建视频元数据；owner/admin 可指定 `assignee_membership_id` |
 | `POST` | `/api/projects/{project_id}/videos/upload` | 真实视频流式上传；owner/admin 可用 multipart 字段指定负责人 → 201 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/claim` | 项目成员以 CAS 原子领取未分配 `draft`；已分配或已非 `draft` 返回 409 |
+| `POST` | `/api/projects/{project_id}/videos/claims` | 项目成员批量自领 1–200 个唯一视频 ID；固定当前 membership、全有或全无，任一无效统一 409，成功按请求顺序返回 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/release` | 当前负责人释放自己的 draft 视频 |
 | `POST` | `/api/projects/{project_id}/videos/assignments` | owner/admin 事务批量分配、改派或清空 draft/rejected 视频 |
 | `GET` | `/api/projects/{project_id}/assignment-stats` | 项目与逐负责人的工作流数量统计；`unassigned` 为全部未分配，`claimable` 为未分配 `draft` |
@@ -628,7 +629,7 @@ cd backend
 pytest -q
 ```
 
-当前最终全量结果：`414 passed, 3 skipped`；分工模块及本次领取语义最后一次 focused 结果：`25 passed`。前端 `npm run build` 通过。真实 ffmpeg/ffprobe 的 25/30/60 FPS 验收也已通过；这些证据不替代部署、公网入口、备份恢复或持续的浏览器回归验收。
+历史最近一次后端全量结果为 `414 passed, 3 skipped`，早于本次批量领取改动；本次未运行全量测试。独立精简验收已通过：`backend/tests/test_assignments.py` 为 `26 passed, 1 warning`（`37.66s`），frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。真实 ffmpeg/ffprobe 的 25/30/60 FPS 验收也已通过；这些证据不替代全量回归、部署、公网入口、备份恢复或浏览器人工验收。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
@@ -649,7 +650,7 @@ category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类
 ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
-分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的 CAS 领取及负责人/状态竞争、draft 释放、事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
+分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
 以及迁移验收（全新库建至 head 0012 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
 已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011）升级至 head 0012 /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /

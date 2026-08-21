@@ -23,6 +23,8 @@ import type {
   ReviewCreateInput,
   User,
   Video,
+  VideoClaimsInput,
+  VideoClaimsResponse,
   VideoCreateInput,
   CorrectedTracksExport,
   CorrectedTracksParams,
@@ -104,6 +106,9 @@ export function listVideos(projectId: number | string, params: VideoListParams =
 
 export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {
   return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/claim`, { method: "POST" });
+}
+export function claimVideos(projectId: number | string, input: VideoClaimsInput): Promise<VideoClaimsResponse> {
+  return apiFetch<VideoClaimsResponse>(`/projects/${projectId}/videos/claims`, { method: "POST", body: JSON.stringify(input) });
 }
 export function releaseVideo(projectId: number | string, videoId: number): Promise<Video> {
   return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/release`, { method: "POST" });

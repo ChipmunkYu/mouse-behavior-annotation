@@ -130,6 +130,15 @@ export interface Video {
   created_at: string;
 }
 
+export interface VideoClaimsInput {
+  video_ids: number[];
+}
+
+export interface VideoClaimsResponse {
+  claimed_count: number;
+  videos: Video[];
+}
+
 export interface VideoCreateInput {
   filename: string;
   duration?: number | null;
