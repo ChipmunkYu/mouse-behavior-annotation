@@ -85,16 +85,19 @@ class FfmpegMediaProcessor:
         self, input_path: str, start: float, end: float, output_path: str,
         crop: tuple[int, int, int, int] | None = None,
     ) -> list[str]:
-        """精确重编码命令：-ss 前置输入定位（重编码下帧精确）+ libx264 + yuv420p + faststart。"""
+        """精确重编码命令：-ss 定位 + -t 片长 + libx264 + yuv420p + faststart。"""
+        duration = end - start
+        if duration <= 0:
+            raise ValueError("clip end must be greater than start")
         cmd = [
             self.ffmpeg,
             "-y",
             "-ss",
             format_time(start),
-            "-to",
-            format_time(end),
             "-i",
             input_path,
+            "-t",
+            format_time(duration),
             "-map",
             "0:v:0",
             "-c:v",
@@ -111,10 +114,14 @@ class FfmpegMediaProcessor:
         if self.map_audio:
             # 可选音频映射（? 后缀：无音轨不报错），aac 编码
             cmd += ["-map", "0:a:0?", "-c:a", "aac"]
+        else:
+            # Do not let ffmpeg's automatic stream selection add an audio stream.
+            cmd += ["-an"]
         if crop is not None:
             x, y, w, h = crop
             cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
-        cmd.append(output_path)
+        # Worker outputs end in .mp4.part, so extension inference is intentionally unavailable.
+        cmd += ["-f", "mp4", output_path]
         return cmd
 
     def build_thumbnail_command(
@@ -137,7 +144,8 @@ class FfmpegMediaProcessor:
         if crop is not None:
             x, y, w, h = crop
             cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
-        cmd.append(output_path)
+        # Worker outputs end in .jpg.part; force the image muxer instead of inferring from .part.
+        cmd += ["-f", "image2", output_path]
         return cmd
 
     def _run(self, cmd: list[str]) -> None:

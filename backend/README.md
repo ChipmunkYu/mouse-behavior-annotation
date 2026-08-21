@@ -135,7 +135,7 @@ Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Wi
 短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
 已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
 该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。
-25/30/60 FPS 已在真实 ffmpeg/ffprobe 环境完成实际帧数、尺寸、时长、首末帧和缩略图验收。
+2026-08-17 已在 Python 3.11.9 隔离环境中使用 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成真实编码、媒体属性与 MediaWorker 本地验证；两者均可从 `.venv\Scripts` 找到。生产 FFmpeg/ffprobe 4.4.2 兼容性仍待候选环境验收。
 
 ### Sparse writer 切换维护命令
 
@@ -343,7 +343,7 @@ Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是�
 受控源媒体 SHA-256；withdraw 允许 owner/admin/annotator 或原 submitter，且仅限无 Review 的 submitted
 attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
 
-0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现并完成合并，真实 ffmpeg/ffprobe 的 25/30/60 FPS 媒体验收已通过。
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成 25/30/60 FPS 真实 FFmpeg 编码、ffprobe 属性和 MediaWorker 本地验证，生产 FFmpeg/ffprobe 4.4.2 候选验收仍待执行。
 
 Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
 并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
@@ -387,21 +387,22 @@ clip 与 thumbnail 使用同一整数 crop。已入队的 approved Submission �
 | `GET` | `/api/projects/{project_id}/jobs/{job_id}` | 任务详情 → `JobOut`（项目成员可读） |
 
 **精确重编码**：每条标注按 `[start_time, end_time)` 生成 `libx264 + yuv420p + faststart`
-H.264 MP4（`-ss` 前置输入定位 + 重编码，帧精确）；可选音频映射（`MEDIA_MAP_AUDIO`）。
+H.264 MP4（`-ss` 定位 + `-t` 片长）；默认 `-an`，启用 `MEDIA_MAP_AUDIO` 时可选音频 AAC。
+不做 stream-copy 降级。
 缩略图从片段**中点**（`(start+end)/2`）抽一帧 JPEG（`-frames:v 1 -q:v 2`）。
 
 **执行器与并发**：
 - `app/media.py` 封装 subprocess，命令一律**参数列表**调用、**禁用 `shell=True`**；
   `FFMPEG_PATH` / `FFPROBE_PATH` 可注入替换执行器（本机无 ffmpeg 时测试用 FakeMediaProcessor）。
 - 输入源解析严格限制在 `DATA_DIR/videos` 内（绝对/相对路径统一校验，越界或缺失 → 该 Clip 失败）。
-- 输出先写临时 `.part` 文件，成功后在 `clips_dir` / `thumbnails_dir` **原子替换**；
+- 输出先写临时 `.mp4.part` / `.jpg.part` 文件，并显式指定 `-f mp4` / `-f image2`（最后扩展名 `.part` 无法供 FFmpeg 推断 muxer），成功后在 `clips_dir` / `thumbnails_dir` **原子替换**；
   失败清理临时与半成品；stderr 截断写入 Clip/任务错误字段。DB 存相对路径。
 - **单 worker**（`ThreadPoolExecutor(max_workers=1)`，app.state 管理）；领取用条件
   `UPDATE ... WHERE status='queued'` 原子独占，杜绝两个线程领取同一任务；
   `MEDIA_SYNCHRONOUS=true` 时在请求线程内同步执行（测试确定性）。
 - **重启恢复**：启动时 `running` 视为中断——`attempts < MEDIA_MAX_ATTEMPTS` 则重排
-  并 `attempts+1`，否则判 `failed`（重试上限耗尽）。仅对本次确认中断并重排的 media/export
-  job，将其关联且仍属视频当前 revision 的 `processing` Clip 通过
+  并 `attempts+1`，否则判 `failed`（重试上限耗尽）。对两种结果都将该 interrupted media job
+  关联且仍属当前 authority 的 `processing` Clip 通过
   `id + status + updated_at` CAS 重置为 `pending`；普通等待超时不会重置或夺取活跃 claim。
   应用先完成两类 job/Clip 恢复，再调度全部 `queued` 任务，避免 worker 启动顺序互相破坏。
 - **部署边界**：Clip claim 目前没有持久化 owner token/heartbeat/lease，本恢复语义仅适用于当前
@@ -479,6 +480,8 @@ ZIP 完整性检查通过后，才在发布前短事务中复核冻结引用与 
 **任务与文件语义**：
 - 每次导出新建一条 `BackgroundJob(job_type=export)` 和唯一 dedupe key，保留历史任务、结果与
   过期时间；项目 active 导出通过 queued/running 查询排他。
+- commit 后的 worker schedule handoff 若失败，仅以 `queued + active key` guard 将任务置 `failed`
+  并释放 key，接口返回 503；若任务已被 claim 为 `running`，guard 不误改状态或释放 key。
 - 状态统计以最近任务冻结的类别范围为准；ready 必须满足 Submission Clip `status=ready`、
   `clip_path` 位于 `DATA_DIR/clips` 内且实体文件存在，否则列入 missing。
 - 项目导出 worker 对 missing Submission Clip 复用注入的 `MediaProcessor` 在后台任务内补生成；
@@ -609,7 +612,9 @@ cd backend
 pytest -q
 ```
 
-当前最终全量结果：`397 passed, 3 skipped`。前端 `npm run build` 通过。真实 ffmpeg/ffprobe 的 25/30/60 FPS 验收也已通过；这些证据不替代公网入口、备份恢复或持续的浏览器回归验收。
+此前后端全量结果为 `399 passed, 8 skipped`。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证；`fix/clip-transcoding@bcc9a03` 未合并 `main`、未部署，以上结果不构成生产候选验收。
+
+真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
@@ -650,3 +655,4 @@ dedupe_key 唯一约束防重复任务）。
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
 - 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；
   类别停用/删除管理界面留待后续批次。
+- 未实现源视频 `needs_transcode` 的自动转码或片段库播放；本次也未扩展 crop 与 cleanup。
