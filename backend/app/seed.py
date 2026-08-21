@@ -8,7 +8,7 @@ from .config import Settings
 from .models import BehaviorCategory, User
 
 # 北医 12 类（需求文档 §2.4）：方向性社交行为退化为无向标签。
-# 这是默认种子数据而非代码固定常量；项目创建时按此初始化。
+# 仅供受控 demo seed 建立演示方案；普通项目创建必须使用请求携带的完整方案。
 INITIAL_CATEGORIES: list[tuple[str, list[str]]] = [
     ("个体行为", ["奔跑", "行走", "静止"]),
     ("社交行为", ["一起", "接近", "追逐", "回避", "攻击行为", "鼻头接触", "鼻尾接触"]),

@@ -4,7 +4,7 @@
  * - 标注区间按类别着色，类别色仅用于区分行为
  */
 import { useMemo, type MouseEvent } from "react";
-import type { Annotation, Category } from "../api/types";
+import type { Category } from "../api/types";
 import { formatTimeShort } from "../utils/format";
 
 export default function Timeline({
@@ -16,7 +16,7 @@ export default function Timeline({
 }: {
   duration: number;
   currentTime: number;
-  annotations: Annotation[];
+  annotations: Array<{ id: number; category_id: number; start_time: number; end_time: number }>;
   categoryById: Map<number, Category>;
   onSeek: (t: number) => void;
 }) {

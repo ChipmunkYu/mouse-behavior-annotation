@@ -87,9 +87,7 @@ def test_create_annotation_cross_project_category_rejected(ctx):
     other = ctx.client.post(
         "/api/projects", json={"name": "项目Y"}, headers=headers
     ).json()
-    other_cat = ctx.client.get(
-        f"/api/projects/{other['id']}/categories", headers=headers
-    ).json()[0]
+    other_cat = ctx.configure_and_lock_minimal_scheme(other["id"], headers)[0]
 
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
@@ -147,9 +145,7 @@ def test_update_and_delete_annotation(ctx, login_headers):
     other = ctx.client.post(
         "/api/projects", json={"name": "别的项目"}, headers=headers
     ).json()
-    other_cat = ctx.client.get(
-        f"/api/projects/{other['id']}/categories", headers=headers
-    ).json()[0]
+    other_cat = ctx.configure_and_lock_minimal_scheme(other["id"], headers)[0]
     resp = ctx.client.patch(
         f"{base_url}/{ann_id}", json={"category_id": other_cat["id"]}, headers=headers
     )

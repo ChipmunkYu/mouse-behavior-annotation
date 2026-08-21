@@ -8,15 +8,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from ..category_scheme_service import (
+    CategorySchemeError,
+    categories_for_project,
+    normalize_and_persist_category_scheme,
+    scheme_hash,
+    scheme_snapshot,
+)
 from ..database import get_db
 from ..deps import project_access
-from ..models import Project, ProjectMembership, User
+from ..models import CategorySchemeAudit, Project, ProjectMembership, User
 from ..permissions import can_review, require_manager
 from ..schemas import (
     AssigneeDirectoryItem, InviteOut, JoinProjectRequest, MembershipOut, MembershipUpdate,
     ProjectCreate, ProjectOut,
 )
-from ..seed import init_project_categories
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 _INVITE_RESET_ATTEMPTS = 5
@@ -46,6 +52,9 @@ def _project_out(p: Project, m: ProjectMembership) -> ProjectOut:
     return ProjectOut(
         id=p.id, name=p.name, description=p.description, status=p.status,
         created_at=p.created_at, role=m.role, membership_id=m.id, can_review=can_review(m),
+        category_scheme_version=p.category_scheme_version,
+        category_scheme_locked_at=p.category_scheme_locked_at,
+        category_scheme_locked_by=p.category_scheme_locked_by,
     )
 
 
@@ -77,18 +86,45 @@ def create_project(
     if not name:
         raise HTTPException(status_code=400, detail="Project name must not be empty")
 
-    project = Project(name=name, description=body.description, status="active", created_by=user.id)
-    db.add(project)
-    db.flush()  # 获取 project.id
-
-    db.add(
-        ProjectMembership(project_id=project.id, user_id=user.id, role="owner")
-    )
-    init_project_categories(db, project.id)  # 自动初始化 12 类
-    db.commit()
+    try:
+        project = Project(
+            name=name, description=body.description, status="active", created_by=user.id
+        )
+        db.add(project)
+        db.flush()
+        membership = ProjectMembership(
+            project_id=project.id, user_id=user.id, role="owner"
+        )
+        db.add(membership)
+        db.flush()
+        before = scheme_snapshot(project, [])
+        normalize_and_persist_category_scheme(
+            db,
+            project_id=project.id,
+            request_categories=body.categories,
+            existing_categories=[],
+        )
+        db.flush()
+        categories = categories_for_project(db, project.id)
+        after = scheme_snapshot(project, categories)
+        db.add(CategorySchemeAudit(
+            project_id=project.id,
+            actor_id=user.id,
+            action="replace",
+            scheme_version=0,
+            before_json=before,
+            after_json=after,
+            scheme_hash=scheme_hash(after),
+        ))
+        db.commit()
+    except CategorySchemeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Project or category scheme conflicts") from exc
     db.refresh(project)
-
-    membership = db.query(ProjectMembership).filter_by(project_id=project.id, user_id=user.id).one()
+    db.refresh(membership)
     return _project_out(project, membership)
 
 

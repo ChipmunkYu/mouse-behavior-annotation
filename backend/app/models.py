@@ -51,6 +51,13 @@ class User(Base):
 
 class Project(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        CheckConstraint("category_scheme_version >= 0", name="ck_projects_category_scheme_version"),
+        CheckConstraint(
+            "(category_scheme_locked_at IS NULL) = (category_scheme_locked_by IS NULL)",
+            name="ck_projects_category_scheme_lock_pair",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -65,6 +72,13 @@ class Project(Base):
     invite_code: Mapped[str] = mapped_column(
         String(64), unique=True, nullable=False, default=lambda: secrets.token_urlsafe(32)
     )
+    category_scheme_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    category_scheme_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    category_scheme_locked_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
 
     members: Mapped[list["ProjectMembership"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -74,6 +88,12 @@ class Project(Base):
     )
     videos: Mapped[list["Video"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     import_batches: Mapped[list["VideoImportBatch"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    category_scheme_locker: Mapped[Optional["User"]] = relationship(
+        foreign_keys=[category_scheme_locked_by]
+    )
+    category_scheme_audits: Mapped[list["CategorySchemeAudit"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -125,6 +145,10 @@ class BehaviorCategory(Base):
             "mouse_count_max IS NULL OR mouse_count_max >= mouse_count_min",
             name="ck_behavior_categories_mouse_count_max",
         ),
+        CheckConstraint(
+            "participant_mode IN ('unordered', 'role_based')",
+            name="ck_behavior_categories_participant_mode",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -139,6 +163,12 @@ class BehaviorCategory(Base):
     # 参与小鼠数量范围：min>=1；max 为 NULL 表示无固定上限
     mouse_count_min: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     mouse_count_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    participant_mode: Mapped[str] = mapped_column(
+        String(32), default="unordered", server_default="unordered", nullable=False
+    )
+    role_definitions: Mapped[list] = mapped_column(
+        JSON, default=list, server_default=text("'[]'"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     project: Mapped["Project"] = relationship(back_populates="categories")
@@ -214,6 +244,12 @@ class Annotation(Base):
     """行为标注片段。"""
 
     __tablename__ = "annotations"
+    __table_args__ = (
+        CheckConstraint(
+            "participant_status IN ('valid', 'needs_participants')",
+            name="ck_annotations_participant_status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     video_id: Mapped[int] = mapped_column(
@@ -244,6 +280,12 @@ class Annotation(Base):
     )
     detection_import_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     identity_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    participant_roles: Mapped[Optional[dict]] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'"), nullable=True
+    )
+    participant_status: Mapped[str] = mapped_column(
+        String(32), default="valid", server_default="valid", nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -1066,6 +1108,10 @@ class SubmissionAnnotation(Base):
             name="ck_submission_annotations_time_range",
         ),
         CheckConstraint(
+            "category_participant_mode IN ('unordered', 'role_based')",
+            name="ck_submission_annotations_participant_mode",
+        ),
+        CheckConstraint(
             "start_frame >= 0 AND end_frame >= start_frame",
             name="ck_submission_annotations_frame_range",
         ),
@@ -1099,6 +1145,16 @@ class SubmissionAnnotation(Base):
         ForeignKey("behavior_categories.id", ondelete="RESTRICT"), nullable=False
     )
     category_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    category_group: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    category_participant_mode: Mapped[str] = mapped_column(
+        String(32), default="unordered", server_default="unordered", nullable=False
+    )
+    role_definitions_snapshot: Mapped[list] = mapped_column(
+        JSON, default=list, server_default=text("'[]'"), nullable=False
+    )
+    participant_roles_snapshot: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'"), nullable=False
+    )
     start_time: Mapped[float] = mapped_column(Float, nullable=False)
     end_time: Mapped[float] = mapped_column(Float, nullable=False)
     start_frame: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1117,3 +1173,31 @@ class SubmissionAnnotation(Base):
         uselist=False,
         foreign_keys="Clip.submission_annotation_id",
     )
+
+
+class CategorySchemeAudit(Base):
+    """Append-only project category-scheme history."""
+
+    __tablename__ = "category_scheme_audits"
+    __table_args__ = (
+        CheckConstraint("scheme_version >= 0", name="ck_category_scheme_audits_version"),
+        CheckConstraint("action IN ('replace', 'lock')", name="ck_category_scheme_audits_action"),
+        Index("ix_category_scheme_audits_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    scheme_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    scheme_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="category_scheme_audits")
+    actor: Mapped["User"] = relationship(foreign_keys=[actor_id])

@@ -8,7 +8,7 @@
 ## 功能
 
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
-- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。
+- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。创建表单复用类别方案编辑器，本地草稿可从空列表开始，但至少一个类别的名称、分组、颜色、参与对象模式及对应数量/角色完整前不能提交；创建成功后进入未锁定的项目管理页复核，永久锁定仍需 owner 另行确认。
 - **视频库** `/projects/:projectId/videos`：
   - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
   - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
@@ -62,7 +62,7 @@
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
-- **项目管理** `/projects/:projectId/manage`（owner/admin）：管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
+- **项目管理** `/projects/:projectId/manage`：owner 可复核创建时原子保存的完整类别方案并另行永久锁定；类别方案 GET/PUT/lock/audit 为 active owner-only。owner/admin 另可管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
 - **项目内导航**：视频库 / 片段库 / 审核 / 导出 / 项目管理；审核入口按有效审核能力显示，导出和项目管理仅 owner/admin，片段库全员可见。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 
@@ -98,7 +98,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：本次框选、触屏降级和布局改动的 production `npm run build` 通过；后端最终证据仍为 `414 passed, 3 skipped`，分工模块及本次领取语义最后一次 focused 结果为 `25 passed`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。人工浏览器矩阵尚未执行，pointer capture、自动滚动、真实焦点、触屏、宽度/缩放、主题和读屏组合不能视为已验收。分工变更尚未部署；既有服务器状态不因本次仓库实现而改变。
+当前 category-role-schema 验证：production `npm run build` 通过（62 modules）；后端全量 `483 passed, 3 skipped, 1 warning`；runtime smoke 确认 health、OpenAPI 创建必填/minItems 与缺 categories 422，用户确认浏览器可访问且服务正常。本功能人工矩阵已通过创建门禁与原子创建、version 0/保存递增/刷新/永久锁定、真实三文件导入、角色槽位顺序门禁与手动往返、跨角色移动确认、不完整草稿保存与提交门禁、刷新恢复、提交、Review 队列/角色摘要/批准、窄屏及键盘。角色导航实时 accessible/恢复逻辑和 Review queue 两项实测 remediation 均已由用户复测通过。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不阻断本功能。改动未提交、未合并、未推送、未部署；既有服务器状态不因本 worktree 实现而改变。
 
 ## 目录结构
 

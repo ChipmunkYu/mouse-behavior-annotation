@@ -82,6 +82,11 @@ def _to_item(row) -> ClipItem:
         annotator_name=row.annotator_name,
         review_status=row.review_status,
         created_at=row.created_at,
+        category_group=row.category_group,
+        category_participant_mode=row.category_participant_mode,
+        role_definitions=row.role_definitions or [],
+        participant_roles=row.participant_roles or {},
+        mouse_ids=row.mouse_ids or [],
     )
 
 
@@ -119,6 +124,11 @@ def list_clips(
             Clip.clip_path,
             Clip.thumbnail_path,
             Clip.status.label("clip_status"),
+            SubmissionAnnotation.category_group,
+            SubmissionAnnotation.category_participant_mode,
+            SubmissionAnnotation.role_definitions_snapshot.label("role_definitions"),
+            SubmissionAnnotation.participant_roles_snapshot.label("participant_roles"),
+            SubmissionAnnotation.mouse_ids,
         )
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
@@ -135,6 +145,10 @@ def list_clips(
         Annotation.end_time, Annotation.start_frame, Annotation.end_frame, Annotation.confidence,
         Annotation.review_status, Annotation.created_at, User.username.label("annotator_name"),
         Clip.clip_path, Clip.thumbnail_path, Clip.status.label("clip_status"),
+        BehaviorCategory.group.label("category_group"),
+        BehaviorCategory.participant_mode.label("category_participant_mode"),
+        BehaviorCategory.role_definitions.label("role_definitions"),
+        Annotation.participant_roles.label("participant_roles"), Annotation.mouse_ids,
     ).select_from(Annotation).join(Video).join(BehaviorCategory).outerjoin(User, User.id == Annotation.annotator_id).outerjoin(
         Clip, and_(Clip.annotation_id == Annotation.id, Clip.source_revision == Video.media_revision)
     ).where(*legacy_conds)

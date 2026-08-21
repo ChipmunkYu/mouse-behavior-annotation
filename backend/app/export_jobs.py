@@ -81,7 +81,11 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
         while name.casefold() in used_categories:
             suffix += 1
             tail = token[:12] if suffix == 1 else f"{token[:12]}_{suffix}"
-            name = safe_part(f"{base}_{tail}", fallback="category", limit=80)
+            # Reserve the suffix outside the colliding sanitizer result.  Calling the
+            # same sanitizer with the same final limit can otherwise never make progress
+            # for distinct names that normalize to one portable component.
+            stem = safe_part(base, fallback="category", limit=80 - len(tail) - 1)
+            name = f"{stem}_{tail}"
         used_categories.add(name.casefold()); category_directories[str(category_id)] = name
     submission_ids = sorted({submission.id for _annotation, submission, _clip in rows})
     annotation_ids = [annotation.id for annotation, _submission, _clip in rows]
@@ -284,7 +288,17 @@ class ExportWorker:
                     "frame_count": annotation.end_frame - annotation.start_frame + 1}
         probe = self.processor.probe_clip(str(target / "clip.mp4"), expected=expected)
         tracks_summary = self._write_tracks(db, annotation, submission, plan, target / "tracks.json")
+        participants = []
+        if annotation.category_participant_mode == "role_based":
+            assignments = annotation.participant_roles_snapshot or {}
+            participants = [
+                {"role_key": definition["key"], "role_name": definition["name"],
+                 "track_ids": assignments.get(definition["key"], [])}
+                for definition in sorted(annotation.role_definitions_snapshot or [],
+                                         key=lambda item: item["role_sort_order"])
+            ]
         annotation_doc = {"behavior": annotation.category_name, "mouse_ids": annotation.mouse_ids,
+            "participants": participants,
             "confidence": annotation.confidence,
             "frame_range": {"start": 0, "end": expected["frame_count"] - 1},
             "time_range": {"start": 0.0, "end": expected["frame_count"] / snapshot.fps}}

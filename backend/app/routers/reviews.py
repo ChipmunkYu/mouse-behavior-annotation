@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reviews"])
 
 
+def _snapshot_annotation(copy: SubmissionAnnotation) -> dict:
+    return {
+        "id": copy.id, "source_annotation_id": copy.source_annotation_id,
+        "category_id": copy.category_id, "category_name": copy.category_name,
+        "category_group": copy.category_group,
+        "category_participant_mode": copy.category_participant_mode,
+        "role_definitions": copy.role_definitions_snapshot or [],
+        "participant_roles": copy.participant_roles_snapshot or {},
+        "mouse_ids": copy.mouse_ids or [], "start_time": copy.start_time,
+        "end_time": copy.end_time, "start_frame": copy.start_frame,
+        "end_frame": copy.end_frame,
+    }
+
+
 def _now() -> datetime:
     return datetime.utcnow()
 
@@ -44,6 +58,8 @@ def _to_review_out(review: Review) -> ReviewOut:
         identity_revision=review.identity_revision, created_at=review.created_at,
         reviewer=review.reviewer.username if review.reviewer else None,
         submission_id=review.submission_id,
+        submission_annotations=[_snapshot_annotation(item) for item in review.submission.annotations]
+        if review.submission else [],
     )
 
 
@@ -126,11 +142,14 @@ def withdraw_video(project_id: int, video_id: int, access: tuple = Depends(proje
 
 @router.get("/api/projects/{project_id}/reviews/queue", response_model=list[VideoOut])
 def review_queue(project_id: int, access: tuple = Depends(project_access),
-                 db: Session = Depends(get_db)) -> list[Video]:
+                 db: Session = Depends(get_db)) -> list[dict]:
     require_reviewer(access[1], "Review permission is required to view the review queue")
-    return db.query(Video).join(Submission, Submission.video_id == Video.id).filter(
+    rows = db.query(Video, Submission).join(Submission, Submission.video_id == Video.id).filter(
         Video.project_id == project_id, Submission.status == "submitted"
     ).order_by(Submission.submitted_at.desc(), Submission.id.desc()).all()
+    return [{**VideoOut.model_validate(video, from_attributes=True).model_dump(),
+             "submission_annotations": [_snapshot_annotation(item) for item in submission.annotations]}
+            for video, submission in rows]
 
 
 @router.get("/api/projects/{project_id}/videos/{video_id}/reviews", response_model=list[ReviewOut])

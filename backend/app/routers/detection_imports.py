@@ -20,11 +20,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..draft_detection_edits import revalidate_annotations
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..deps import project_access
 from ..effective_detections import effective_detection_query, effective_track_summary_query
 from ..models import (
     Annotation,
+    BehaviorCategory,
     DetectionImport,
     DetectionStateOverride,
     DraftIdentityEdit,
@@ -38,7 +40,8 @@ from ..permissions import is_manager
 from ..schemas import (
     BatchStatusOut,
     DetectionImportCurrentOut,
-    DetectionImportReplaceOut,
+    DetectionImportReplacementConfirmedOut,
+    DetectionImportReplacementPreviewOut,
     DetectionWithTrackOut,
     PageOut,
     VideoImportBatchOut,
@@ -1104,7 +1107,12 @@ def get_import_batch(
 # 已有视频的检测导入操作
 # ---------------------------------------------------------------------------
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/detection-imports")
+@router.post(
+    "/api/projects/{project_id}/videos/{video_id}/detection-imports",
+    response_model=(
+        DetectionImportReplacementPreviewOut | DetectionImportReplacementConfirmedOut
+    ),
+)
 async def replace_detection_import(
     project_id: int,
     video_id: int,
@@ -1202,23 +1210,30 @@ async def replace_detection_import(
             .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)
             .first()
         )
-        affected_annotations = (
-            db.query(Annotation)
+        mode_counts = dict(
+            db.query(BehaviorCategory.participant_mode, func.count(Annotation.id))
+            .join(Annotation, Annotation.category_id == BehaviorCategory.id)
             .filter(Annotation.video_id == video_id)
-            .count()
+            .group_by(BehaviorCategory.participant_mode)
+            .all()
         )
+        unordered_count = mode_counts.get("unordered", 0)
+        role_based_count = mode_counts.get("role_based", 0)
+        affected_annotations = unordered_count + role_based_count
         preview = {
             "preview": True,
             "message": (
                 "Replacing detection import will deactivate the current import"
                 + (f" (revision {existing_active.revision})" if existing_active else "")
-                + f", reset identity revision to 0, and mark {affected_annotations} "
-                "existing annotation(s) as 'needs_mouse_ids'. "
+                + ", reset identity revision to 0, force unordered annotations to "
+                "reselect participants, and revalidate role-based annotations. "
                 "Pass confirm=true to proceed."
             ),
             "current_revision": video.detection_import_revision,
             "new_revision": video.detection_import_revision + 1,
             "affected_annotations_count": affected_annotations,
+            "unordered_force_reselection_count": unordered_count,
+            "role_based_revalidation_count": role_based_count,
             "detection_count": len(flat_detections),
             "unique_track_count": len({d[2].get("track_id", 0) for d in flat_detections}),
         }
@@ -1260,6 +1275,20 @@ async def replace_detection_import(
                 "detection_import_revision": 0,
                 "identity_revision": 0,
             }, synchronize_session=False)
+            unordered_ids = {
+                row.id for row in db.query(Annotation).filter(Annotation.video_id == video_id).all()
+                if row.category is None or row.category.participant_mode == "unordered"
+            }
+            revalidate_annotations(
+                db, imp, video, 0, force_needs_mouse_ids=unordered_ids
+            )
+            # Preserve the legacy unordered replacement contract while role-based rows are
+            # immediately reprojected from their authoritative role mapping.
+            if unordered_ids:
+                for annotation in db.query(Annotation).filter(Annotation.id.in_(unordered_ids)).all():
+                    annotation.mouse_id_status = "needs_mouse_ids"
+                    annotation.detection_import_revision = 0
+                    annotation.identity_revision = 0
             db.query(Annotation).filter(
                 Annotation.video_id == video_id, Annotation.review_status == "approved"
             ).update({"review_status": "pending", "reviewer_id": None}, synchronize_session=False)
@@ -1280,6 +1309,7 @@ async def replace_detection_import(
     ).distinct().count()
 
     return {
+        "preview": False,
         "id": imp.id,
         "video_id": imp.video_id,
         "revision": imp.revision,
@@ -1287,10 +1317,10 @@ async def replace_detection_import(
         "track_count": track_count,
         "status": imp.status,
         "affected_annotations_count": affected_annotations,
+        "annotations_must_be_refetched": True,
         "message": (
-            f"Detection import revision {new_revision} created. "
-            f"{affected_annotations} existing annotation(s) set to needs_mouse_ids. "
-            "Old imports preserved. Annotations need re-confirmation of mouse_ids."
+            "Detection import replaced. Refetch annotations to obtain their current "
+            "participant and track-validation status."
         ),
     }
 

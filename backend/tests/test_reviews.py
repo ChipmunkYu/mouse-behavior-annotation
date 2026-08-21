@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from app.models import Annotation, DetectionImport, Review, Video
+from app.models import Annotation, DetectionImport, ProjectMembership, Review, Video
 
 
 _SAMPLE_METADATA = {
@@ -80,6 +80,7 @@ def _setup_video_with_import(ctx, login_headers):
         "/api/projects", json={"name": "Review测试项目", "description": "test"}, headers=headers
     ).json()
     pid = project["id"]
+    ctx.configure_and_lock_minimal_scheme(pid, headers)
 
     batch = ctx.client.post(
         f"/api/projects/{pid}/video-import-batches", headers=headers
@@ -468,6 +469,46 @@ def test_queue_roles_and_submitted_only(ctx, login_headers):
     assert [v["id"] for v in _queue(ctx, admin_headers, project).json()] == ids
 
 
+def test_queue_revalidates_nested_assignee_with_effective_manager_permission(
+    ctx, login_headers
+):
+    headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
+    category = next(
+        category
+        for category in categories
+        if category["mouse_count_min"] == 1 and category["mouse_count_max"] == 1
+    )
+    _annotate_with_mouse(
+        ctx, headers, project, video, category["id"], mouse_ids=[1]
+    )
+
+    admin_id = ctx.create_user("queue_admin_assignee")
+    ctx.add_member(project["id"], admin_id, role="admin")
+    with ctx.session_factory() as db:
+        admin_membership = db.query(ProjectMembership).filter_by(
+            project_id=project["id"], user_id=admin_id
+        ).one()
+        assert admin_membership.can_review is False
+        admin_membership_id = admin_membership.id
+        stored_video = db.get(Video, video["id"])
+        stored_video.assignee_membership_id = project["membership_id"]
+        db.commit()
+
+    assert _submit(ctx, headers, project, video).status_code == 200
+    queue = _queue(ctx, headers, project)
+    assert queue.status_code == 200, queue.text
+    assert queue.json()[0]["assignee"]["can_review"] is True
+
+    with ctx.session_factory() as db:
+        stored_video = db.get(Video, video["id"])
+        stored_video.assignee_membership_id = admin_membership_id
+        db.commit()
+
+    queue = _queue(ctx, headers, project)
+    assert queue.status_code == 200, queue.text
+    assert queue.json()[0]["assignee"]["can_review"] is True
+
+
 def test_queue_excludes_rejected_and_approved(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
@@ -495,6 +536,7 @@ def test_queue_cross_project_isolation(ctx, login_headers):
         "/api/projects", json={"name": "隔离项目"}, headers=other_headers
     ).json()
     other_pid = other_project["id"]
+    ctx.configure_and_lock_minimal_scheme(other_pid, other_headers)
 
     obatch = ctx.client.post(f"/api/projects/{other_pid}/video-import-batches", headers=other_headers)
     assert obatch.status_code == 201

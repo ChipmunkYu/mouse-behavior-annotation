@@ -130,3 +130,30 @@ def validate_clip_directory(directory: Path, probe: dict, summary: TracksSummary
         raise MediaCommandError("frame count/range mismatch")
     if not set(annotation.get("mouse_ids", [])).issubset(summary.valid_track_ids):
         raise MediaCommandError("annotation mouse_ids are not snapshot track IDs")
+    mouse_ids = annotation.get("mouse_ids")
+    participants = annotation.get("participants")
+    if (not isinstance(mouse_ids, list) or any(isinstance(item, bool) or not isinstance(item, int)
+                                              or item < 0 for item in mouse_ids)
+            or mouse_ids != sorted(set(mouse_ids))):
+        raise MediaCommandError("annotation mouse_ids must be sorted unique track IDs")
+    if not isinstance(participants, list):
+        raise MediaCommandError("annotation participants must be an array")
+    role_keys: set[str] = set()
+    assigned: set[int] = set()
+    for participant in participants:
+        if not isinstance(participant, dict) or set(participant) != {"role_key", "role_name", "track_ids"}:
+            raise MediaCommandError("participant must contain role_key, role_name and track_ids")
+        key, name, track_ids = (participant[field] for field in ("role_key", "role_name", "track_ids"))
+        if (not isinstance(key, str) or not key or key != key.strip() or key in role_keys
+                or not isinstance(name, str) or not name.strip() or name != name.strip()):
+            raise MediaCommandError("participant role key/name is invalid or duplicated")
+        if (not isinstance(track_ids, list)
+                or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in track_ids)
+                or track_ids != sorted(set(track_ids))):
+            raise MediaCommandError("participant track_ids must be sorted unique track IDs")
+        if assigned.intersection(track_ids):
+            raise MediaCommandError("participant track_ids must be mutually exclusive")
+        role_keys.add(key); assigned.update(track_ids)
+    # An empty participants array is the explicit unordered representation.
+    if participants and assigned != set(mouse_ids):
+        raise MediaCommandError("participant track union must equal mouse_ids")

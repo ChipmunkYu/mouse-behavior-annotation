@@ -33,7 +33,7 @@ VERSION_TABLE = "alembic_version"
 
 # 已知迁移版本（迁移脚本 migrations/versions/ 中的 revision 字面量）
 KNOWN_REVISIONS = frozenset(
-    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012"}
+    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"}
 )
 
 # 0001 baseline 建立的 6 张 P1 核心表
@@ -67,6 +67,7 @@ P4_TABLES = frozenset(
         "submission_annotations",
     }
 )
+P5_TABLES = frozenset({"category_scheme_audits"})
 
 
 class MigrationStateError(RuntimeError):
@@ -144,17 +145,17 @@ def inspect_state(database_url: str) -> str:
         return "versioned"
 
     # ---- 无有效版本行（无版本表或空版本表）----
-    unexpected = tables - P1_TABLES - P2_TABLES - P3_TABLES - P4_TABLES - {VERSION_TABLE}
+    unexpected = tables - P1_TABLES - P2_TABLES - P3_TABLES - P4_TABLES - P5_TABLES - {VERSION_TABLE}
     if unexpected:
         raise MigrationStateError(
             f"数据库存在非预期表 {sorted(unexpected)}，无法安全判定迁移状态，"
             "拒绝 stamp / 升级（请人工检查后再处理）"
         )
-    has_post_baseline = bool((P2_TABLES | P3_TABLES | P4_TABLES) & tables)
+    has_post_baseline = bool((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES) & tables)
     if has_post_baseline:
         # 有增量表却无有效版本行：状态不一致（如 head 库版本行被清空），不可盲 stamp
         raise MigrationStateError(
-            f"数据库含增量表 {sorted((P2_TABLES | P3_TABLES | P4_TABLES) & tables)} 却无有效版本行，"
+            f"数据库含增量表 {sorted((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES) & tables)} 却无有效版本行，"
             "迁移状态不一致，拒绝自动 stamp"
         )
     if P1_TABLES & tables:

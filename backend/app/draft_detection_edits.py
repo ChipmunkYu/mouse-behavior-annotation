@@ -1,6 +1,7 @@
 """Sparse draft Split/Merge/Suppress/LIFO Undo transaction service."""
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from functools import wraps
 
@@ -22,6 +23,8 @@ from .models import (
     RawDetection,
     Video,
 )
+from .participant_role_conflicts import reject_role_conflicts, role_track_conflicts
+from .participant_roles import ParticipantRoleError, canonicalize_participant_roles
 from .track_ids import TRACK_ID_UPPER_BOUND, is_valid_track_id
 
 
@@ -137,9 +140,24 @@ def revalidate_annotations(
     forced = force_needs_mouse_ids or set()
     needs: list[int] = []
     for annotation in db.query(Annotation).filter(Annotation.video_id == video.id).all():
-        valid = annotation.id not in forced and bool(annotation.mouse_ids)
         category = annotation.category
-        if valid and category is not None:
+        if category is not None and category.participant_mode == "role_based":
+            try:
+                roles, ids, participant_status = canonicalize_participant_roles(
+                    category.role_definitions or [], annotation.participant_roles or {}
+                )
+                annotation.participant_roles = roles
+                annotation.mouse_ids = ids
+                annotation.participant_status = participant_status
+                valid = bool(ids)
+            except ParticipantRoleError:
+                annotation.participant_status = "needs_participants"
+                valid = False
+        else:
+            annotation.participant_roles = {}
+            annotation.participant_status = "valid"
+            valid = annotation.id not in forced and bool(annotation.mouse_ids)
+        if valid and category is not None and category.participant_mode == "unordered":
             count = len(annotation.mouse_ids)
             valid = count >= category.mouse_count_min and (
                 category.mouse_count_max is None or count <= category.mouse_count_max
@@ -270,6 +288,10 @@ def commit_split(
     expected_version: int,
     operator_id: int,
 ) -> dict:
+    reject_role_conflicts(
+        "Split conflicts with participant role assignments",
+        role_track_conflicts(db, video.id, {track_id}, split_frame=frame),
+    )
     new_version, new_track_id = _claim_version(
         db, detection_import, expected_version, allocate_track_id=True
     )
@@ -336,7 +358,6 @@ def commit_merge(
     expected_version: int,
     operator_id: int,
 ) -> dict:
-    new_version, _ = _claim_version(db, detection_import, expected_version)
     plan = _merge_plan(db, detection_import, track_ids)
     if plan["conflict_frames"]:
         raise HTTPException(
@@ -345,11 +366,42 @@ def commit_merge(
         )
     retained = plan["retained_display_track_id"]
     merged = plan["merged_display_track_ids"]
-    annotation_snapshots: dict[str, list[int]] = {}
+    requested = {retained, *merged}
+    role_conflicts = role_track_conflicts(db, video.id, requested)
+    by_annotation: dict[int, list[dict]] = {}
+    for conflict in role_conflicts:
+        by_annotation.setdefault(conflict["annotation_id"], []).append(conflict)
+    invalid_conflicts = [item for items in by_annotation.values() if len(items) != 1 for item in items]
+    reject_role_conflicts("Merge conflicts with participant role assignments", invalid_conflicts)
+    new_version, _ = _claim_version(db, detection_import, expected_version)
+    annotation_snapshots: dict[str, dict] = {}
+    legacy_mouse_ids_before: dict[str, list[int]] = {}
     affected_annotations: set[int] = set()
     for annotation in db.query(Annotation).filter(Annotation.video_id == video.id).all():
-        if any(track_id in (annotation.mouse_ids or []) for track_id in merged):
-            annotation_snapshots[str(annotation.id)] = list(annotation.mouse_ids or [])
+        category = annotation.category
+        if category is not None and category.participant_mode == "role_based" and annotation.id in by_annotation:
+            roles, _ids, _status = canonicalize_participant_roles(
+                category.role_definitions or [], annotation.participant_roles or {}
+            )
+            before = {"category_id": annotation.category_id, "start_time": annotation.start_time,
+                      "end_time": annotation.end_time, "start_frame": annotation.start_frame,
+                      "end_frame": annotation.end_frame, "participant_roles": copy.deepcopy(roles),
+                      "mouse_ids": list(annotation.mouse_ids or [])}
+            hit = by_annotation[annotation.id][0]
+            roles[hit["role_key"]] = sorted(
+                retained if value in requested else value for value in roles[hit["role_key"]]
+            )
+            roles, ids, status = canonicalize_participant_roles(category.role_definitions or [], roles)
+            annotation.participant_roles, annotation.mouse_ids = roles, ids
+            annotation.participant_status = status
+            after = {"category_id": annotation.category_id, "start_time": annotation.start_time,
+                     "end_time": annotation.end_time, "start_frame": annotation.start_frame,
+                     "end_frame": annotation.end_frame, "participant_roles": copy.deepcopy(roles),
+                     "mouse_ids": list(ids)}
+            annotation_snapshots[str(annotation.id)] = {"before": before, "after": after}
+            affected_annotations.add(annotation.id)
+        elif any(track_id in (annotation.mouse_ids or []) for track_id in merged):
+            legacy_mouse_ids_before[str(annotation.id)] = list(annotation.mouse_ids or [])
             annotation.mouse_ids = sorted(
                 {retained if track_id in merged else track_id for track_id in annotation.mouse_ids}
             )
@@ -361,7 +413,8 @@ def commit_merge(
         params={
             "retained_display_track_id": retained,
             "merged_display_track_ids": merged,
-            "annotation_mouse_ids_before": annotation_snapshots,
+            "annotation_images": annotation_snapshots,
+            "annotation_mouse_ids_before": legacy_mouse_ids_before,
         },
         operator_id=operator_id,
         created_at=datetime.utcnow(),
@@ -406,6 +459,10 @@ def commit_suppress(
     expected_version: int,
     operator_id: int,
 ) -> dict:
+    reject_role_conflicts(
+        "Track suppression conflicts with participant role assignments",
+        role_track_conflicts(db, video.id, {track_id}),
+    )
     new_version, _ = _claim_version(db, detection_import, expected_version)
     row_count = effective_detection_query(
         db, detection_import.id, display_track_id=track_id
@@ -468,6 +525,24 @@ def undo_latest(
         raise HTTPException(status_code=409, detail="Latest draft edit type does not match this endpoint")
     new_version, _ = _claim_version(db, detection_import, expected_version)
     params = latest.params or {}
+    for annotation_id, images in params.get("annotation_images", {}).items():
+        annotation = db.get(Annotation, int(annotation_id))
+        if annotation is None:
+            raise HTTPException(status_code=409, detail="Merge annotation after-image no longer exists")
+        after = images["after"]
+        current = {"category_id": annotation.category_id, "start_time": annotation.start_time,
+                   "end_time": annotation.end_time, "start_frame": annotation.start_frame,
+                   "end_frame": annotation.end_frame,
+                   "participant_roles": annotation.participant_roles or {},
+                   "mouse_ids": annotation.mouse_ids or []}
+        if current != after:
+            raise HTTPException(status_code=409, detail="Merge annotation changed after the edit")
+    for annotation_id, images in params.get("annotation_images", {}).items():
+        annotation = db.get(Annotation, int(annotation_id))
+        before = images["before"]
+        annotation.participant_roles = before["participant_roles"]
+        annotation.mouse_ids = before["mouse_ids"]
+    # Compatibility with pre-role merge edits.
     for annotation_id, mouse_ids in params.get("annotation_mouse_ids_before", {}).items():
         annotation = db.get(Annotation, int(annotation_id))
         if annotation is not None:

@@ -35,6 +35,7 @@ from ..models import (
     Video,
 )
 from ..permissions import MANAGER_ROLES, require_editor as require_edit_permission
+from ..participant_roles import ParticipantRoleError, canonicalize_participant_roles
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
 from ..video_write_gate import video_write_gate
 
@@ -52,6 +53,7 @@ EDITABLE_FIELDS = (
     "confidence",
     "crop_region",
     "mouse_ids",
+    "participant_roles",
     "detection_import_revision",
     "identity_revision",
 )
@@ -63,6 +65,17 @@ def _legacy_event_record(annotation: Annotation, clip_file: str | None = None) -
     This compatibility representation intentionally stays at the legacy route boundary; the
     Submission-authority project ZIP has its own independent four-file contract.
     """
+    participants = []
+    category = annotation.category
+    if category and category.participant_mode == "role_based":
+        roles, _ids, _status = canonicalize_participant_roles(
+            category.role_definitions or [], annotation.participant_roles or {}
+        )
+        participants = [
+            {"role_key": definition["key"], "role_name": definition["name"],
+             "track_ids": roles[definition["key"]]}
+            for definition in category.role_definitions or []
+        ]
     return {
         "annotation_id": annotation.id,
         "video_id": f"video_{annotation.video_id}",
@@ -73,6 +86,7 @@ def _legacy_event_record(annotation: Annotation, clip_file: str | None = None) -
         "end_frame": annotation.end_frame,
         "behavior": annotation.category.name if annotation.category else None,
         "mouse_ids": annotation.mouse_ids or [],
+        "participants": participants,
         "detection_import_revision": annotation.detection_import_revision,
         "identity_revision": annotation.identity_revision,
         "crop_region": annotation.crop_region,
@@ -165,6 +179,39 @@ def _validate_mouse_ids(
                     f"detections in frame range [{start_frame}, {end_frame}]"
                 ),
             )
+
+
+def _validate_track_coverage(
+    db: Session, imp: DetectionImport | None, mouse_ids: list[int], start_frame: int,
+    end_frame: int, identity_revision: int,
+) -> str:
+    if not mouse_ids or imp is None:
+        return "needs_mouse_ids"
+    return "valid" if all(
+        _has_unsuppressed_detections(db, imp.id, track_id, start_frame, end_frame, identity_revision)
+        for track_id in mouse_ids
+    ) else "needs_mouse_ids"
+
+
+def _revalidate_unordered_mouse_ids(
+    db: Session, imp: DetectionImport | None, mouse_ids: list[int], start_frame: int,
+    end_frame: int, category: BehaviorCategory, identity_revision: int,
+) -> str:
+    count = len(mouse_ids)
+    if count < category.mouse_count_min or (
+        category.mouse_count_max is not None and count > category.mouse_count_max
+    ):
+        return "needs_mouse_ids"
+    return _validate_track_coverage(
+        db, imp, mouse_ids, start_frame, end_frame, identity_revision
+    )
+
+
+def _canonical_participants(category: BehaviorCategory, roles: Any) -> tuple[dict, list[int], str]:
+    try:
+        return canonicalize_participant_roles(category.role_definitions or [], roles)
+    except ParticipantRoleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _get_annotation_in_video(db: Session, video_id: int, annotation_id: int) -> Annotation:
@@ -325,6 +372,8 @@ def _to_out(annotation: Annotation) -> AnnotationOut:
         review_status=annotation.review_status,
         crop_region=annotation.crop_region,
         mouse_ids=annotation.mouse_ids or [],
+        participant_roles=annotation.participant_roles or {},
+        participant_status=annotation.participant_status,
         mouse_id_status=annotation.mouse_id_status,
         detection_import_revision=annotation.detection_import_revision,
         identity_revision=annotation.identity_revision,
@@ -395,7 +444,22 @@ def create_annotation(
         mouse_id_status = "needs_mouse_ids"
         di_rev = imp.revision if imp else 0
         id_rev = video.identity_revision
-        if body.mouse_ids is not None:
+        if category.participant_mode == "role_based":
+            if "mouse_ids" in body.model_fields_set:
+                raise HTTPException(status_code=422, detail="role_based annotations must not submit mouse_ids")
+            if "participant_roles" not in body.model_fields_set:
+                raise HTTPException(status_code=422, detail="role_based annotations must submit participant_roles")
+            participant_roles, mouse_ids, participant_status = _canonical_participants(
+                category, body.participant_roles
+            )
+            mouse_id_status = _validate_track_coverage(
+                db, imp, mouse_ids, body.start_frame, body.end_frame, id_rev
+            )
+        else:
+            if body.participant_roles not in (None, {}):
+                raise HTTPException(status_code=422, detail="unordered annotations must have empty participant_roles")
+            participant_roles, participant_status = {}, "valid"
+        if category.participant_mode == "unordered" and body.mouse_ids is not None:
             if imp is None:
                 raise HTTPException(
                     status_code=400,
@@ -413,6 +477,7 @@ def create_annotation(
             start_frame=body.start_frame, end_frame=body.end_frame,
             confidence=body.confidence, review_status="pending", crop_region=body.crop_region,
             mouse_ids=mouse_ids, mouse_id_status=mouse_id_status,
+            participant_roles=participant_roles, participant_status=participant_status,
             detection_import_revision=di_rev, identity_revision=id_rev,
         )
         db.add(annotation)
@@ -499,7 +564,20 @@ def update_annotation(
             if getattr(body, field) is not None
             and getattr(body, field) != getattr(annotation, field)
         }
+        target_category = category if body.category_id is not None else annotation.category
+        if target_category.participant_mode == "role_based" and "mouse_ids" in body.model_fields_set:
+            raise HTTPException(status_code=422, detail="role_based annotations must not submit mouse_ids")
+        if target_category.participant_mode == "unordered" and body.participant_roles not in (None, {}):
+            raise HTTPException(status_code=422, detail="unordered annotations must have empty participant_roles")
         normalized_mouse_ids = (sorted(set(body.mouse_ids)) if body.mouse_ids is not None else None)
+        canonical_roles = None
+        if target_category.participant_mode == "role_based":
+            role_input = body.participant_roles if "participant_roles" in body.model_fields_set else annotation.participant_roles
+            canonical_roles = _canonical_participants(target_category, role_input)
+            if canonical_roles[0] != (annotation.participant_roles or {}) or canonical_roles[1] != (annotation.mouse_ids or []):
+                changed_fields.add("participant_roles")
+        elif annotation.participant_roles or annotation.participant_status != "valid":
+            changed_fields.add("participant_roles")
         if normalized_mouse_ids is not None and normalized_mouse_ids != (annotation.mouse_ids or []):
             changed_fields.add("mouse_ids")
         media_changed = bool(changed_fields.intersection(
@@ -519,31 +597,41 @@ def update_annotation(
         _validate_interval(annotation.start_time, annotation.end_time,
                            annotation.start_frame, annotation.end_frame)
 
-        if body.mouse_ids is not None:
-            imp = state.detection_import
-            if imp is None:
-                raise HTTPException(status_code=400,
-                                    detail="Cannot specify mouse_ids without an active detection import")
-            cat = (db.get(BehaviorCategory, body.category_id)
-                   if body.category_id is not None else annotation.category)
-            deduped = normalized_mouse_ids
-            _validate_mouse_ids(db, imp, deduped, annotation.start_frame,
-                                annotation.end_frame, cat, video.identity_revision)
-            annotation.mouse_ids = deduped
-            annotation.mouse_id_status = "valid"
-            annotation.detection_import_revision = imp.revision
+        if target_category.participant_mode == "role_based":
+            assert canonical_roles is not None
+            annotation.participant_roles, annotation.mouse_ids, annotation.participant_status = canonical_roles
+            annotation.mouse_id_status = _validate_track_coverage(
+                db, state.detection_import, annotation.mouse_ids, annotation.start_frame,
+                annotation.end_frame, video.identity_revision
+            )
+            annotation.detection_import_revision = state.detection_import.revision if state.detection_import else 0
             annotation.identity_revision = video.identity_revision
-        elif ((body.category_id is not None or body.start_frame is not None or body.end_frame is not None)
-              and annotation.mouse_ids):
+        else:
+            # Unordered state is always canonical, including a category-only transition
+            # from role_based. In that transition the existing mouse_ids are the derived
+            # union of the former role authority and become the unordered authority.
+            annotation.participant_roles = {}
+            annotation.participant_status = "valid"
             imp = state.detection_import
-            if imp is not None:
-                cat = (db.get(BehaviorCategory, body.category_id)
-                       if body.category_id is not None else annotation.category)
-                try:
-                    _validate_mouse_ids(db, imp, annotation.mouse_ids, annotation.start_frame,
-                                        annotation.end_frame, cat, video.identity_revision)
-                except HTTPException:
-                    annotation.mouse_id_status = "needs_mouse_ids"
+            if body.mouse_ids is not None:
+                if imp is None:
+                    raise HTTPException(status_code=400,
+                                        detail="Cannot specify mouse_ids without an active detection import")
+                deduped = normalized_mouse_ids
+                _validate_mouse_ids(db, imp, deduped, annotation.start_frame,
+                                    annotation.end_frame, target_category, video.identity_revision)
+                annotation.mouse_ids = deduped
+                annotation.mouse_id_status = "valid"
+                annotation.detection_import_revision = imp.revision
+                annotation.identity_revision = video.identity_revision
+            elif body.category_id is not None or body.start_frame is not None or body.end_frame is not None:
+                annotation.mouse_ids = sorted(set(annotation.mouse_ids or []))
+                annotation.mouse_id_status = _revalidate_unordered_mouse_ids(
+                    db, imp, annotation.mouse_ids, annotation.start_frame,
+                    annotation.end_frame, target_category, video.identity_revision,
+                )
+                annotation.detection_import_revision = imp.revision if imp else 0
+                annotation.identity_revision = video.identity_revision
         db.commit()
         db.refresh(annotation)
         result = _to_out(annotation)

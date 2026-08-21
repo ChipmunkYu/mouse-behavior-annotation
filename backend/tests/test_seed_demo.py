@@ -10,6 +10,7 @@ from app.config import Settings
 from app.models import (
     Annotation,
     BehaviorCategory,
+    CategorySchemeAudit,
     Project,
     ProjectMembership,
     User,
@@ -69,7 +70,7 @@ def test_seed_demo_idempotent(tmp_path):
         assert (settings.videos_dir / VIDEO_NAME).read_bytes() == DEMO_SOURCE_BYTES
         assert src.read_bytes() == DEMO_SOURCE_BYTES
 
-        # demo 用户为 owner；项目初始化同样的 12 类
+        # demo 用户为 owner；脚本受控建立并锁定其 12 类演示方案
         project = db.query(Project).filter(Project.name == PROJECT_NAME).one()
         demo = db.query(User).filter(User.username == settings.demo_username).one()
         membership = (
@@ -78,7 +79,20 @@ def test_seed_demo_idempotent(tmp_path):
             .one()
         )
         assert membership.role == "owner"
+        assert project.category_scheme_version == 1
+        assert project.category_scheme_locked_at is not None
+        assert project.category_scheme_locked_by == demo.id
         assert db.query(BehaviorCategory).filter(BehaviorCategory.project_id == project.id).count() == 12
+        audits = db.query(CategorySchemeAudit).filter_by(project_id=project.id).order_by(
+            CategorySchemeAudit.id
+        ).all()
+        assert [audit.action for audit in audits] == ["replace", "lock"]
+        assert [audit.scheme_version for audit in audits] == [1, 1]
+        assert audits[0].before_json["categories"] == []
+        assert len(audits[0].after_json["categories"]) == 12
+        assert audits[0].after_json["category_scheme_locked_at"] is None
+        assert audits[1].before_json["category_scheme_locked_at"] is None
+        assert audits[1].after_json["category_scheme_locked_at"] is not None
         assert (
             db.query(BehaviorCategory)
             .filter(
@@ -103,6 +117,26 @@ def test_seed_demo_mock_metadata_without_source(tmp_path):
         assert video.fps == 25.0
         # 不应在 videos_dir 下生成文件
         assert not (settings.videos_dir / VIDEO_NAME).exists()
+
+
+def test_new_seed_project_rolls_back_if_scheme_initialization_fails(tmp_path, monkeypatch):
+    """新项目在 12 类方案完成前没有中间 commit。"""
+    import scripts.seed_demo as seed_module
+
+    settings = _settings(tmp_path)
+
+    def fail_scheme(_db, _project_id):
+        raise RuntimeError("injected scheme failure")
+
+    monkeypatch.setattr(seed_module, "init_project_categories", fail_scheme)
+    with pytest.raises(RuntimeError, match="injected scheme failure"):
+        seed_module.seed_demo(settings)
+
+    with db_mod.SessionLocal() as db:
+        assert db.query(Project).filter(Project.name == PROJECT_NAME).count() == 0
+        assert db.query(ProjectMembership).count() == 0
+        assert db.query(BehaviorCategory).count() == 0
+        assert db.query(CategorySchemeAudit).count() == 0
 
 
 def test_seed_demo_duration_fps_override_on_reuse(tmp_path):

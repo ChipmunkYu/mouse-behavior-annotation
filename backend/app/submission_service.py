@@ -21,6 +21,7 @@ from .submission_media_plan import build_submission_media_plan
 from .file_identity import FileIdentity, file_identity, hash_file_handle
 from .integrity_canonical import (canonical_digest as _canonical_digest, canonical_rows_digest,
                                   validate_pose_metadata)
+from .participant_roles import ParticipantRoleError, canonicalize_participant_roles
 
 SNAPSHOT_SCHEMA_VERSION = 1
 
@@ -212,12 +213,11 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
     ).filter(Annotation.video_id == video.id).order_by(Annotation.id).all()
     if not rows:
         raise HTTPException(status_code=400, detail="At least one annotation is required before submitting")
-    needs_ids = sum(1 for ann, _category in rows if not ann.mouse_ids)
+    needs_ids = sum(1 for ann, category in rows
+                    if category is not None and category.participant_mode == "unordered" and not ann.mouse_ids)
     if needs_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{needs_ids} annotation(s) still need valid mouse_ids before submission",
-        )
+        raise HTTPException(status_code=400,
+            detail=f"{needs_ids} annotation(s) still need valid mouse_ids before submission")
     invalid = []
     effective = effective_detection_query(db, imp.id, include_suppressed=True).all()
     all_tracks = {row.display_track_id for row in effective}
@@ -252,10 +252,31 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
             except ValueError as exc:
                 reason = str(exc)
         ids = ann.mouse_ids if isinstance(ann.mouse_ids, list) else []
+        if reason is None and category.participant_mode == "role_based":
+            try:
+                roles, canonical_ids, participant_status = canonicalize_participant_roles(
+                    category.role_definitions or [], ann.participant_roles
+                )
+            except ParticipantRoleError as exc:
+                reason = str(exc)
+            else:
+                if participant_status != "valid":
+                    reason = "Participant roles still need participants"
+                elif canonical_ids != ids:
+                    reason = "participant_roles and mouse_ids projection differ"
+                else:
+                    ann.participant_roles = roles
+                    ann.participant_status = participant_status
+        elif reason is None and category.participant_mode == "unordered":
+            if ann.participant_roles not in ({}, None):
+                reason = "Unordered participant projection is invalid"
+            else:
+                ann.participant_roles = {}
+                ann.participant_status = "valid"
         if reason is None and (not ids or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in ids)
                                or ids != sorted(set(ids))):
             reason = "mouse_ids must be a non-empty sorted unique integer list"
-        if reason is None and not (category.mouse_count_min <= len(ids)
+        if reason is None and category.participant_mode == "unordered" and not (category.mouse_count_min <= len(ids)
                                    and (category.mouse_count_max is None or len(ids) <= category.mouse_count_max)):
             reason = f"Category '{category.name}' participant count is invalid"
         if reason is None:
@@ -267,6 +288,9 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
                               f"[{ann.start_frame}, {ann.end_frame}]" if exists else
                               f"Track ID {track_id} is not an active corrected track")
                     break
+        if reason is None:
+            # Cache fields are projections only; reaching here is the authoritative revalidation.
+            ann.mouse_id_status = "valid"
         if reason:
             invalid.append({"annotation_id": ann.id, "reason": reason})
     if invalid:
@@ -307,6 +331,10 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
     db.execute(insert(SubmissionAnnotation), [dict(
         submission_id=submission.id, source_annotation_id=ann.id,
         category_id=category.id, category_name=category.name,
+        category_group=category.group,
+        category_participant_mode=category.participant_mode,
+        role_definitions_snapshot=list(category.role_definitions or []),
+        participant_roles_snapshot=dict(ann.participant_roles or {}),
         start_time=ann.start_time, end_time=ann.end_time,
         start_frame=ann.start_frame, end_frame=ann.end_frame,
         confidence=ann.confidence, crop_region=ann.crop_region,
@@ -321,6 +349,7 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
         ann.review_status = "pending"
         ann.reviewer_id = None
         ann.mouse_id_status = "valid"
+        ann.participant_status = "valid"
         ann.detection_import_revision = imp.revision
         ann.identity_revision = imp.edit_version
     db.flush()

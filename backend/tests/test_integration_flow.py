@@ -1,10 +1,10 @@
 """集成流程：以真实 HTTP 链路复现前端主流程。
 
-demo 登录 → 项目列表 → 创建项目（12 类别）→ 视频列表/创建 → 标注
+demo 登录 → 项目列表 → 携带完整方案创建项目 → 复核/替换并锁定类别方案 → 视频列表/创建 → 标注
 列表/创建/PATCH/DELETE → 导出。同时核对前端依赖的契约：
 - POST 创建返回 201、PATCH 返回 200、DELETE 返回 204（空响应体）
 - 未认证访问一律 401
-- 类别实际返回 12 条（PowerShell smoke 曾因数组包装误报 Count=1，此处用 TestClient 可靠核对）
+- 创建时已有非空方案；测试再显式替换并锁定后才允许写入标注
 - 视频流无 storage_path 时 404（前端据此显示"无视频文件"）
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ EXPECTED_FIELDS = {
     "annotator",
     "reviewer",
     "review_status",
+    "participants",
 }
 
 
@@ -47,7 +48,7 @@ def test_main_flow_end_to_end(ctx, login_headers):
     assert resp.status_code == 200
     assert resp.json() == []
 
-    # 4. 创建项目 → 201，创建者为 owner
+    # 4. 携带 fixture 的完整非空方案创建项目 → 201，创建者为 owner
     resp = client.post(
         "/api/projects",
         json={"name": "集成流程项目", "description": "主流程验证"},
@@ -59,10 +60,10 @@ def test_main_flow_end_to_end(ctx, login_headers):
     assert project["status"] == "active"
     pid = project["id"]
 
-    # 5. 12 个行为类别（可靠核对，非 PS 包装误报）
+    # 5. 新项目已有未锁定方案；owner 显式替换并锁定测试方案
     resp = client.get(f"/api/projects/{pid}/categories", headers=headers)
-    assert resp.status_code == 200
-    categories = resp.json()
+    assert resp.status_code == 409
+    categories = ctx.configure_and_lock_minimal_scheme(pid, headers)
     assert len(categories) == 12
     assert [c["sort_order"] for c in categories] == list(range(12))
     assert all(c["is_active"] for c in categories)

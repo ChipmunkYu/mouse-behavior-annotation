@@ -7,7 +7,9 @@ import zipfile
 
 import pytest
 
-from app.export_contract import FILES, safe_part, transform_detection
+from app.export_contract import (FILES, TracksSummary, safe_part, transform_detection,
+                                 validate_clip_directory)
+from app.media import MediaCommandError
 from app.media_jobs import reset_interrupted_job_clips
 from app.models import Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission
 from tests.conftest import auth_headers
@@ -112,7 +114,6 @@ def test_superseded_frozen_submission_completes_without_current_draft_reads(medi
             submission = db.query(Submission).filter_by(status="approved").one()
             submission.status = "superseded"
             db.get(Annotation, source_annotations[0]["id"]).start_time = 0.12
-            db.get(BehaviorCategory, source_annotations[0]["category_id"]).name = "RENAMED"
             db.commit()
         worker._run_job(job_id)
         with ctx.session_factory() as db:
@@ -333,10 +334,13 @@ def test_colliding_directory_names_receive_stable_unique_suffix(media_ctx, monke
 def test_colliding_category_directories_use_frozen_opaque_tokens(media_ctx, monkeypatch):
     ctx = media_ctx
     headers, project, categories, _video, _annotations = _approved(ctx, two_categories=True)
-    with ctx.session_factory() as db:
-        db.get(BehaviorCategory, categories[0]["id"]).name = "A"
-        db.get(BehaviorCategory, categories[1]["id"]).name = "Ａ"
-        db.commit()
+    from app import export_jobs
+    original_safe_part = export_jobs.safe_part
+    monkeypatch.setattr(
+        export_jobs, "safe_part",
+        lambda value, **kwargs: "same" if kwargs.get("limit") == 80
+        else original_safe_part(value, **kwargs),
+    )
     worker = ctx.app.state.export_worker; worker.synchronous = False
     with ctx.session_factory() as db:
         job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
@@ -385,3 +389,70 @@ def test_active_dedupe_download_and_retry_history_compatibility(media_ctx):
     assert first["id"] != second["id"]
     response = ctx.client.get(f"/api/projects/{project['id']}/export/download", headers=headers)
     assert response.status_code == 200 and zipfile.is_zipfile(__import__("io").BytesIO(response.content))
+
+
+@pytest.mark.parametrize("mouse_ids,participants", [
+    ([1, 2], [{"role_key": "a", "role_name": "A", "track_ids": [1]},
+              {"role_key": "a", "role_name": "B", "track_ids": [2]}]),
+    ([1], [{"role_key": "a", "role_name": " ", "track_ids": [1]}]),
+    ([1], [{"role_key": "a", "role_name": "A", "track_ids": [1, 1]}]),
+    ([1], [{"role_key": "a", "role_name": "A", "track_ids": [1]},
+           {"role_key": "b", "role_name": "B", "track_ids": [1]}]),
+    ([1, 2], [{"role_key": "a", "role_name": "A", "track_ids": [1]}]),
+    ([9], [{"role_key": "a", "role_name": "A", "track_ids": [9]}]),
+])
+def test_export_contract_rejects_malformed_participant_authority(
+    tmp_path, mouse_ids, participants
+):
+    directory = tmp_path / "item"
+    directory.mkdir()
+    (directory / "clip.mp4").write_bytes(b"x")
+    (directory / "tracks.json").write_text("[]", encoding="utf-8")
+    (directory / "annotation.json").write_text(json.dumps({
+        "behavior": "追逐", "mouse_ids": mouse_ids, "participants": participants,
+        "confidence": "certain", "frame_range": {"start": 0, "end": 0},
+        "time_range": {"start": 0, "end": 0.04},
+    }), encoding="utf-8")
+    (directory / "metadata.json").write_text(json.dumps({
+        "schema_version": "1.0", "clip": {"fps": 25.0, "width": 10,
+        "height": 10, "frame_count": 1},
+    }), encoding="utf-8")
+    with pytest.raises(MediaCommandError):
+        validate_clip_directory(
+            directory,
+            {"fps": 25.0, "width": 10, "height": 10, "frame_count": 1, "duration": 0.04},
+            TracksSummary(frame_count=1, valid_track_ids=frozenset({1, 2})),
+        )
+
+
+def test_formal_zip_role_participants_are_snapshot_ordered_and_tracks_are_role_free(media_ctx):
+    from tests.test_participant_role_track_edits import _annotation, _keys, _setup
+
+    ctx = media_ctx
+    setup = _setup(ctx)
+    headers, project_id, video_id, categories = setup
+    first, second = _keys(setup)
+    _annotation(ctx, setup, {first: [3], second: [1]})
+    assert ctx.client.post(
+        f"/api/projects/{project_id}/videos/{video_id}/submit", headers=headers
+    ).status_code == 200
+    approved = ctx.client.post(
+        f"/api/projects/{project_id}/videos/{video_id}/review",
+        json={"result": "approved", "comment": "ok"}, headers=headers)
+    assert approved.status_code == 200, approved.text
+    job = _export(ctx, {"id": project_id}, headers)
+    assert job["status"] == "succeeded"
+    path = _archive(ctx, job)
+    with zipfile.ZipFile(path) as archive:
+        annotation_name = next(name for name in archive.namelist() if name.endswith("/annotation.json"))
+        tracks_name = next(name for name in archive.namelist() if name.endswith("/tracks.json"))
+        annotation = json.loads(archive.read(annotation_name))
+        tracks = json.loads(archive.read(tracks_name))
+    assert annotation["participants"] == [
+        {"role_key": first, "role_name": "追逐者", "track_ids": [3]},
+        {"role_key": second, "role_name": "被追逐者", "track_ids": [1]},
+    ]
+    assert sorted(track for item in annotation["participants"] for track in item["track_ids"]) \
+        == annotation["mouse_ids"] == [1, 3]
+    assert all("role" not in detection and "participants" not in detection
+               for frame in tracks for detection in frame["detections"])

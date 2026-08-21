@@ -73,6 +73,7 @@ ALL_TABLES = (
         "detection_snapshot_states",
         "submissions",
         "submission_annotations",
+        "category_scheme_audits",
     ]
 )
 VIDEO_NEW_COLUMNS = {"workflow_status", "annotation_revision", "submitted_at", "approved_at", "approved_by"}
@@ -187,6 +188,59 @@ def _fk_options(url: str, table: str, column: str) -> dict:
     raise AssertionError(f"{table}.{column} 未找到外键")
 
 
+def _lock_category_scheme_if_supported(db, project_id: int, actor_id: int) -> None:
+    """Lock a legal scheme on head while remaining usable against revisions 0001-0012."""
+    from sqlalchemy import text
+
+    columns = {column["name"] for column in sa_inspect(db.bind).get_columns("projects")}
+    if "category_scheme_locked_at" not in columns:
+        return
+    categories = db.query(BehaviorCategory).filter_by(project_id=project_id).order_by(
+        BehaviorCategory.sort_order, BehaviorCategory.id
+    ).all()
+    assert categories, "head-schema Annotation fixtures require a non-empty category scheme"
+    for index, category in enumerate(categories):
+        category.sort_order = index
+        category.name = category.name.strip()
+        category.group = category.group.strip()
+        category.participant_mode = "unordered"
+        category.role_definitions = []
+        category.mouse_count_min = max(category.mouse_count_min or 1, 1)
+        if category.mouse_count_max is not None:
+            category.mouse_count_max = max(category.mouse_count_max, category.mouse_count_min)
+    db.flush()
+    db.execute(text(
+        "UPDATE projects SET category_scheme_locked_at=CURRENT_TIMESTAMP, "
+        "category_scheme_locked_by=:actor WHERE id=:project"
+    ), {"actor": actor_id, "project": project_id})
+    db.flush()
+
+
+def _lock_category_scheme_connection_if_supported(conn, project_id: int, actor_id: int) -> None:
+    """Connection-level counterpart for raw-SQL migration fixtures."""
+    from sqlalchemy import text
+
+    columns = {column["name"] for column in sa_inspect(conn).get_columns("projects")}
+    if "category_scheme_locked_at" not in columns:
+        return
+    assert conn.execute(text(
+        "SELECT count(*) FROM behavior_categories WHERE project_id=:project"
+    ), {"project": project_id}).scalar_one() > 0
+    conn.execute(text(
+        "INSERT INTO project_memberships(project_id,user_id,role,status,created_at) "
+        "SELECT :project,:actor,'owner','active',CURRENT_TIMESTAMP WHERE NOT EXISTS ("
+        "SELECT 1 FROM project_memberships WHERE project_id=:project AND user_id=:actor)"
+    ), {"project": project_id, "actor": actor_id})
+    conn.execute(text(
+        "UPDATE behavior_categories SET participant_mode='unordered', role_definitions='[]' "
+        "WHERE project_id=:project"
+    ), {"project": project_id})
+    conn.execute(text(
+        "UPDATE projects SET category_scheme_locked_at=CURRENT_TIMESTAMP, "
+        "category_scheme_locked_by=:actor WHERE id=:project"
+    ), {"actor": actor_id, "project": project_id})
+
+
 def test_fresh_db_upgrade_head_full_schema(tmp_path):
     """全新空库：upgrade head 建立完整 schema（P1 表 + 新表 + 新列）。"""
     settings = _settings(tmp_path)
@@ -195,7 +249,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -213,6 +267,15 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
     assert PHASE1A_ANNOTATION_COLUMNS <= ann_columns
     cat_columns = {c["name"] for c in insp.get_columns("behavior_categories")}
     assert {"mouse_count_min", "mouse_count_max"} <= cat_columns
+    assert {"participant_mode", "role_definitions"} <= cat_columns
+    assert {"category_scheme_version", "category_scheme_locked_at", "category_scheme_locked_by"} <= {
+        c["name"] for c in insp.get_columns("projects")
+    }
+    assert {"participant_roles", "participant_status"} <= ann_columns
+    assert {
+        "category_group", "category_participant_mode", "role_definitions_snapshot",
+        "participant_roles_snapshot",
+    } <= {c["name"] for c in insp.get_columns("submission_annotations")}
     rev_columns = {c["name"] for c in insp.get_columns("reviews")}
     assert {"detection_import_revision", "identity_revision"} <= rev_columns
     clip_columns = {c["name"] for c in insp.get_columns("clips")}
@@ -349,7 +412,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -368,7 +431,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -442,7 +505,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -474,7 +537,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -526,6 +589,7 @@ def test_delete_user_sets_null_uploaded_by_and_reviewer(tmp_path):
             ),
             {"now": now},
         )
+        _lock_category_scheme_connection_if_supported(conn, 1, 1)
         conn.execute(
             text(
                 "INSERT INTO annotations (video_id, annotator_id, category_id, reviewer_id, "
@@ -597,6 +661,7 @@ def test_delete_user_rejected_by_created_by_and_annotator(tmp_path):
             ),
             {"now": now},
         )
+        _lock_category_scheme_connection_if_supported(conn, 1, 1)
         conn.execute(
             text(
                 "INSERT INTO annotations (video_id, annotator_id, category_id, "
@@ -664,7 +729,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -714,7 +779,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -785,7 +850,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -841,7 +906,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0012" in proc.stdout
+    assert "0013" in proc.stdout
 
 
 
@@ -893,6 +958,7 @@ def test_new_model_constraints_and_defaults(ctx):
         db.add(cat)
         db.commit()
         db.refresh(cat)
+        _lock_category_scheme_if_supported(db, project.id, owner.id)
         video = Video(project_id=project.id, filename="c.mp4", status="ready")
         db.add(video)
         db.commit()
@@ -1001,7 +1067,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1046,7 +1112,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1056,7 +1122,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1162,7 +1228,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1420,7 +1486,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1462,7 +1528,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1484,7 +1550,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1594,7 +1660,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
             conn.execute(text(sql), params)
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.engine.connect() as conn:
         imports = conn.execute(
             text(
@@ -1616,7 +1682,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
 
     # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
     db_mod.ensure_schema(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
 
@@ -1642,6 +1708,7 @@ def test_0008_composite_fks_partial_uniques_and_compatibility_links(tmp_path):
         )
         db.add(category)
         db.flush()
+        _lock_category_scheme_if_supported(db, project_id, user_id)
         annotation = Annotation(
             video_id=video_id,
             annotator_id=user_id,
@@ -1728,7 +1795,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
     fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
     run_migrations(fresh_url)
     fresh_engine = create_engine(fresh_url)
-    assert current_revision(fresh_url) == "0012"
+    assert current_revision(fresh_url) == "0013"
     assert {"raw_digest", "state_digest", "metadata_digest"} <= {
         column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
     }
@@ -1763,7 +1830,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         ))
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         snapshot = db.get(models.DetectionSnapshot, 93)
         assert all(len(getattr(snapshot, name)) == 64 for name in
@@ -1776,7 +1843,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
     })
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
     with db_mod.SessionLocal() as db:
         assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
 
@@ -1887,6 +1954,7 @@ def test_0008_key_delete_policies(tmp_path):
         imp = DetectionImport(video_id=video_id, revision=1, schema_version="1.0", active=True)
         db.add_all([operator, category, imp])
         db.flush()
+        _lock_category_scheme_if_supported(db, project_id, owner_id)
         raw = RawDetection(
             detection_import_id=imp.id,
             frame_index=0,
@@ -2030,6 +2098,9 @@ def test_0008_draft_submission_review_clip_constraints(tmp_path):
             mouse_count_min=2,
             mouse_count_max=2,
         )
+        db.add(category)
+        db.flush()
+        _lock_category_scheme_if_supported(db, project_id, user_id)
         annotation = Annotation(
             video_id=video_id,
             annotator_id=user_id,
