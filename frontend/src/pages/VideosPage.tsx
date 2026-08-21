@@ -260,7 +260,7 @@ export default function VideosPage() {
 
   return <div className="container videos-page">
     {confirmDialog}
-    <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1><div className="sub">分工表示责任归属，不限制项目成员查看或提交视频。</div></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
+    <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
     {uploadOpen && project ? <VideoUploadPanel projectId={pid} canManage={canManage} assignees={assignees} onUploaded={() => void load()} onEnterAnnotation={(v) => navigate(`/projects/${pid}/annotate/${v.id}`)} onClose={() => setUploadOpen(false)} /> : null}
     {error ? <ErrorBox message={error} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
     <div className="assignment-summary"><span><b>{stats?.total ?? 0}</b> 个视频</span><span className={(stats?.unassigned ?? 0) ? "warn" : ""}><b>{stats?.unassigned ?? 0}</b> 个未分配</span>{canManage ? <Link to={`/projects/${pid}/manage`}>查看分配统计 →</Link> : null}</div>
