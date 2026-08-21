@@ -135,7 +135,7 @@ Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Wi
 短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
 已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
 该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。
-本次已使用 imageio-ffmpeg `7.1-essentials_build-www.gyan.dev` 部分验证真实编码和 MediaWorker；因无 ffprobe，25/30/60 FPS 的 codec、pixel format、尺寸、帧数与时长属性仍待在目标环境验收。
+2026-08-17 已在 Python 3.11.9 隔离环境中使用 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成真实编码、媒体属性与 MediaWorker 本地验证；两者均可从 `.venv\Scripts` 找到。生产 FFmpeg/ffprobe 4.4.2 兼容性仍待候选环境验收。
 
 ### Sparse writer 切换维护命令
 
@@ -343,7 +343,7 @@ Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是�
 受控源媒体 SHA-256；withdraw 允许 owner/admin/annotator 或原 submitter，且仅限无 Review 的 submitted
 attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
 
-0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成部分真实 FFmpeg 验证，ffprobe 属性和生产版本验收仍待执行。
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成 25/30/60 FPS 真实 FFmpeg 编码、ffprobe 属性和 MediaWorker 本地验证，生产 FFmpeg/ffprobe 4.4.2 候选验收仍待执行。
 
 Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
 并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
@@ -612,7 +612,9 @@ cd backend
 pytest -q
 ```
 
-此前后端全量结果为 `399 passed, 8 skipped`，聚焦结果为 `63 passed, 5 skipped`；这两项统计早于本次只运行的真实集成测试。本次使用 imageio-ffmpeg `7.1-essentials_build-www.gyan.dev` 运行 `test_media_ffmpeg_integration.py`，结果 `2 passed, 3 skipped`。真实通过项证明 `.mp4.part` 配合 `-f mp4` 编码、`.jpg.part` 配合 `-f image2` 生成、缩略图失败时不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。由于没有 ffprobe，25/30/60 FPS 三例以及 codec、pixel format、尺寸、帧数、时长属性仍未验证。该 imageio-ffmpeg 二进制不是生产服务器 FFmpeg 4.4.2，以上结果不构成生产兼容验证，也不表示已部署。
+此前后端全量结果为 `399 passed, 8 skipped`。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证；`fix/clip-transcoding@bcc9a03` 未合并 `main`、未部署，以上结果不构成生产候选验收。
+
+真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
