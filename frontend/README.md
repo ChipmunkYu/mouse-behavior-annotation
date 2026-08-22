@@ -99,11 +99,7 @@ npm run build
 npm run preview
 ```
 
-类别角色功能的历史独立验证：production `npm run build` 通过（62 modules）；后端全量 `483 passed, 3 skipped, 1 warning`；runtime smoke 确认 health、OpenAPI 创建必填/minItems 与缺 categories 422，用户确认浏览器可访问且服务正常。该功能人工矩阵已通过创建门禁与原子创建、version 0/保存递增/刷新/永久锁定、真实三文件导入、角色槽位顺序门禁与手动往返、跨角色移动确认、不完整草稿保存与提交门禁、刷新恢复、提交、Review 队列/角色摘要/批准、窄屏及键盘。角色导航实时 accessible/恢复逻辑和 Review queue 两项实测 remediation 均已由用户复测通过。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不阻断该功能。
-
-分工功能的历史独立验证：member 批量自领、角色×视图入口精简、单一勾和场景全选标签的独立精简验收已通过；frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`，后端 `backend/tests/test_assignments.py` 为 `26 passed, 1 warning`（`37.66s`）。当时未运行后端全量测试；人工浏览器矩阵尚未执行，pointer capture、自动滚动、真实焦点、触屏、键盘/读屏、宽度/缩放和视觉组合不能视为已验收。
-
-以上均为两个功能合并前各自边界内的历史记录；本次前集成未运行联合测试，不声称集成后的前后端已通过测试，也不代表已推送或部署，既有服务器状态不因本 worktree 集成而改变。
+当前 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成后续修复；Oracle 最终确认实现问题关闭。当前联合代码的 production `npm run build` 通过并处理 62 modules；后端全量为 `516 passed, 3 skipped, 1 warning`，且单次命令临时加入 clip venv `Scripts` 到 `PATH` 后，5 项真实 FFmpeg/ffprobe 集成测试均实际通过。既有类别角色人工矩阵是在合并前 category 基线上完成，覆盖创建与锁定、真实三文件导入、角色槽位与草稿、提交/Review、窄屏及键盘，但合并后未重新执行完整人工矩阵。当前分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；生产 FFmpeg/ffprobe 4.4.2 仍未验证。
 
 ## 目录结构
 

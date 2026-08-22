@@ -645,15 +645,13 @@ cd backend
 pytest -q
 ```
 
-类别角色功能分支的历史独立验证结果：后端全量 `483 passed, 3 skipped, 1 warning`；fresh/create_all 与 populated 0012→0013 migration smoke 为 `2 passed, 1 warning`；前端 production build 通过（62 modules），diff-check 通过。runtime smoke 确认 health ok、OpenAPI `ProjectCreate` 必填 `name/categories`、`categories.minItems=1`，缺 categories 返回 422；用户确认浏览器可访问且服务正常。类别角色功能人工浏览器矩阵已通过，实测发现的角色导航与 Review queue 两项缺陷均已修复并由用户复测通过；真实 Review queue 返回 HTTP 200，ORM 仍以 effective 权限为准。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不作为该功能缺陷或阻断。
-
-分工功能在合入 `main` 前的历史联合验证结果：聚焦联合后端为 `228 passed, 5 skipped, 1 warning`，后端全量为 `437 passed, 8 skipped, 1 warning`，assignment frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。仅在单条测试命令中临时将 clip venv `Scripts` 加入 `PATH` 后，`backend/tests/test_media_ffmpeg_integration.py` 真实 FFmpeg/ffprobe 集成为 `5 passed, 1 warning`，使用 FFmpeg 7.1 与 ffprobe 2023-02-13 git build；该 `PATH` 不是系统配置。该记录对应当时尚未合入 category 的边界，人工浏览器矩阵当时尚未执行。
+当前联合分支 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成导出快照、严格整数契约和测试有效性修复；Oracle 最终确认实现问题关闭。在当前 backend 目录，仅对单次命令临时将 clip venv `Scripts` 加入 `PATH` 后，后端全量为 `516 passed, 3 skipped, 1 warning`；其中 `tests/test_media_ffmpeg_integration.py` 的 5 项真实 FFmpeg/ffprobe 测试均实际执行并通过。该 `PATH` 不是系统配置，生产 FFmpeg/ffprobe 4.4.2 仍未验证。前端 production build 同步通过（62 modules）。既有类别角色人工浏览器矩阵是在合并前 category 基线上完成，不能解释为合并后已重新执行完整人工矩阵。
 
 已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-上述各项均为合并前各自历史边界内的验证证据；本次 assignment 与 category 前集成未运行联合测试，不据此声称集成结果已通过测试，也不替代部署、公网入口、备份恢复或浏览器人工验收。
+当前联合分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；上述联合自动验收不替代生产候选、部署、公网入口、备份恢复或合并后完整浏览器人工验收。
 
 覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
