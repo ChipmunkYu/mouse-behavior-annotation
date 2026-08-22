@@ -179,6 +179,15 @@ export interface Video {
   submission_annotations: SubmissionAnnotationSnapshot[];
 }
 
+export interface VideoClaimsInput {
+  video_ids: number[];
+}
+
+export interface VideoClaimsResponse {
+  claimed_count: number;
+  videos: Video[];
+}
+
 export interface VideoCreateInput {
   filename: string;
   duration?: number | null;

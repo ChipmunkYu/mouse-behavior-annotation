@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 
 # ---------- 认证 ----------
@@ -199,6 +199,24 @@ class VideoOut(BaseModel):
 class AssignmentBatchRequest(BaseModel):
     video_ids: list[int] = Field(min_length=1)
     assignee_membership_id: Optional[int] = None
+
+
+class VideoClaimsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video_ids: list[PositiveInt] = Field(min_length=1, max_length=200)
+
+    @field_validator("video_ids")
+    @classmethod
+    def video_ids_must_be_unique(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("video_ids must be unique")
+        return value
+
+
+class VideoClaimsResponse(BaseModel):
+    claimed_count: int
+    videos: list[VideoOut]
 
 
 class AssignmentStatsItem(BaseModel):

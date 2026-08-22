@@ -10,6 +10,7 @@ from sqlalchemy.orm import Query, Session
 from app import database as db_mod
 from app.assignee_triggers import ASSIGNEE_CONFLICT_DETAIL
 from app.models import BackgroundJob, ProjectMembership, Video
+from app.routers.videos import ERR_BATCH_CLAIM_CONFLICT
 
 
 def _assignee_integrity_error() -> IntegrityError:
@@ -166,6 +167,188 @@ def test_assignment_stats_distinguishes_unassigned_and_claimable(ctx, login_head
     ).json()
     assert stats["unassigned"] == 4
     assert stats["claimable"] == 1
+
+
+def test_batch_claim_owner_admin_and_member_claim_only_for_self(ctx, login_headers):
+    owner_h = login_headers()
+    project = ctx.client.post(
+        "/api/projects", json={"name": "batch-claim-roles"}, headers=owner_h
+    ).json()
+    admin_id = ctx.create_user("claim-admin")
+    member_id = ctx.create_user("claim-member")
+    ctx.add_member(project["id"], admin_id, role="admin")
+    ctx.add_member(project["id"], member_id)
+    admin_h = login_headers("claim-admin", "pw123")
+    member_h = login_headers("claim-member", "pw123")
+    videos = [
+        ctx.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={"filename": f"role-{index}.mp4"},
+            headers=owner_h,
+        ).json()
+        for index in range(3)
+    ]
+    with ctx.session_factory() as db:
+        memberships = {
+            membership.role: membership.id
+            for membership in db.query(ProjectMembership).filter_by(project_id=project["id"]).all()
+        }
+
+    for headers, video, role in zip(
+        (owner_h, admin_h, member_h), videos, ("owner", "admin", "member")
+    ):
+        response = ctx.client.post(
+            f"/api/projects/{project['id']}/videos/claims",
+            json={"video_ids": [video["id"]]},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["claimed_count"] == 1
+        assert response.json()["videos"][0]["assignee_membership_id"] == memberships[role]
+
+    assert ctx.client.post(
+        f"/api/projects/{project['id']}/videos/assignments",
+        json={"video_ids": [videos[0]["id"]], "assignee_membership_id": None},
+        headers=member_h,
+    ).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        {"video_ids": []},
+        {"video_ids": [1, 1]},
+        {"video_ids": list(range(1, 202))},
+        {"video_ids": [1], "assignee_membership_id": 999},
+    ),
+)
+def test_batch_claim_schema_rejects_invalid_requests(body, ctx, login_headers):
+    project, _owner_h, alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/claims", json=body, headers=alice_h
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("conflict", ("claimed", "submitted", "missing", "cross-project"))
+def test_batch_claim_conflict_rolls_back_without_leaking_reason(
+    conflict, ctx, login_headers
+):
+    project, owner_h, alice_h, _bob_h, alice_mid, bob_mid = _setup(ctx, login_headers)
+    valid = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": f"valid-{conflict}.mp4"},
+        headers=owner_h,
+    ).json()
+    invalid = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": f"invalid-{conflict}.mp4"},
+        headers=owner_h,
+    ).json()
+    if conflict == "missing":
+        invalid_id = max(valid["id"], invalid["id"]) + 1000
+    elif conflict == "cross-project":
+        other = ctx.client.post(
+            "/api/projects", json={"name": "claim-other"}, headers=owner_h
+        ).json()
+        invalid = ctx.client.post(
+            f"/api/projects/{other['id']}/videos",
+            json={"filename": "cross-project.mp4"},
+            headers=owner_h,
+        ).json()
+        invalid_id = invalid["id"]
+    else:
+        invalid_id = invalid["id"]
+        with ctx.session_factory() as db:
+            row = db.get(Video, invalid_id)
+            if conflict == "claimed":
+                row.assignee_membership_id = bob_mid
+            else:
+                row.workflow_status = "submitted"
+            db.commit()
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/claims",
+        json={"video_ids": [valid["id"], invalid_id]},
+        headers=alice_h,
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == ERR_BATCH_CLAIM_CONFLICT
+    with ctx.session_factory() as db:
+        assert db.get(Video, valid["id"]).assignee_membership_id is None
+        if conflict == "claimed":
+            assert db.get(Video, invalid_id).assignee_membership_id == bob_mid
+        assert db.get(Video, valid["id"]).assignee_membership_id != alice_mid
+
+
+def test_batch_claim_preserves_request_order(ctx, login_headers):
+    project, owner_h, alice_h, _bob_h, alice_mid, _bob_mid = _setup(ctx, login_headers)
+    videos = [
+        ctx.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={"filename": f"ordered-{index}.mp4"},
+            headers=owner_h,
+        ).json()
+        for index in range(3)
+    ]
+    requested = [videos[2]["id"], videos[0]["id"], videos[1]["id"]]
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/claims",
+        json={"video_ids": requested},
+        headers=alice_h,
+    )
+    assert response.status_code == 200
+    assert response.json()["claimed_count"] == 3
+    assert [video["id"] for video in response.json()["videos"]] == requested
+    assert {video["assignee_membership_id"] for video in response.json()["videos"]} == {alice_mid}
+
+
+def test_overlapping_batch_claims_allow_at_most_one_success(ctx, login_headers):
+    project, owner_h, alice_h, bob_h, alice_mid, bob_mid = _setup(ctx, login_headers)
+    videos = [
+        ctx.client.post(
+            f"/api/projects/{project['id']}/videos",
+            json={"filename": f"overlap-{index}.mp4"},
+            headers=owner_h,
+        ).json()
+        for index in range(3)
+    ]
+    path = f"/api/projects/{project['id']}/videos/claims"
+    requests = (
+        (alice_h, {"video_ids": [videos[0]["id"], videos[1]["id"]]}),
+        (bob_h, {"video_ids": [videos[1]["id"], videos[2]["id"]]}),
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda item: ctx.client.post(path, headers=item[0], json=item[1]), requests))
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    with ctx.session_factory() as db:
+        assigned = [db.get(Video, video["id"]).assignee_membership_id for video in videos]
+    assert assigned.count(alice_mid) in (0, 2)
+    assert assigned.count(bob_mid) in (0, 2)
+    assert assigned.count(None) == 1
+
+
+def test_batch_claim_database_conflict_returns_stable_409(monkeypatch, ctx, login_headers):
+    project, owner_h, alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "batch-claim-db-conflict.mp4"},
+        headers=owner_h,
+    ).json()
+
+    def fail_update(*args, **kwargs):
+        raise _assignee_integrity_error()
+
+    monkeypatch.setattr(Query, "update", fail_update)
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/claims",
+        json={"video_ids": [video["id"]]},
+        headers=alice_h,
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == ERR_BATCH_CLAIM_CONFLICT
+    with ctx.session_factory() as db:
+        assert db.get(Video, video["id"]).assignee_membership_id is None
 
 
 def test_batch_assignment_validates_all_before_mutation_and_preserves_revisions(ctx, login_headers):

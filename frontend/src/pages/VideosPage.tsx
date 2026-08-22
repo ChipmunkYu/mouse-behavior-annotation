@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { batchAssignVideos, claimVideo, createVideo, getAssignmentStats, listAssignees, listProjects, listVideos, releaseVideo } from "../api";
+import { batchAssignVideos, claimVideo, claimVideos, createVideo, getAssignmentStats, listAssignees, listProjects, listVideos, releaseVideo } from "../api";
 import type { AssigneeDirectoryItem, AssignmentStats, Project, Video, VideoView } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { useConfirm } from "../components/ConfirmDialog";
@@ -72,15 +72,18 @@ export default function VideosPage() {
   const [confirmDialog, confirm] = useConfirm();
   const selectAllRef = useRef<HTMLInputElement>(null);
   const canManage = project?.role === "owner" || project?.role === "admin";
+  const canSelect = Boolean(project && (canManage || view === "unassigned"));
+  const memberClaimMode = Boolean(project?.role === "member" && view === "unassigned");
 
   const load = useCallback(async () => {
-    if (!pid) return;
+    if (!pid) return [] as Video[];
     try {
       const params = { view, workflow_status: view === "unassigned" ? undefined : workflow || undefined, assignee_membership_id: assigneeFilter ? Number(assigneeFilter) : undefined };
       const [projects, assigneeRows, videoRows, assignmentStats] = await Promise.all([listProjects(), listAssignees(pid), listVideos(pid, params), getAssignmentStats(pid)]);
       setProject(projects.find((p) => p.id === pid) ?? null); setAssignees(assigneeRows); setVideos(videoRows); setStats(assignmentStats); setError(null);
       setSelected((old) => new Set([...old].filter((id) => videoRows.some((v) => v.id === id && ["draft", "rejected"].includes(v.workflow_status)))));
-    } catch (err) { setError(err instanceof Error ? err.message : "加载视频失败"); setVideos([]); }
+      return videoRows;
+    } catch (err) { setError(err instanceof Error ? err.message : "加载视频失败"); setVideos([]); return [] as Video[]; }
   }, [pid, view, workflow, assigneeFilter]);
   useEffect(() => { void load(); }, [load]);
 
@@ -88,20 +91,22 @@ export default function VideosPage() {
     const q = query.trim().toLowerCase();
     return (videos ?? []).filter((v) => !q || v.filename.toLowerCase().includes(q));
   }, [videos, query]);
-  const selectable = displayed.filter((v) => ["draft", "rejected"].includes(v.workflow_status));
+  const selectable = useMemo(() => canSelect
+    ? displayed.filter((video) => view === "unassigned" ? video.workflow_status === "draft" : ["draft", "rejected"].includes(video.workflow_status))
+    : [], [canSelect, displayed, view]);
   const visibleSelectedCount = selectable.reduce((count, video) => count + (selected.has(video.id) ? 1 : 0), 0);
   const announceSelection = useCallback((message: string) => setSelectionAnnouncement(message), []);
-  const marquee = useVideoMarqueeSelection({ enabled: Boolean(canManage), selected, setSelected, onAnnounce: announceSelection });
+  const marquee = useVideoMarqueeSelection({ enabled: canSelect, selected, setSelected, onAnnounce: announceSelection });
 
   useEffect(() => {
-    const visibleIds = new Set(displayed.filter((video) => ["draft", "rejected"].includes(video.workflow_status)).map((video) => video.id));
+    const visibleIds = new Set(selectable.map((video) => video.id));
     setSelected((old) => {
       const next = new Set([...old].filter((id) => visibleIds.has(id)));
       if (next.size === old.size) return old;
       setSelectionAnnouncement(next.size ? `筛选后保留 ${next.size} 个已选视频` : "筛选后已清除隐藏选择");
       return next;
     });
-  }, [displayed]);
+  }, [selectable]);
 
   useEffect(() => {
     if (selectAllRef.current) selectAllRef.current.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < selectable.length;
@@ -109,21 +114,60 @@ export default function VideosPage() {
 
   async function perform(id: number, kind: "claim" | "release") {
     setActionId(id); setError(null); setNotice(null);
-    try { if (kind === "claim") await claimVideo(pid, id); else await releaseVideo(pid, id); setNotice(kind === "claim" ? "已领取视频，已加入「我的任务」。" : "已释放视频，其他成员现在可以领取。"); await load(); }
-    catch (err) {
-      if (kind === "claim" && err instanceof ApiError && err.status === 409) setError("该视频已被其他成员领取，或已不再是草稿，列表已刷新。");
-      else setError(actionError(err));
+    try {
+      if (kind === "claim") {
+        await claimVideo(pid, id);
+        setSelected((old) => { const next = new Set(old); next.delete(id); return next; });
+        setNotice("已领取 1 个视频，已加入「我的任务」。");
+        setSelectionAnnouncement("已领取 1 个视频，已加入我的任务");
+      } else {
+        await releaseVideo(pid, id);
+        setNotice("已释放视频，其他成员现在可以领取。");
+      }
       await load();
+    }
+    catch (err) {
+      const message = kind === "claim" && err instanceof ApiError && err.status === 409
+        ? "该视频已被其他成员领取，或已不再是草稿，列表已刷新。"
+        : actionError(err);
+      await load();
+      setError(message);
     } finally { setActionId(null); }
   }
 
   async function applyBatch() {
     const ids = [...selected]; if (!ids.length) return;
     const target = batchAssignee ? assignees.find((m) => m.membership_id === Number(batchAssignee))?.username : "未分配";
-    if (!await confirm({ title: "确认批量改派", message: `将 ${ids.length} 个视频的负责人改为「${target}」。只有草稿或已退回视频可以改派。`, confirmLabel: batchAssignee ? "确认改派" : "清空负责人", danger: !batchAssignee })) return;
+    const assigning = view === "unassigned";
+    if (!await confirm({ title: assigning ? "确认批量分配" : "确认批量改派", message: `将 ${ids.length} 个视频的负责人改为「${target}」。只有草稿或已退回视频可以操作。`, confirmLabel: batchAssignee ? (assigning ? "确认分配" : "确认改派") : "清空负责人", danger: !batchAssignee })) return;
     setBusy(true); setError(null); setNotice(null);
     try { await batchAssignVideos(pid, ids, batchAssignee ? Number(batchAssignee) : null); setSelected(new Set()); setNotice(`已更新 ${ids.length} 个视频的负责人。`); await load(); }
-    catch (err) { setError(actionError(err)); await load(); } finally { setBusy(false); }
+    catch (err) { const message = actionError(err); await load(); setError(message); } finally { setBusy(false); }
+  }
+
+  async function applyBatchClaim() {
+    const ids = [...selected]; if (!ids.length) return;
+    if (ids.length > 200) { setError("一次最多领取 200 个视频，请减少选择后重试。"); return; }
+    if (!await confirm({ title: "确认批量领取", message: `领取所选 ${ids.length} 个视频，并将你设为负责人。`, confirmLabel: "确认领取" })) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const result = await claimVideos(pid, { video_ids: ids });
+      setSelected(new Set());
+      setNotice(`已领取 ${result.claimed_count} 个视频，已加入「我的任务」。`);
+      setSelectionAnnouncement(`已领取 ${result.claimed_count} 个视频，已加入我的任务`);
+      await load();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const rows = await load();
+        const normalizedQuery = query.trim().toLowerCase();
+        const remaining = ids.filter((id) => rows.some((video) => video.id === id && video.workflow_status === "draft" && (!normalizedQuery || video.filename.toLowerCase().includes(normalizedQuery))));
+        setSelected(new Set(remaining));
+        setError("部分视频已被领取或不再是草稿，本次所选视频均未领取；列表已刷新。");
+        setSelectionAnnouncement(`批量领取发生冲突，本次所选视频均未领取；刷新后仍选择 ${remaining.length} 个可领取视频`);
+      } else {
+        setError(err instanceof Error ? err.message : "批量领取失败");
+      }
+    } finally { setBusy(false); }
   }
 
   function updateField(key: keyof VideoFormState, value: string) {
@@ -206,20 +250,31 @@ export default function VideosPage() {
     marquee.selectCard(videoId, event);
   }
 
+  const selectAllLabel = memberClaimMode ? "全选待领取视频" : view === "unassigned" ? "全选可分配视频" : "全选可改派视频";
+  const selectAllAriaLabel = memberClaimMode
+    ? "全选当前搜索结果中的待领取视频"
+    : view === "unassigned"
+      ? "全选当前搜索结果中的可分配草稿视频"
+      : "全选当前筛选和搜索结果中的可改派草稿或已退回视频";
+  const cardSelectionVerb = memberClaimMode ? "选择领取" : view === "unassigned" ? "选择分配" : "选择改派";
+
   return <div className="container videos-page">
     {confirmDialog}
-    <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1><div className="sub">分工表示责任归属，不限制项目成员查看或提交视频。</div></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
+    <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
     {uploadOpen && project ? <VideoUploadPanel projectId={pid} canManage={canManage} assignees={assignees} onUploaded={() => void load()} onEnterAnnotation={(v) => navigate(`/projects/${pid}/annotate/${v.id}`)} onClose={() => setUploadOpen(false)} /> : null}
     {error ? <ErrorBox message={error} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
     <div className="assignment-summary"><span><b>{stats?.total ?? 0}</b> 个视频</span><span className={(stats?.unassigned ?? 0) ? "warn" : ""}><b>{stats?.unassigned ?? 0}</b> 个未分配</span>{canManage ? <Link to={`/projects/${pid}/manage`}>查看分配统计 →</Link> : null}</div>
     <div className="view-tabs" role="tablist" aria-label="视频视图">{VIEWS.map((item) => <button key={item.key} role="tab" aria-selected={view === item.key} className={view === item.key ? "active" : ""} title={item.hint} onClick={() => { setView(item.key); if (item.key === "unassigned") setWorkflow(""); clearSelection("切换视图后已清除选择"); if (item.key !== "all") setAssigneeFilter(""); }}>{item.label}{item.key === "unassigned" && (stats?.claimable ?? 0) > 0 ? <span title="可领取数">{stats?.claimable}</span> : null}</button>)}</div>
     <div className="video-toolbar"><input className="input search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="按文件名搜索…" aria-label="按文件名搜索"/>{view === "unassigned" ? <span className="fixed-filter" aria-label="工作流状态固定为草稿">工作流：草稿</span> : <select className="select workflow-filter" value={workflow} onChange={(e) => { setWorkflow(e.target.value); clearSelection("筛选变化后已清除选择"); }} aria-label="工作流状态"><option value="">全部工作流状态</option><option value="draft">草稿</option><option value="submitted">待审核</option><option value="approved">审核通过</option><option value="rejected">已退回</option></select>}{view === "all" ? <select className="select assignee-filter" value={assigneeFilter} onChange={(e) => { clearSelection("筛选变化后已清除选择"); if (e.target.value === "unassigned") { setView("unassigned"); setWorkflow(""); setAssigneeFilter(""); } else setAssigneeFilter(e.target.value); }} aria-label="负责人"><option value="">全部负责人</option><option value="unassigned">未分配</option>{assignees.map((m) => <option key={m.membership_id} value={m.membership_id}>{m.username}</option>)}</select> : null}<span className="flex-spacer"/><button className="btn btn-sm toolbar-refresh" onClick={() => void load()}>刷新</button></div>
     <div className="visually-hidden" aria-live="polite" aria-atomic="true">{selectionAnnouncement}</div>
-    {canManage && selected.size > 0 ? <div className="batch-bar" role="region" aria-label="批量分配"><b className="batch-count">已选 {selected.size} 个</b><span className="batch-label">改派给</span><select className="select" value={batchAssignee} onChange={(e) => setBatchAssignee(e.target.value)} aria-label="批量改派负责人"><option value="">未分配（清空）</option>{assignees.map((m) => <option key={m.membership_id} value={m.membership_id}>{m.username}</option>)}</select><div className="batch-actions"><button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void applyBatch()}>{busy ? "处理中…" : "应用"}</button><button className="btn btn-ghost btn-sm" onClick={() => clearSelection()}>取消选择</button></div></div> : null}
+    {canSelect && selected.size > 0 ? memberClaimMode
+      ? <div className="batch-bar batch-bar-claim" role="region" aria-label="批量领取" aria-busy={busy}><b className="batch-count">已选 {selected.size} 个</b><div className="batch-actions"><button className="btn btn-primary btn-sm" disabled={busy || actionId !== null} onClick={() => void applyBatchClaim()}>{busy ? "领取中…" : "领取所选"}</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => clearSelection()}>取消选择</button></div></div>
+      : <div className="batch-bar" role="region" aria-label="批量分配" aria-busy={busy}><b className="batch-count">已选 {selected.size} 个</b><span className="batch-label">{view === "unassigned" ? "分配给" : "改派给"}</span><select className="select" value={batchAssignee} onChange={(e) => setBatchAssignee(e.target.value)} disabled={busy} aria-label={view === "unassigned" ? "批量分配负责人" : "批量改派负责人"}><option value="">未分配（清空）</option>{assignees.map((m) => <option key={m.membership_id} value={m.membership_id}>{m.username}</option>)}</select><div className="batch-actions"><button className="btn btn-primary btn-sm" disabled={busy || actionId !== null} onClick={() => void applyBatch()}>{busy ? "处理中…" : view === "unassigned" ? "分配所选" : "应用改派"}</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => clearSelection()}>取消选择</button></div></div>
+      : null}
     {videos === null ? <Loading text="加载视频…" /> : displayed.length === 0 ? <Card><EmptyState title={view === "mine" ? "暂无我的任务" : view === "unassigned" ? "暂无待领取视频" : "没有匹配的视频"} hint={view === "mine" ? "可到「待领取」领取未分配视频；你仍可在「全部」进入其他视频。" : view === "unassigned" ? "当前没有未分配的草稿视频。" : "调整搜索或筛选条件。"}/></Card> : <>
-      {canManage ? <div className="selection-tools"><label className="select-all"><input ref={selectAllRef} type="checkbox" checked={selectable.length > 0 && visibleSelectedCount === selectable.length} disabled={selectable.length === 0} onChange={toggleAll}/> <span>选择当前筛选结果中的可改派视频</span> <span className="selection-scope">{view === "unassigned" ? "（草稿）" : "（草稿、已退回）"}</span></label>{marquee.interactionEnabled ? <span className="selection-hint">拖动框选 · Shift 追加 · Ctrl/Cmd 切换</span> : null}</div> : null}
-      <div ref={marquee.gridRef} className={`video-grid ${marquee.interactionEnabled ? "selection-enabled" : ""}`} tabIndex={marquee.interactionEnabled ? 0 : -1} aria-label={canManage ? "可批量选择的视频列表" : "视频列表"} {...marquee.gridPointerHandlers}>{displayed.map((v) => { const assignable = ["draft", "rejected"].includes(v.workflow_status); const mine = v.assignee_membership_id === project?.membership_id; return <article key={v.id} data-video-id={v.id} data-video-selectable={canManage && assignable ? "true" : "false"} onClick={canManage && assignable ? (event) => selectCard(v.id, event) : undefined} className={`card video-card ${selected.has(v.id) ? "selected" : ""}`}>
-        {canManage ? <label className="card-select" title={assignable ? "选择视频" : "当前状态不可改派"}><input type="checkbox" checked={selected.has(v.id)} disabled={!assignable} onChange={() => toggleOne(v.id)}/><span className="visually-hidden">选择 {v.filename}</span></label> : null}
+      {selectable.length > 0 ? <div className="selection-tools"><label className="select-all"><input ref={selectAllRef} type="checkbox" checked={visibleSelectedCount === selectable.length} onChange={toggleAll} aria-label={selectAllAriaLabel}/> <span>{selectAllLabel}</span></label>{marquee.interactionEnabled ? <span className="selection-hint">拖动框选 · Shift 追加 · Ctrl/Cmd 切换</span> : null}</div> : null}
+      <div ref={marquee.gridRef} className={`video-grid ${marquee.interactionEnabled ? "selection-enabled" : ""}`} tabIndex={marquee.interactionEnabled ? 0 : -1} aria-label={canSelect ? memberClaimMode ? "可批量领取的视频列表" : view === "unassigned" ? "可批量分配的视频列表" : "可批量改派的视频列表" : "视频列表"} {...marquee.gridPointerHandlers}>{displayed.map((v) => { const assignable = canSelect && (view === "unassigned" ? v.workflow_status === "draft" : ["draft", "rejected"].includes(v.workflow_status)); const mine = v.assignee_membership_id === project?.membership_id; return <article key={v.id} data-video-id={v.id} data-video-selectable={assignable ? "true" : "false"} onClick={assignable ? (event) => selectCard(v.id, event) : undefined} className={`card video-card ${selected.has(v.id) ? "selected" : ""}`}>
+        {canSelect ? <label className="card-select" title={assignable ? `${cardSelectionVerb}视频` : "当前状态不可选择"}><input type="checkbox" checked={selected.has(v.id)} disabled={!assignable} onChange={() => toggleOne(v.id)} aria-label={`${cardSelectionVerb}：${v.filename}`}/></label> : null}
         <div className="thumb" aria-hidden="true">{v.status === "needs_transcode" ? "⟳" : v.storage_path ? "▶" : "▢"}</div><div className="name" data-selection-copy title={v.filename}>{v.filename}</div>
         <div className={`assignee-line ${v.assignee ? "" : "unassigned"}`} data-selection-copy><span className="assignee-avatar">{v.assignee?.username.slice(0, 1).toUpperCase() ?? "?"}</span><span>{v.assignee ? <><small>负责人</small><b title={v.assignee.username}>{v.assignee.username}{mine ? "（我）" : ""}</b></> : <><small>负责人</small><b>未分配</b></>}</span></div>
         <div className="meta" data-selection-copy><span>时长 <b>{formatDuration(v.duration)}</b></span><span>帧率 <b>{v.fps != null ? `${v.fps} fps` : "—"}</b></span><span>分辨率 <b>{v.width != null && v.height != null ? `${v.width} × ${v.height}` : "—"}</b></span><span>状态 <b>{statusLabel(v.status)}</b></span></div>
@@ -228,7 +283,7 @@ export default function VideosPage() {
         {v.submitted_at || v.approved_at ? <div className="workflow-times" data-selection-copy>{v.submitted_at ? <span>提交 <b>{formatDate(v.submitted_at)}</b></span> : null}{v.approved_at ? <span>通过 <b>{formatDate(v.approved_at)}</b></span> : null}</div> : null}
         {v.workflow_status === "approved" ? <div className="card-media-summary" data-selection-copy><MediaStatusSummary projectId={pid} videoId={v.id}/></div> : null}
         <div className="foot" data-selection-copy><span>上传 {formatDate(v.created_at)}</span><StatusBadge value={v.status}/></div>
-        <div className="actions card-actions">{view === "unassigned" && !v.assignee ? <button className="btn btn-sm" disabled={actionId === v.id} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button> : null}{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId === v.id} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={v.status === "needs_transcode"} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div>
+        {view === "unassigned" ? <div className="actions card-actions"><button className="btn btn-sm btn-primary" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button></div> : view === "mine" ? <div className="actions card-actions">{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={v.status === "needs_transcode"} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div> : null}
       </article>; })}{marquee.rect ? <div className="marquee-rect" aria-hidden="true" style={marquee.rect}/> : null}</div></>}
     {/* 开发工具与普通分工流程分层，并默认折叠。 */}
     <details className="dev-panel" open={devOpen} onToggle={(event) => setDevOpen(event.currentTarget.open)}>

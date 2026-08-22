@@ -41,7 +41,9 @@ npm run dev
 - 正式项目 ZIP 中，每个 `SubmissionAnnotation` 对应一个独立目录，固定包含 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json`；不包含集中式 `annotations.json`、manifest 或 `corrected_tracks/`。
 - 单视频 `/annotations/export` 仅是 legacy 兼容 JSON 接口，不代表正式项目 ZIP 契约。
 - 项目角色为 `owner/admin/member`；审核能力通过 `can_review` 与角色共同决定。分工只表示责任归属，active 成员仍可编辑和提交。
-- 视频库提供“我的任务 / 待领取 / 全部”，项目管理提供成员、邀请码和分工统计；迁移 head 为 `0012`。
-- 后端最终证据为 `414 passed, 3 skipped`，分工模块及本次领取语义最后一次 focused 测试为 `25 passed`；前端 production build 与真实 FFmpeg 的 25/30/60 FPS 验收均已通过。
+- 视频库提供“我的任务 / 待领取 / 全部”，支持 member 待领取批量自领与 owner/admin 批量分配/改派；卡片仅“我的任务”进入标注。项目管理提供成员、邀请码和分工统计；迁移 head 为 `0012`。
+- `feature/assignment-module@5c447198` 的 main+assignment 联合验证已完成：聚焦联合后端为 `228 passed, 5 skipped, 1 warning`，后端全量为 `437 passed, 8 skipped, 1 warning`，assignment frontend TypeScript/Vite production build 通过并处理 `59 modules`；仅在单条测试命令中临时将 clip venv `Scripts` 加入 `PATH` 后，真实 FFmpeg/ffprobe 集成为 `5 passed, 1 warning`（FFmpeg 7.1、ffprobe 2023-02-13 git build），该 `PATH` 不是系统配置。category 仍未合入；当前分工变更尚未进入 `main`、推送或部署，人工浏览器矩阵尚未执行。
+- 已进入 `main` 的媒体修复以此前 `399 passed, 8 skipped` 为后端全量历史基线。2026-08-17 在 Python 3.11.9 隔离环境中，以 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成本地验证：真实集成测试 `5 passed, 1 warning`，媒体与项目导出聚焦回归 `66 passed, 1 warning`，均无 skip。已覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧及约 `10/fps` 时长、JPEG、成功后无 `.part`/`.staging`、缩略图失败不发布和 MediaWorker `succeeded`/`ready` 状态；warning 为既有 Starlette/httpx deprecation warning。生产服务器 FFmpeg/ffprobe 4.4.2 兼容性仍未验证，媒体修复仍未部署，不能视为生产候选验收。
+- 同日还以真实小鼠三文件（3.54 MB `社交-攻击1.mov`、约 1.69 MB `tracks.jsonl`、30 FPS/156 帧 `metadata.json`）仅通过公开 API 完成本地 E2E：导入 1877 条检测，以真实 `track_id=6` 标注帧 0–14 并提交、审核通过，异步媒体 `total=1/ready=1/failed=0`，项目导出成功。下载 ZIP 为 `backend/data/local-e2e/downloads/project-1-job-2.zip`（116603 bytes），片段目录严格只有 `clip.mp4`、`tracks.json`、`annotation.json`、`metadata.json` 且 JSON/计数一致；ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，且无 `.part`/`.staging`。本地后端测试完成后已停止并释放 8000 端口；被忽略的 `backend/data/local-e2e` 配置与产物不属于仓库提交。
 - 服务器本机与 SSH 隧道验收不等于完整公网验收；多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成。
 - SQLite 与应用内媒体、导出、清理 worker 当前按单应用进程部署；不得直接使用多个应用进程共享同一任务库和数据目录。

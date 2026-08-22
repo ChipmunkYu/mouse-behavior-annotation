@@ -11,7 +11,9 @@ from app.export_contract import (FILES, TracksSummary, safe_part, transform_dete
                                  validate_clip_directory)
 from app.media import MediaCommandError
 from app.media_jobs import reset_interrupted_job_clips
-from app.models import Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission
+from app.export_jobs import export_dedupe_key
+from app.models import (Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission,
+                        SubmissionAnnotation)
 from tests.conftest import auth_headers
 from tests.test_reviews import (_add_reviewer, _annotate_with_mouse, _review,
                                 _setup_video_with_import, _submit)
@@ -62,6 +64,77 @@ def _remove_submission_clips(ctx):
             db.delete(clip)
         db.commit()
     return ids
+
+
+def test_export_schedule_exception_fails_job_releases_key_and_allows_retry(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker
+    original_schedule = worker.schedule
+    calls = 0
+
+    def fail_once(job_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("executor unavailable")
+        return original_schedule(job_id)
+
+    monkeypatch.setattr(worker, "schedule", fail_once)
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/export", json={}, headers=headers)
+
+    assert response.status_code == 503
+    with ctx.session_factory() as db:
+        failed = db.query(BackgroundJob).filter_by(job_type="export").one()
+        failed_id = failed.id
+        assert failed.status == "failed"
+        assert failed.finished_at is not None
+        assert "executor unavailable" in failed.error
+        assert failed.dedupe_key != export_dedupe_key(project["id"])
+        assert db.query(BackgroundJob).filter_by(
+            dedupe_key=export_dedupe_key(project["id"])).count() == 0
+
+    retry = ctx.client.post(
+        f"/api/projects/{project['id']}/export", json={}, headers=headers)
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["id"] != failed_id
+    assert retry.json()["status"] == "succeeded"
+
+
+def test_export_schedule_exception_preserves_job_claimed_by_worker(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    active_key = export_dedupe_key(project["id"])
+
+    def claim_then_fail(job_id):
+        with ctx.session_factory() as db:
+            claimed = db.query(BackgroundJob).filter_by(
+                id=job_id, status="queued", dedupe_key=active_key).update(
+                    {"status": "running", "attempts": BackgroundJob.attempts + 1},
+                    synchronize_session=False,
+                )
+            assert claimed == 1
+            db.commit()
+        raise RuntimeError("schedule failed after worker claim")
+
+    monkeypatch.setattr(ctx.app.state.export_worker, "schedule", claim_then_fail)
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/export", json={}, headers=headers)
+
+    assert response.status_code == 503
+    with ctx.session_factory() as db:
+        running = db.query(BackgroundJob).filter_by(job_type="export").one()
+        assert running.status == "running"
+        assert running.error is None
+        assert running.finished_at is None
+        assert running.dedupe_key == active_key
+
+    duplicate = ctx.client.post(
+        f"/api/projects/{project['id']}/export", json={}, headers=headers)
+    assert duplicate.status_code == 409
 
 
 def test_single_category_is_flat_and_has_exact_four_files(media_ctx):
@@ -261,37 +334,43 @@ def test_current_export_startup_recovers_processing_clip_and_reruns(media_ctx):
         worker.synchronous = original
 
 
-def test_exhausted_export_recovery_resets_processing_clip_for_new_export(media_ctx):
+def test_exhausted_submission_media_recovery_allows_export_to_reclaim_clip(media_ctx):
     ctx = media_ctx
     headers, project, _categories, _video, _annotations = _approved(ctx)
-    worker = ctx.app.state.export_worker
-    original = worker.synchronous
-    worker.synchronous = False
-    try:
-        with ctx.session_factory() as db:
-            job = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
-                db, db.get(Project, project["id"]), [])
-            exhausted_job_id = job.id
-            job.status, job.attempts = "running", ctx.app.state.settings.media_max_attempts
-            clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
-            clip.status = "processing"
-            db.commit()
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).filter_by(status="approved").one()
+        annotation = db.query(SubmissionAnnotation).filter_by(submission_id=submission.id).one()
+        clip = db.query(Clip).filter_by(submission_annotation_id=annotation.id).one()
+        media_job = db.query(BackgroundJob).filter(
+            BackgroundJob.job_type == "media",
+            BackgroundJob.payload["submission_id"].as_integer() == submission.id,
+        ).one()
+        for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                             (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+            if stored:
+                (root / stored).unlink(missing_ok=True)
+        media_job.status = "running"
+        media_job.attempts = ctx.app.state.settings.media_max_attempts
+        clip.status = "processing"
+        db.commit()
+        exhausted_job_id, clip_id = media_job.id, clip.id
 
-        worker._recover_interrupted()
+    ctx.app.state.media_worker._recover_interrupted()
 
-        with ctx.session_factory() as db:
-            exhausted = db.get(BackgroundJob, exhausted_job_id)
-            assert exhausted.status == "failed"
-            assert "retry limit" in exhausted.error
-            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "pending"
+    with ctx.session_factory() as db:
+        exhausted = db.get(BackgroundJob, exhausted_job_id)
+        assert exhausted.status == "failed"
+        assert "retry limit" in exhausted.error
+        assert db.get(Clip, clip_id).status == "pending"
 
-        worker.synchronous = True
-        replacement = _export(ctx, project, headers)
-        with ctx.session_factory() as db:
-            assert db.get(BackgroundJob, replacement["id"]).status == "succeeded"
-            assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one().status == "ready"
-    finally:
-        worker.synchronous = original
+    calls = len(ctx.processor.clip_calls)
+    replacement = _export(ctx, project, headers)
+    assert replacement["status"] == "succeeded"
+    assert len(ctx.processor.clip_calls) == calls + 1
+    with ctx.session_factory() as db:
+        clip = db.get(Clip, clip_id)
+        assert clip.status == "ready"
+        assert (ctx.app.state.settings.clips_dir / clip.clip_path).is_file()
 
 
 def test_legacy_export_payload_processing_clip_recovery_compatibility(media_ctx):

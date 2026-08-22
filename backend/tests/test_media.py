@@ -221,14 +221,16 @@ def test_clip_command_is_argument_list_no_shell(monkeypatch):
     assert cmd[0] == "ffmpeg"
     assert "-y" in cmd
     assert cmd[cmd.index("-ss") + 1] == "1.5"
-    assert cmd[cmd.index("-to") + 1] == "3"
+    assert "-to" not in cmd
+    assert cmd[cmd.index("-t") + 1] == "1.5"
     assert cmd[cmd.index("-i") + 1] == "C:/in.mp4"
     assert "-c:v" in cmd and "libx264" in cmd[cmd.index("-c:v") + 1]
     assert "veryfast" in cmd
     assert "23" in cmd
     assert "-pix_fmt" in cmd and "yuv420p" in cmd[cmd.index("-pix_fmt") + 1]
     assert "-movflags" in cmd and "+faststart" in cmd[cmd.index("-movflags") + 1]
-    assert cmd[-1] == "C:/out.mp4"
+    assert cmd[-3:] == ["-f", "mp4", "C:/out.mp4"]
+    assert "-an" in cmd
 
     captured = {}
 
@@ -254,7 +256,7 @@ def test_thumbnail_command_is_argument_list():
     assert cmd[cmd.index("-ss") + 1] == "2"
     assert "-frames:v" in cmd and cmd[cmd.index("-frames:v") + 1] == "1"
     assert "-q:v" in cmd
-    assert cmd[-1] == "th.jpg"
+    assert cmd[-3:] == ["-f", "image2", "th.jpg"]
 
 
 def test_optional_audio_mapping():
@@ -263,8 +265,18 @@ def test_optional_audio_mapping():
     assert cmd.count("-map") == 2
     assert "0:v:0" in cmd and "0:a:0?" in cmd
     assert "-c:a" in cmd and "aac" in cmd[cmd.index("-c:a") + 1]
+    assert "-an" not in cmd
     # 默认不映射音频
     assert _proc().build_clip_command("in.mp4", 0.0, 1.0, "out.mp4").count("-map") == 1
+    assert "-an" in _proc().build_clip_command("in.mp4", 0.0, 1.0, "out.mp4")
+
+
+def test_part_outputs_have_explicit_muxers_and_duration():
+    clip = _proc().build_clip_command("in.mp4", 1.25, 2.75, ".clip.mp4.part")
+    thumb = _proc().build_thumbnail_command("in.mp4", 2.0, ".thumb.jpg.part")
+    assert clip[-3:] == ["-f", "mp4", ".clip.mp4.part"]
+    assert clip[clip.index("-t") + 1] == "1.5" and "-to" not in clip
+    assert thumb[-3:] == ["-f", "image2", ".thumb.jpg.part"]
 
 
 def test_media_error_truncates_stderr(monkeypatch):
@@ -814,10 +826,10 @@ def test_restart_requeues_interrupted_running_job(media_ctx):
         assert db.query(Clip).one().status == "ready"
 
 
-def test_restart_marks_exhausted_running_job_failed(media_ctx):
+def test_restart_exhausted_job_releases_processing_clip_for_retry(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
-    project, _categories, video, _anns = _setup(ctx, headers, annotations=1)
+    project, _categories, video, anns = _setup(ctx, headers, annotations=1)
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
         v.workflow_status = "approved"
@@ -831,7 +843,11 @@ def test_restart_marks_exhausted_running_job_failed(media_ctx):
             dedupe_key=f"media:video:{video['id']}:rev:{revision}",
             payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
         )
-        db.add(job)
+        db.add_all([
+            Clip(project_id=project["id"], annotation_id=anns[0]["id"],
+                 source_revision=revision, status="processing"),
+            job,
+        ])
         db.commit()
         job_id = job.id
 
@@ -840,7 +856,16 @@ def test_restart_marks_exhausted_running_job_failed(media_ctx):
         job = db.get(BackgroundJob, job_id)
         assert job.status == "failed"
         assert "retry limit" in job.error
-        assert db.query(Clip).count() == 0  # 判失败，不再处理
+        assert db.query(Clip).one().status == "pending"
+
+    # The failed job can be explicitly requeued and the released Clip claimed again.
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/media/generate", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job_id).status == "succeeded"
+        assert db.query(Clip).one().status == "ready"
 
 
 # ---------- 修订隔离 / 失效竞态 ----------

@@ -673,6 +673,9 @@ class MediaWorker:
                 .all()
             )
             for job in rows:
+                # A processing Clip has no durable owner token. Always release claims
+                # from this interrupted job, including when the job itself is exhausted.
+                reset_interrupted_job_clips(db, job)
                 if job.attempts >= max_attempts:
                     job.status = "failed"
                     job.error = (
@@ -684,7 +687,6 @@ class MediaWorker:
                     job.status = "queued"
                     job.started_at = None
                     job.error = "Interrupted; requeued at startup"
-                    reset_interrupted_job_clips(db, job)
             db.commit()
 
     # ---------- 任务执行 ----------

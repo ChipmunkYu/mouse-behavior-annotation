@@ -114,6 +114,43 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
     return db.query(BackgroundJob).filter_by(dedupe_key=export_dedupe_key(project.id)).one()
 
 
+class ExportScheduleError(RuntimeError):
+    """The newly-created export could not be handed to its worker."""
+
+
+def schedule_export_job(db: Session, worker, job: BackgroundJob) -> None:
+    """Schedule one created job, atomically failing it if handoff itself raises.
+
+    The guarded update prevents a late scheduling exception from changing a job
+    that another worker has already claimed, or from releasing another export's
+    active dedupe key.
+    """
+    job_id, project_id = job.id, job.project_id
+    active_key = export_dedupe_key(project_id)
+    try:
+        worker.schedule(job_id)
+    except Exception as exc:
+        db.rollback()
+        failed = db.query(BackgroundJob).filter(
+            BackgroundJob.id == job_id,
+            BackgroundJob.project_id == project_id,
+            BackgroundJob.job_type == JOB_TYPE_EXPORT,
+            BackgroundJob.status == "queued",
+            BackgroundJob.dedupe_key == active_key,
+        ).update({
+            "status": "failed",
+            "error": _truncate_error(f"Export scheduling failed: {exc}"),
+            "finished_at": _now(),
+            "dedupe_key": f"export:project:{project_id}:history:{job_id}",
+        }, synchronize_session=False)
+        db.commit()
+        if failed == 1:
+            logger.exception("Scheduling export job %s failed; queued job marked failed", job_id)
+        else:
+            logger.exception("Scheduling export job %s failed after it left queued state", job_id)
+        raise ExportScheduleError("Export worker is temporarily unavailable") from exc
+
+
 def _resolve_within(stored: str | None, root_dir: Path):
     if not stored:
         return None, "missing"

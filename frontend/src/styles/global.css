@@ -108,6 +108,7 @@
 .batch-bar .select { flex: 1 1 190px; width: auto; min-width: 150px; max-width: 320px; }
 .batch-count, .batch-label { flex: none; white-space: nowrap; }
 .batch-actions { display: flex; flex: none; align-items: center; gap: 6px; white-space: nowrap; }
+.batch-bar-claim .batch-actions { margin-left: auto; }
 .selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px 14px; min-width: 0; margin: 3px 0 9px; }
 .select-all { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--text-2); }
 .select-all span { color: var(--text-3); }
@@ -115,7 +116,6 @@
 .selection-hint { flex: none; color: var(--text-3); font-size: 11px; white-space: nowrap; }
 .video-card { position: relative; }
 .video-card.selected { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent-weak) 38%, var(--bg-elev)); }
-.video-card.selected::after { content: "✓"; position: absolute; z-index: 2; top: 9px; right: 9px; display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--accent); border-radius: 50%; color: #fff; background: var(--accent); font-size: 12px; font-weight: 800; box-shadow: var(--shadow); }
 .card-select { position: absolute; z-index: 2; top: 9px; left: 9px; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 4px; background: color-mix(in srgb, var(--bg-elev) 90%, transparent); box-shadow: var(--shadow); }
 .card-select input:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .assignee-line { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
@@ -165,6 +165,7 @@
   .batch-bar { top: var(--topbar-h); display: grid; grid-template-columns: auto auto minmax(0, 1fr); }
   .batch-bar .select { width: 100%; min-width: 0; max-width: none; }
   .batch-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .batch-bar-claim .batch-actions { margin-left: 0; }
   .selection-tools { align-items: flex-start; }
   .selection-hint { display: none; }
   .view-tabs { overflow-x: auto; }

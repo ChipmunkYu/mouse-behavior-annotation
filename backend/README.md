@@ -14,7 +14,7 @@
 - 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
   含类别统计与类别/视频/标注者/关键词筛选（无 Alembic 迁移，复用现有表）
 - 全部 API 位于 `/api` 前缀下，认证使用 JWT Bearer 令牌
-- 分工能力：`owner/admin/member` 三角色、member 独立 `can_review`、项目邀请码、视频当前负责人、未分配草稿的 CAS 原子领取、释放、事务批量分配、三视图与 `unassigned/claimable` 双口径统计；分工不隔离 active 成员的编辑权限。
+- 分工能力：`owner/admin/member` 三角色、member 独立 `can_review`、项目邀请码、视频当前负责人、未分配草稿的单个/批量 CAS 自领、释放、管理员事务批量分配、三视图与 `unassigned/claimable` 双口径统计；分工不隔离 active 成员的编辑权限。
 - YOLO track 能力：三文件导入批次/替换、逐帧检测与修正后 track 查询、行为标注（`Annotation`）`mouse_ids`、Split、Merge、整轨检测抑制/撤销、三类修订审核，以及每个 `SubmissionAnnotation` 独立四文件的项目 ZIP 导出。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。
 - 正式项目导出是每片段固定 `clip.mp4`、`annotation.json`、`tracks.json`、`metadata.json` 的四文件 ZIP；单视频 `/annotations/export` 仅为 legacy 兼容 JSON API，两者不是同一契约。
 
@@ -144,7 +144,7 @@ Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Wi
 短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
 已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
 该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。
-25/30/60 FPS 已在真实 ffmpeg/ffprobe 环境完成实际帧数、尺寸、时长、首末帧和缩略图验收。
+2026-08-17 已在 Python 3.11.9 隔离环境中使用 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成真实编码、媒体属性与 MediaWorker 本地验证；两者均可从 `.venv\Scripts` 找到。生产 FFmpeg/ffprobe 4.4.2 兼容性仍待候选环境验收。
 
 ### Sparse writer 切换维护命令
 
@@ -286,6 +286,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `POST` | `/api/projects/{project_id}/videos` | JSON 创建视频元数据；owner/admin 可指定 `assignee_membership_id` |
 | `POST` | `/api/projects/{project_id}/videos/upload` | 真实视频流式上传；owner/admin 可用 multipart 字段指定负责人 → 201 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/claim` | 项目成员以 CAS 原子领取未分配 `draft`；已分配或已非 `draft` 返回 409 |
+| `POST` | `/api/projects/{project_id}/videos/claims` | 项目成员批量自领 1–200 个唯一视频 ID；固定当前 membership、全有或全无，任一无效统一 409，成功按请求顺序返回 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/release` | 当前负责人释放自己的 draft 视频 |
 | `POST` | `/api/projects/{project_id}/videos/assignments` | owner/admin 事务批量分配、改派或清空 draft/rejected 视频 |
 | `GET` | `/api/projects/{project_id}/assignment-stats` | 项目与逐负责人的工作流数量统计；`unassigned` 为全部未分配，`claimable` 为未分配 `draft` |
@@ -369,7 +370,7 @@ Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是�
 受控源媒体 SHA-256；withdraw 允许 active 项目成员或原 submitter，且仅限无 Review 的 submitted
 attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
 
-0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现并完成合并，真实 ffmpeg/ffprobe 的 25/30/60 FPS 媒体验收已通过。
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成 25/30/60 FPS 真实 FFmpeg 编码、ffprobe 属性和 MediaWorker 本地验证，生产 FFmpeg/ffprobe 4.4.2 候选验收仍待执行。
 
 Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
 并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
@@ -413,21 +414,22 @@ clip 与 thumbnail 使用同一整数 crop。已入队的 approved Submission �
 | `GET` | `/api/projects/{project_id}/jobs/{job_id}` | 任务详情 → `JobOut`（项目成员可读） |
 
 **精确重编码**：每条标注按 `[start_time, end_time)` 生成 `libx264 + yuv420p + faststart`
-H.264 MP4（`-ss` 前置输入定位 + 重编码，帧精确）；可选音频映射（`MEDIA_MAP_AUDIO`）。
+H.264 MP4（`-ss` 定位 + `-t` 片长）；默认 `-an`，启用 `MEDIA_MAP_AUDIO` 时可选音频 AAC。
+不做 stream-copy 降级。
 缩略图从片段**中点**（`(start+end)/2`）抽一帧 JPEG（`-frames:v 1 -q:v 2`）。
 
 **执行器与并发**：
 - `app/media.py` 封装 subprocess，命令一律**参数列表**调用、**禁用 `shell=True`**；
   `FFMPEG_PATH` / `FFPROBE_PATH` 可注入替换执行器（本机无 ffmpeg 时测试用 FakeMediaProcessor）。
 - 输入源解析严格限制在 `DATA_DIR/videos` 内（绝对/相对路径统一校验，越界或缺失 → 该 Clip 失败）。
-- 输出先写临时 `.part` 文件，成功后在 `clips_dir` / `thumbnails_dir` **原子替换**；
+- 输出先写临时 `.mp4.part` / `.jpg.part` 文件，并显式指定 `-f mp4` / `-f image2`（最后扩展名 `.part` 无法供 FFmpeg 推断 muxer），成功后在 `clips_dir` / `thumbnails_dir` **原子替换**；
   失败清理临时与半成品；stderr 截断写入 Clip/任务错误字段。DB 存相对路径。
 - **单 worker**（`ThreadPoolExecutor(max_workers=1)`，app.state 管理）；领取用条件
   `UPDATE ... WHERE status='queued'` 原子独占，杜绝两个线程领取同一任务；
   `MEDIA_SYNCHRONOUS=true` 时在请求线程内同步执行（测试确定性）。
 - **重启恢复**：启动时 `running` 视为中断——`attempts < MEDIA_MAX_ATTEMPTS` 则重排
-  并 `attempts+1`，否则判 `failed`（重试上限耗尽）。仅对本次确认中断并重排的 media/export
-  job，将其关联且仍属视频当前 revision 的 `processing` Clip 通过
+  并 `attempts+1`，否则判 `failed`（重试上限耗尽）。对两种结果都将该 interrupted media job
+  关联且仍属当前 authority 的 `processing` Clip 通过
   `id + status + updated_at` CAS 重置为 `pending`；普通等待超时不会重置或夺取活跃 claim。
   应用先完成两类 job/Clip 恢复，再调度全部 `queued` 任务，避免 worker 启动顺序互相破坏。
 - **部署边界**：Clip claim 目前没有持久化 owner token/heartbeat/lease，本恢复语义仅适用于当前
@@ -505,6 +507,8 @@ ZIP 完整性检查通过后，才在发布前短事务中复核冻结引用与 
 **任务与文件语义**：
 - 每次导出新建一条 `BackgroundJob(job_type=export)` 和唯一 dedupe key，保留历史任务、结果与
   过期时间；项目 active 导出通过 queued/running 查询排他。
+- commit 后的 worker schedule handoff 若失败，仅以 `queued + active key` guard 将任务置 `failed`
+  并释放 key，接口返回 503；若任务已被 claim 为 `running`，guard 不误改状态或释放 key。
 - 状态统计以最近任务冻结的类别范围为准；ready 必须满足 Submission Clip `status=ready`、
   `clip_path` 位于 `DATA_DIR/clips` 内且实体文件存在，否则列入 missing。
 - 项目导出 worker 对 missing Submission Clip 复用注入的 `MediaProcessor` 在后台任务内补生成；
@@ -641,7 +645,15 @@ cd backend
 pytest -q
 ```
 
-当前最终全量结果：`483 passed, 3 skipped, 1 warning`；fresh/create_all 与 populated 0012→0013 migration smoke：`2 passed, 1 warning`。前端 production build 通过（62 modules），diff-check 通过。runtime smoke 确认 health ok、OpenAPI `ProjectCreate` 必填 `name/categories`、`categories.minItems=1`，缺 categories 返回 422；用户确认浏览器可访问且服务正常。本功能人工浏览器矩阵已通过，实测发现的角色导航与 Review queue 两项缺陷均已修复并由用户复测通过；真实 Review queue 返回 HTTP 200，ORM 仍以 effective 权限为准。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；本机无 ffmpeg 的真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不作为本功能缺陷或阻断。这些证据不替代提交、集成、部署或备份恢复。
+类别角色功能分支的历史独立验证结果：后端全量 `483 passed, 3 skipped, 1 warning`；fresh/create_all 与 populated 0012→0013 migration smoke 为 `2 passed, 1 warning`；前端 production build 通过（62 modules），diff-check 通过。runtime smoke 确认 health ok、OpenAPI `ProjectCreate` 必填 `name/categories`、`categories.minItems=1`，缺 categories 返回 422；用户确认浏览器可访问且服务正常。类别角色功能人工浏览器矩阵已通过，实测发现的角色导航与 Review queue 两项缺陷均已修复并由用户复测通过；真实 Review queue 返回 HTTP 200，ORM 仍以 effective 权限为准。Review/Submission 角色快照已人工通过，Clips 数据逻辑有自动测试；真实 Clips 媒体生成与片段页最终视觉归独立编码会话，不作为该功能缺陷或阻断。
+
+分工功能在合入 `main` 前的历史联合验证结果：聚焦联合后端为 `228 passed, 5 skipped, 1 warning`，后端全量为 `437 passed, 8 skipped, 1 warning`，assignment frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。仅在单条测试命令中临时将 clip venv `Scripts` 加入 `PATH` 后，`backend/tests/test_media_ffmpeg_integration.py` 真实 FFmpeg/ffprobe 集成为 `5 passed, 1 warning`，使用 FFmpeg 7.1 与 ffprobe 2023-02-13 git build；该 `PATH` 不是系统配置。该记录对应当时尚未合入 category 的边界，人工浏览器矩阵当时尚未执行。
+
+已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
+
+真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
+
+上述各项均为合并前各自历史边界内的验证证据；本次 assignment 与 category 前集成未运行联合测试，不据此声称集成结果已通过测试，也不替代部署、公网入口、备份恢复或浏览器人工验收。
 
 覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
@@ -662,9 +674,9 @@ category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类
 ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
-分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的 CAS 领取及负责人/状态竞争、draft 释放、事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
+分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
 以及迁移验收（全新库建至 head 0013 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011、0012）升级至 head 0013 /
+已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011、0012）按 0012→0013 顺序升级至 head 0013 /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -682,3 +694,4 @@ dedupe_key 唯一约束防重复任务）。
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
 - 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；类别方案采用锁定前完整替换、锁定后永久只读，不提供停用/删除状态机。
+- 未实现源视频 `needs_transcode` 的自动转码或片段库播放；本次也未扩展 crop 与 cleanup。
