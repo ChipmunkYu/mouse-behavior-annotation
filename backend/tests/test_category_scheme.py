@@ -131,7 +131,7 @@ def test_category_business_integers_reject_booleans_without_writes(ctx, mutate):
         assert after == before
 
 
-@pytest.mark.parametrize(("field", "value"), (("mouse_count_min", True), ("mouse_count_max", False)))
+@pytest.mark.parametrize(("field", "value"), (("mouse_count_min", True), ("mouse_count_max", True)))
 def test_unordered_mouse_counts_reject_booleans_without_writes(ctx, field, value):
     headers, project = _project(ctx)
     with ctx.session_factory() as db:
