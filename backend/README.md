@@ -632,13 +632,13 @@ cd backend
 pytest -q
 ```
 
-分工分支最近一次后端全量历史结果为 `414 passed, 3 skipped`，其基线早于批量领取改动；分工独立精简验收中，`backend/tests/test_assignments.py` 为 `26 passed, 1 warning`（`37.66s`），frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。分工变更尚未进入 `main` 或部署，人工浏览器矩阵尚未执行。
+`feature/assignment-module@5c447198` 的 main+assignment 联合验证已完成：聚焦联合后端为 `228 passed, 5 skipped, 1 warning`，后端全量为 `437 passed, 8 skipped, 1 warning`，assignment frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。仅在单条测试命令中临时将 clip venv `Scripts` 加入 `PATH` 后，`backend/tests/test_media_ffmpeg_integration.py` 真实 FFmpeg/ffprobe 集成为 `5 passed, 1 warning`，使用 FFmpeg 7.1 与 ffprobe 2023-02-13 git build；该 `PATH` 不是系统配置。category 仍未合入，分工变更尚未进入 `main` 或部署，人工浏览器矩阵尚未执行。
 
 已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-本次合并未运行新的全量测试；以上历史证据不替代合并后全量回归、部署、公网入口、备份恢复或浏览器人工验收。
+上述联合验证不替代部署、公网入口、备份恢复或浏览器人工验收。
 
 覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
