@@ -80,7 +80,11 @@ def canonicalize_role_definitions(
         ):
             raise ParticipantRoleError("role max_count must be null or at least min_count")
         supplied_order = raw.get("role_sort_order", index)
-        if isinstance(supplied_order, bool) or supplied_order != index:
+        if (
+            isinstance(supplied_order, bool)
+            or not isinstance(supplied_order, int)
+            or supplied_order != index
+        ):
             raise ParticipantRoleError("role_sort_order must be continuous from zero")
         canonical.append({
             "key": key,

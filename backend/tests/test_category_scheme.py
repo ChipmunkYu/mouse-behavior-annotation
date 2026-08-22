@@ -9,7 +9,11 @@ from sqlalchemy.exc import IntegrityError
 
 from app import project_write_gate as gate_module
 from app.models import Annotation, BehaviorCategory, CategorySchemeAudit, Project
-from app.participant_roles import ParticipantRoleError, canonicalize_participant_roles
+from app.participant_roles import (
+    ParticipantRoleError,
+    canonicalize_participant_roles,
+    canonicalize_role_definitions,
+)
 from tests.conftest import auth_headers
 
 
@@ -100,8 +104,6 @@ def test_category_sort_order_must_be_canonical(ctx, orders):
     (
         lambda body: body.update(expected_version=True),
         lambda body: body["categories"][0].update(id=True),
-        lambda body: body["categories"][0].update(mouse_count_min=True),
-        lambda body: body["categories"][0].update(mouse_count_max=False),
     ),
 )
 def test_category_business_integers_reject_booleans_without_writes(ctx, mutate):
@@ -127,6 +129,56 @@ def test_category_business_integers_reject_booleans_without_writes(ctx, mutate):
             for category in db.query(BehaviorCategory).filter_by(project_id=project["id"]).all()
         ]
         assert after == before
+
+
+@pytest.mark.parametrize(("field", "value"), (("mouse_count_min", True), ("mouse_count_max", False)))
+def test_unordered_mouse_counts_reject_booleans_without_writes(ctx, field, value):
+    headers, project = _project(ctx)
+    with ctx.session_factory() as db:
+        before = [
+            (category.id, category.name)
+            for category in db.query(BehaviorCategory).filter_by(project_id=project["id"]).all()
+        ]
+    body = {
+        "expected_version": 0,
+        "categories": [{
+            "name": "独处",
+            "group": "测试",
+            "sort_order": 0,
+            "participant_mode": "unordered",
+            "role_definitions": [],
+            "mouse_count_min": 1,
+            "mouse_count_max": 2,
+        }],
+    }
+    body["categories"][0][field] = value
+
+    response = ctx.client.put(
+        f"/api/projects/{project['id']}/category-scheme", json=body, headers=headers,
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        assert db.get(Project, project["id"]).category_scheme_version == 0
+        after = [
+            (category.id, category.name)
+            for category in db.query(BehaviorCategory).filter_by(project_id=project["id"]).all()
+        ]
+        assert after == before
+
+
+@pytest.mark.parametrize("role_sort_order", (True, 0.0))
+def test_role_sort_order_requires_a_real_integer(role_sort_order):
+    with pytest.raises(ParticipantRoleError, match="continuous from zero"):
+        canonicalize_role_definitions(
+            "role_based",
+            [{
+                "name": "追逐者",
+                "min_count": 1,
+                "max_count": 1,
+                "role_sort_order": role_sort_order,
+            }],
+        )
 
 
 def test_annotation_category_id_rejects_boolean_without_writes(ctx):

@@ -172,7 +172,7 @@ class VideoCreate(BaseModel):
     height: Optional[int] = Field(default=None, ge=0)
     status: Optional[str] = None
     storage_path: Optional[str] = None
-    assignee_membership_id: Optional[int] = None
+    assignee_membership_id: Optional[StrictPositiveBusinessInt] = None
 
 
 class VideoOut(BaseModel):
@@ -203,7 +203,7 @@ class VideoOut(BaseModel):
 
 class AssignmentBatchRequest(BaseModel):
     video_ids: list[StrictBusinessInt] = Field(min_length=1)
-    assignee_membership_id: Optional[int] = None
+    assignee_membership_id: Optional[StrictPositiveBusinessInt] = None
 
 
 class VideoClaimsRequest(BaseModel):
