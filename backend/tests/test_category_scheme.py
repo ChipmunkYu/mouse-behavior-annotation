@@ -95,6 +95,59 @@ def test_category_sort_order_must_be_canonical(ctx, orders):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda body: body.update(expected_version=True),
+        lambda body: body["categories"][0].update(id=True),
+        lambda body: body["categories"][0].update(mouse_count_min=True),
+        lambda body: body["categories"][0].update(mouse_count_max=False),
+    ),
+)
+def test_category_business_integers_reject_booleans_without_writes(ctx, mutate):
+    headers, project = _project(ctx)
+    with ctx.session_factory() as db:
+        before = [
+            (category.id, category.name)
+            for category in db.query(BehaviorCategory).filter_by(project_id=project["id"]).all()
+        ]
+    body = _payload()
+    mutate(body)
+
+    response = ctx.client.put(
+        f"/api/projects/{project['id']}/category-scheme", json=body, headers=headers,
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        stored = db.get(Project, project["id"])
+        assert stored.category_scheme_version == 0
+        after = [
+            (category.id, category.name)
+            for category in db.query(BehaviorCategory).filter_by(project_id=project["id"]).all()
+        ]
+        assert after == before
+
+
+def test_annotation_category_id_rejects_boolean_without_writes(ctx):
+    setup = ctx.make_project_with_video()
+    response = ctx.client.post(
+        f"/api/projects/{setup['project']['id']}/videos/{setup['video']['id']}/annotations",
+        json={
+            "category_id": True,
+            "start_time": 0,
+            "end_time": 1,
+            "start_frame": 0,
+            "end_frame": 1,
+        },
+        headers=setup["headers"],
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        assert db.query(Annotation).filter_by(video_id=setup["video"]["id"]).count() == 0
+
+
 def test_existing_role_order_is_append_only(ctx):
     headers, project = _project(ctx)
     pid = project["id"]

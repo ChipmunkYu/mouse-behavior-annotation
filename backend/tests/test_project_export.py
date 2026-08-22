@@ -6,6 +6,7 @@ import re
 import zipfile
 
 import pytest
+from sqlalchemy import text
 
 from app.export_contract import (FILES, TracksSummary, safe_part, transform_detection,
                                  validate_clip_directory)
@@ -162,6 +163,34 @@ def test_multiple_categories_use_snapshot_category_directories(media_ctx):
         item["behavior"] for item in annotations}
 
 
+def test_category_rename_after_submission_does_not_change_export_names(media_ctx):
+    ctx = media_ctx
+    headers, project, categories, _video, _annotations = _approved(ctx, two_categories=True)
+    snapshot_names = {category["name"] for category in categories[:2]}
+    renamed_category = categories[0]
+    current_name = "当前类别名称"
+    with ctx.session_factory() as db:
+        # 模拟历史项目在提交后仍允许改名；当前项目的锁定触发器会阻止这种写入。
+        db.execute(text("DROP TRIGGER trg_category_locked_update"))
+        db.execute(
+            text("UPDATE behavior_categories SET name=:name WHERE id=:id"),
+            {"name": current_name, "id": renamed_category["id"]},
+        )
+        db.commit()
+
+    job = _export(ctx, project, headers)
+    directories, files = _clip_dirs(_archive(ctx, job))
+    with zipfile.ZipFile(_archive(ctx, job)) as zf:
+        annotation_docs = [
+            json.loads(zf.read(name)) for name in files if name.endswith("annotation.json")
+        ]
+
+    assert {directory.split("/")[0] for directory in directories} == snapshot_names
+    assert {document["behavior"] for document in annotation_docs} == snapshot_names
+    assert current_name not in {directory.split("/")[0] for directory in directories}
+    assert current_name not in {document["behavior"] for document in annotation_docs}
+
+
 def test_payload_freezes_submission_annotation_category_and_snapshot_ids(media_ctx):
     ctx = media_ctx
     headers, project, categories, _video, _annotations = _approved(ctx)
@@ -250,6 +279,21 @@ def test_no_eligible_rows_returns_400_without_job(media_ctx):
     response = ctx.client.post(f"/api/projects/{project['id']}/export",
                                json={"category_ids": [categories[1]["id"]]}, headers=headers)
     assert response.status_code == 400
+    with ctx.session_factory() as db:
+        assert db.query(BackgroundJob).filter_by(job_type="export").count() == 0
+
+
+def test_export_category_ids_reject_booleans_without_job(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"category_ids": [True]},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
     with ctx.session_factory() as db:
         assert db.query(BackgroundJob).filter_by(job_type="export").count() == 0
 

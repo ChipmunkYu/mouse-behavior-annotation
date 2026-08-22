@@ -21,7 +21,7 @@ from .export_contract import (FILES, safe_part, transform_detection, validate_cl
 from .media import MediaCommandError
 from .media_jobs import (_truncate_error, claim_and_render_submission_clip, clip_entities_ready,
                          reset_interrupted_job_clips, resolve_entity_path, stage_submission_input)
-from .models import (BackgroundJob, BehaviorCategory, Clip, DetectionSnapshotState, Project, RawDetection,
+from .models import (BackgroundJob, Clip, DetectionSnapshotState, Project, RawDetection,
                      Submission, SubmissionAnnotation, Video)
 from .submission_media_plan import build_submission_media_plan
 from .submission_service import validate_snapshot_integrity
@@ -74,9 +74,11 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
     used_categories: set[str] = set()
     category_directories = {}
     category_tokens = {str(category_id): secrets.token_hex(16) for category_id in frozen_categories}
+    snapshot_names = {}
+    for annotation, _submission, _clip in rows:
+        snapshot_names.setdefault(annotation.category_id, annotation.category_name)
     for category_id in frozen_categories:
-        category = db.get(BehaviorCategory, category_id)
-        base = safe_part(category.name, fallback="category", limit=80)
+        base = safe_part(snapshot_names.get(category_id), fallback="category", limit=80)
         name = base; suffix = 0; token = category_tokens[str(category_id)]
         while name.casefold() in used_categories:
             suffix += 1

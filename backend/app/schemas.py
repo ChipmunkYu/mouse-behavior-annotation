@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+StrictBusinessInt = Annotated[int, Field(strict=True)]
+StrictPositiveBusinessInt = Annotated[int, Field(strict=True, gt=0)]
+StrictNonNegativeBusinessInt = Annotated[int, Field(strict=True, ge=0)]
 
 
 # ---------- 认证 ----------
@@ -105,7 +110,7 @@ class CategoryOut(BaseModel):
 
 
 class CategorySchemeCategoryIn(BaseModel):
-    id: Optional[int] = None
+    id: Optional[StrictBusinessInt] = None
     name: str = Field(min_length=1, max_length=64)
     group: str = Field(min_length=1, max_length=64)
     color: Optional[str] = Field(default=None, max_length=32)
@@ -113,8 +118,8 @@ class CategorySchemeCategoryIn(BaseModel):
     is_active: bool = True
     participant_mode: Literal["unordered", "role_based"] = "unordered"
     role_definitions: list[dict[str, Any]] = []
-    mouse_count_min: Optional[int] = Field(default=None, ge=1)
-    mouse_count_max: Optional[int] = Field(default=None, ge=1)
+    mouse_count_min: Optional[StrictPositiveBusinessInt] = None
+    mouse_count_max: Optional[StrictPositiveBusinessInt] = None
 
 
 class ProjectCreate(BaseModel):
@@ -130,12 +135,12 @@ class ProjectCreate(BaseModel):
 
 
 class CategorySchemePut(BaseModel):
-    expected_version: int = Field(ge=0)
+    expected_version: StrictNonNegativeBusinessInt
     categories: list[CategorySchemeCategoryIn]
 
 
 class CategorySchemeLock(BaseModel):
-    expected_version: int = Field(ge=0)
+    expected_version: StrictNonNegativeBusinessInt
 
 
 class CategorySchemeOut(BaseModel):
@@ -197,14 +202,14 @@ class VideoOut(BaseModel):
 
 
 class AssignmentBatchRequest(BaseModel):
-    video_ids: list[int] = Field(min_length=1)
+    video_ids: list[StrictBusinessInt] = Field(min_length=1)
     assignee_membership_id: Optional[int] = None
 
 
 class VideoClaimsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    video_ids: list[PositiveInt] = Field(min_length=1, max_length=200)
+    video_ids: list[StrictPositiveBusinessInt] = Field(min_length=1, max_length=200)
 
     @field_validator("video_ids")
     @classmethod
@@ -242,7 +247,7 @@ class AssignmentStatsOut(BaseModel):
 
 # ---------- 标注 ----------
 class AnnotationCreate(BaseModel):
-    category_id: int
+    category_id: StrictBusinessInt
     start_time: float = Field(ge=0)
     end_time: float = Field(ge=0)
     start_frame: int = Field(ge=0)
@@ -268,7 +273,7 @@ class AnnotationCreate(BaseModel):
 
 
 class AnnotationUpdate(BaseModel):
-    category_id: Optional[int] = None
+    category_id: Optional[StrictBusinessInt] = None
     start_time: Optional[float] = Field(default=None, ge=0)
     end_time: Optional[float] = Field(default=None, ge=0)
     start_frame: Optional[int] = Field(default=None, ge=0)
@@ -414,7 +419,7 @@ class ClipCategoryCount(BaseModel):
 class ExportRequest(BaseModel):
     """导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。"""
 
-    category_ids: Optional[list[int]] = None
+    category_ids: Optional[list[StrictBusinessInt]] = None
 
 
 class MissingClipOut(BaseModel):
