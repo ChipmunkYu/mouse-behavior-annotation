@@ -36,6 +36,13 @@ function extractDetail(data: unknown): string | null {
       })
       .join("；");
   }
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown }).message;
+    const ids = (detail as { video_ids?: unknown }).video_ids;
+    if (typeof message === "string") {
+      return Array.isArray(ids) && ids.length ? `${message}（视频 ID：${ids.join("、")}）` : message;
+    }
+  }
   return null;
 }
 
@@ -124,6 +131,8 @@ export interface UploadFileOptions {
   onProgress?: (p: UploadProgress) => void;
   /** 传入 AbortSignal 可取消上传；取消时 Promise 以 AbortError 拒绝 */
   signal?: AbortSignal;
+  /** 同一 multipart 请求中的额外文本字段。 */
+  fields?: Record<string, string>;
 }
 
 /**
@@ -210,6 +219,7 @@ export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptio
 
     const form = new FormData();
     form.append(options.field ?? "file", file, options.filename ?? (file as File).name ?? "upload");
+    Object.entries(options.fields ?? {}).forEach(([key, value]) => form.append(key, value));
     xhr.send(form);
   });
 }

@@ -6,15 +6,29 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from typing import Literal
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import case, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..database import get_db
 from ..deps import project_access
 from ..models import ProjectMembership, User, Video
-from ..schemas import VideoCreate, VideoOut
+from ..permissions import is_manager, require_manager
+from ..schemas import (
+    AssignmentBatchRequest,
+    AssignmentStatsItem,
+    AssignmentStatsOut,
+    VideoClaimsRequest,
+    VideoClaimsResponse,
+    VideoCreate,
+    VideoOut,
+)
 
 router = APIRouter(tags=["videos"])
 
@@ -32,6 +46,38 @@ ERR_EMPTY_FILE = "Uploaded file is empty"
 ERR_DISK_SPACE = "Insufficient disk space to store video"
 ERR_DB_SAVE = "Failed to save video metadata"
 ERR_MEMBERSHIP_INACTIVE = "Project membership is not active"
+ERR_BATCH_CLAIM_CONFLICT = "One or more videos are no longer claimable"
+
+
+def _validate_assignee(db: Session, project_id: int, membership_id: int | None) -> ProjectMembership | None:
+    if membership_id is None:
+        return None
+    membership = db.get(ProjectMembership, membership_id)
+    if membership is None or membership.project_id != project_id or membership.status != "active":
+        raise HTTPException(status_code=400, detail="Assignee must be an active member of this project")
+    return membership
+
+
+def _raise_if_assignee_conflict(db: Session, exc: IntegrityError) -> None:
+    db.rollback()
+    if is_assignee_write_conflict(exc):
+        raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
+    raise exc
+
+
+def _claim_videos_cas(
+    db: Session,
+    project_id: int,
+    video_ids: list[int],
+    membership_id: int,
+) -> int:
+    """将仍属于项目、未分配且为 draft 的指定视频原子领取给当前成员。"""
+    return db.query(Video).filter(
+        Video.id.in_(video_ids),
+        Video.project_id == project_id,
+        Video.assignee_membership_id.is_(None),
+        Video.workflow_status == "draft",
+    ).update({"assignee_membership_id": membership_id}, synchronize_session=False)
 
 
 class _InsufficientDiskSpace(Exception):
@@ -90,15 +136,25 @@ def _remove_file(path: Path) -> None:
 @router.get("/api/projects/{project_id}/videos", response_model=list[VideoOut])
 def list_videos(
     project_id: int,
+    view: Literal["mine", "unassigned", "all"] = "all",
+    workflow_status: str | None = None,
+    assignee_membership_id: int | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> list[Video]:
-    return (
-        db.query(Video)
-        .filter(Video.project_id == project_id)
-        .order_by(Video.created_at.desc())
-        .all()
-    )
+    query = db.query(Video).filter(Video.project_id == project_id)
+    if view == "mine":
+        query = query.filter(Video.assignee_membership_id == access[1].id)
+    elif view == "unassigned":
+        query = query.filter(
+            Video.assignee_membership_id.is_(None),
+            Video.workflow_status == "draft",
+        )
+    if workflow_status is not None:
+        query = query.filter(Video.workflow_status == workflow_status)
+    if assignee_membership_id is not None:
+        query = query.filter(Video.assignee_membership_id == assignee_membership_id)
+    return query.order_by(Video.created_at.desc()).all()
 
 
 @router.post("/api/projects/{project_id}/videos", response_model=VideoOut, status_code=201)
@@ -112,6 +168,9 @@ def create_video(
     if not filename:
         raise HTTPException(status_code=400, detail="filename must not be empty")
 
+    if body.assignee_membership_id is not None and not is_manager(access[1]):
+        raise HTTPException(status_code=403, detail="Only owner/admin may specify an assignee")
+    _validate_assignee(db, project_id, body.assignee_membership_id)
     video = Video(
         project_id=project_id,
         filename=filename,
@@ -122,9 +181,13 @@ def create_video(
         status=body.status or "metadata",
         storage_path=body.storage_path,
         uploaded_by=access[1].user_id,
+        assignee_membership_id=body.assignee_membership_id,
     )
     db.add(video)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        _raise_if_assignee_conflict(db, exc)
     db.refresh(video)
     return video
 
@@ -134,6 +197,7 @@ async def upload_video(
     project_id: int,
     request: Request,
     file: UploadFile = File(...),
+    assignee_membership_id: int | None = Form(default=None),
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> Video:
@@ -150,6 +214,9 @@ async def upload_video(
     _project, membership = access
     if membership.status != "active":
         raise HTTPException(status_code=403, detail=ERR_MEMBERSHIP_INACTIVE)
+    if assignee_membership_id is not None and not is_manager(membership):
+        raise HTTPException(status_code=403, detail="Only owner/admin may specify an assignee")
+    _validate_assignee(db, project_id, assignee_membership_id)
 
     raw_name = file.filename or ""
     if not raw_name:
@@ -207,10 +274,18 @@ async def upload_video(
             uploaded_by=membership.user_id,
             workflow_status="draft",
             annotation_revision=1,
+            assignee_membership_id=assignee_membership_id,
         )
         try:
             db.add(video)
             db.commit()
+        except IntegrityError as exc:
+            # DB 提交失败：回滚并清理已落盘的最终孤儿文件
+            db.rollback()
+            _remove_file(final_path)
+            if is_assignee_write_conflict(exc):
+                raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
+            raise HTTPException(status_code=500, detail=ERR_DB_SAVE)
         except Exception:
             # DB 提交失败：回滚并清理已落盘的最终孤儿文件
             db.rollback()
@@ -231,6 +306,133 @@ async def upload_video(
         if temp_path is not None:
             _remove_file(temp_path)
         await file.close()
+
+
+@router.post(
+    "/api/projects/{project_id}/videos/claims",
+    response_model=VideoClaimsResponse,
+)
+def claim_videos(
+    project_id: int,
+    body: VideoClaimsRequest,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> VideoClaimsResponse:
+    video_ids = list(body.video_ids)
+    try:
+        changed = _claim_videos_cas(db, project_id, video_ids, access[1].id)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=ERR_BATCH_CLAIM_CONFLICT) from None
+    if changed != len(video_ids):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=ERR_BATCH_CLAIM_CONFLICT)
+    db.commit()
+    rows = db.query(Video).filter(
+        Video.project_id == project_id,
+        Video.id.in_(video_ids),
+    ).all()
+    by_id = {video.id: video for video in rows}
+    return VideoClaimsResponse(
+        claimed_count=len(video_ids),
+        videos=[by_id[video_id] for video_id in video_ids],
+    )
+
+
+@router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut)
+def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
+                db: Session = Depends(get_db)) -> Video:
+    try:
+        changed = _claim_videos_cas(db, project_id, [video_id], access[1].id)
+    except IntegrityError as exc:
+        _raise_if_assignee_conflict(db, exc)
+    if changed != 1:
+        exists = db.query(Video.id).filter_by(id=video_id, project_id=project_id).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Video not found in this project")
+        raise HTTPException(status_code=409, detail="Video is no longer claimable")
+    db.commit()
+    return db.get(Video, video_id)
+
+
+@router.post("/api/projects/{project_id}/videos/{video_id}/release", response_model=VideoOut)
+def release_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
+                  db: Session = Depends(get_db)) -> Video:
+    changed = db.query(Video).filter(
+        Video.id == video_id, Video.project_id == project_id,
+        Video.assignee_membership_id == access[1].id, Video.workflow_status == "draft",
+    ).update({"assignee_membership_id": None}, synchronize_session=False)
+    if changed != 1:
+        video = db.query(Video).filter_by(id=video_id, project_id=project_id).one_or_none()
+        if video is None:
+            raise HTTPException(status_code=404, detail="Video not found in this project")
+        raise HTTPException(status_code=409, detail="Only the current assignee may release a draft video")
+    db.commit()
+    return db.get(Video, video_id)
+
+
+@router.post("/api/projects/{project_id}/videos/assignments", response_model=list[VideoOut])
+def batch_assign(project_id: int, body: AssignmentBatchRequest,
+                 access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[Video]:
+    require_manager(access[1])
+    _validate_assignee(db, project_id, body.assignee_membership_id)
+    ids = list(dict.fromkeys(body.video_ids))
+    try:
+        changed = db.query(Video).filter(
+            Video.project_id == project_id,
+            Video.id.in_(ids),
+            Video.workflow_status.in_(("draft", "rejected")),
+        ).update(
+            {"assignee_membership_id": body.assignee_membership_id},
+            synchronize_session=False,
+        )
+    except IntegrityError as exc:
+        # The failed statement transaction is always fully rolled back.
+        _raise_if_assignee_conflict(db, exc)
+    if changed != len(ids):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Assignment conflict: every video must still belong to this project and be draft/rejected",
+        )
+    db.commit()
+    return db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()
+
+
+@router.get("/api/projects/{project_id}/assignment-stats", response_model=AssignmentStatsOut)
+def assignment_stats(project_id: int, access: tuple = Depends(project_access),
+                     db: Session = Depends(get_db)) -> AssignmentStatsOut:
+    status_counts = lambda status: func.coalesce(func.sum(case(
+        (Video.workflow_status == status, 1), else_=0
+    )), 0)
+    rows = db.query(
+        ProjectMembership.id, User.username, func.count(Video.id),
+        status_counts("draft"), status_counts("submitted"),
+        status_counts("approved"), status_counts("rejected"),
+    ).join(User, User.id == ProjectMembership.user_id).outerjoin(
+        Video,
+        (Video.assignee_membership_id == ProjectMembership.id)
+        & (Video.project_id == project_id),
+    ).filter(ProjectMembership.project_id == project_id).group_by(
+        ProjectMembership.id, User.username
+    ).all()
+    items = [AssignmentStatsItem(
+        assignee_membership_id=mid, username=name, total=total,
+        draft=draft, submitted=submitted, approved=approved, rejected=rejected,
+    ) for mid, name, total, draft, submitted, approved, rejected in rows]
+    totals = db.query(
+        func.count(Video.id), status_counts("draft"), status_counts("submitted"),
+        status_counts("approved"), status_counts("rejected"),
+        func.coalesce(func.sum(case((Video.assignee_membership_id.is_(None), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((
+            Video.assignee_membership_id.is_(None) & (Video.workflow_status == "draft"), 1
+        ), else_=0)), 0),
+    ).filter(Video.project_id == project_id).one()
+    return AssignmentStatsOut(
+        total=totals[0], draft=totals[1], submitted=totals[2],
+        approved=totals[3], rejected=totals[4], unassigned=totals[5],
+        claimable=totals[6], by_assignee=items,
+    )
 
 
 @router.get("/api/videos/{video_id}/stream")

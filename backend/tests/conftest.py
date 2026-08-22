@@ -40,9 +40,15 @@ class AppContext:
             db.commit()
             return user.id
 
-    def add_member(self, project_id: int, user_id: int, role: str = "annotator") -> None:
+    def add_member(self, project_id: int, user_id: int, role: str = "member") -> None:
         with self.session_factory() as db:
-            db.add(ProjectMembership(project_id=project_id, user_id=user_id, role=role))
+            can_review = role == "reviewer"
+            normalized_role = "member" if role in {"annotator", "reviewer", "viewer"} else role
+            status = "inactive" if role == "viewer" else "active"
+            db.add(ProjectMembership(
+                project_id=project_id, user_id=user_id, role=normalized_role,
+                can_review=can_review, status=status,
+            ))
             db.commit()
 
     def make_project_with_video(self, name: str = "标注测试项目") -> dict:

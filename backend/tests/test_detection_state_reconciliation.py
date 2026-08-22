@@ -209,7 +209,7 @@ def test_0008_downgrade_reupgrade_preserves_legacy_and_rebackfills(tmp_path):
         assert conn.execute(text("SELECT count(*) FROM clips")).scalar() == 1
 
     run_migrations(url)
-    assert current_revision(url) == "0011"
+    assert current_revision(url) == "0012"
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT display_track_id FROM detection_state_overrides")).scalar() == 10
         assert conn.execute(text("SELECT submission_id FROM reviews")).scalar() is None

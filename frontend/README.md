@@ -8,7 +8,7 @@
 ## 功能
 
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
-- **项目列表** `/projects`：展示当前用户成员项目及项目内角色，支持创建项目（自动初始化 12 类行为类别）。
+- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。
 - **视频库** `/projects/:projectId/videos`：
   - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
   - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
@@ -18,8 +18,13 @@
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
   - 搜索 + 视频工作流状态筛选；筛选字段严格为 `workflow_status`，不是媒体 `status` 或单条 `Annotation.review_status`。列表卡片显示时长 / 帧率 / 分辨率 / 媒体状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
+  - 分工提供“我的任务 / 待领取 / 全部”三视图；“待领取”固定只显示未分配 `draft`，页签使用 `claimable`“可领取数”，与管理统计的全部未分配 `unassigned` 区分。项目成员可单个或批量自领待领取视频，当前负责人可在“我的任务”释放 draft 视频，owner/admin 可按负责人筛选并事务批量分配、改派或清空。
+  - owner/admin 在三个视图均可通过 checkbox、场景全选标签和桌面框选管理可分配/改派卡片；member 与 `member + can_review` 仅在“待领取”启用同类选择，批量栏只提供“领取所选”和“取消选择”，不显示负责人管理能力。普通单击替换选择，Shift 追加，Ctrl/Cmd 切换，checkbox 逐项切换，并支持 Esc 取消和边缘自动滚动。
+  - 视频卡片仅“我的任务”显示“进入标注”，并按条件显示“释放”；“待领取”只显示“领取任务”，“全部”无卡片主操作。选中卡片只保留左上 checkbox 勾、边框和浅背景，不显示第二个生成勾。
+  - 粗指针或 `≤760px` 关闭框选和卡片单击选择，保留 checkbox 与全选；触屏关键目标扩大。工具栏、两类批量栏和“全选可改派视频 / 全选可分配视频 / 全选待领取视频”等短标签防内部换行，长用户名省略、文件名保持两行截断，中窄屏允许按逻辑顺序换行或堆叠。
+  - 单视频上传和三文件导入完成时，owner/admin 可从精简负责人目录选择负责人；不选择则进入未分配状态。
   - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
-  - **审核入口**：owner / admin / reviewer 角色显示「✓ 审核工作台」入口（角色来自 `listProjects`）。
+  - **审核入口**：owner/admin 或 `can_review=true` 的 member 显示「✓ 审核工作台」入口。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
@@ -42,7 +47,8 @@
   - 媒体面板仅 approved 显示统计，非 approved 显示「审核通过后将自动开始生成片段」；刷新 / 离开页面 / 切换视频即停止轮询；401 / 403 沿用全局 client 处理。
   - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）。
   - 审核时只读展示 `mouse_ids`、修正后叠加层及 annotation/detection import/identity 三类修订，避免审核旧身份结果。
-- **片段库** `/projects/:projectId/clips`（**批次 5**，owner / admin / annotator / reviewer 均可见）：
+  - owner/admin 和具备审核能力的 member 可裁决，允许审核自己负责或参与标注的视频。
+- **片段库** `/projects/:projectId/clips`（**批次 5**，全部项目成员可见）：
   - 数据来自 `GET /api/projects/:pid/clips`（分页 + 类别/视频筛选 + 关键词搜索）与 `GET /api/projects/:pid/clips/categories`（类别计数 chips）；库内仅含「标注 approved 且视频 approved」的有效片段。
   - **类别计数 chips 筛选**（全部 + 各类别计数，颜色来自类别 API）+ **搜索框**（按文件名 / 类别名，服务端过滤，300ms 防抖，输入限长 128 与后端一致）+ **视频选择器**；分页默认 20 条/页（可切 50 / 100），筛选 / 搜索变化自动回到第 1 页，页码超出实际页数时自动回落。
   - **顶部共享预览区**：点击片段后按需拉取该视频源 blob（带 Bearer，与视频流同一封装），跳转到片段 `start_time`，播放范围限制在 `[start_time, end_time]`（到点自动暂停并提示）；一次只播放一个，切换片段撤销上一个 object URL，绝不批量预加载视频。范围条高亮片段区间，点击 / 键盘（←/→）自由跳转。
@@ -57,7 +63,8 @@
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
-- **项目内导航**：视频库 / 片段库 / 审核 / 导出，按项目角色显示合理入口（owner/admin/reviewer 可见审核，owner/admin 可见导出，片段库全员可见）。
+- **项目管理** `/projects/:projectId/manage`（owner/admin）：管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
+- **项目内导航**：视频库 / 片段库 / 审核 / 导出 / 项目管理；审核入口按有效审核能力显示，导出和项目管理仅 owner/admin，片段库全员可见。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 
 ## 技术要点
@@ -68,6 +75,7 @@
 - 片段库页面 `src/pages/ClipsPage.tsx`：预览区加载源视频复用 `fetchVideoStreamUrl`，缩略图经 `fetchClipThumbnailUrl`（Bearer blob，失败回退占位）；轮询仅在有「待生成」片段时进行，组件卸载即清理。
 - 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
 - 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
+- 视频库框选状态机集中在 `src/hooks/useVideoMarqueeSelection.ts`，处理阈值、中心点命中、组合键集合、pointer capture、自动滚动、Esc/取消清理及设备降级；页面负责可选资格、筛选后选择清理和 aria-live 反馈。
 - 认证上下文在 `src/auth/`（AuthContext / ProtectedRoute / storage / 401 事件）。
 - 确认对话框：`src/components/ConfirmDialog.tsx` 的 `useConfirm()`（键盘可达，Esc / 遮罩取消，焦点归还）。
 - 时间轴：共享组件 `src/components/Timeline.tsx`（标注 / 审核共用，含键盘 ←/→）。
@@ -91,7 +99,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：`npm run build` 通过；后端最终证据为 `397 passed, 3 skipped`，真实 ffmpeg/ffprobe 25/30/60 FPS 验收通过。多地区 HTTPS 已成功，HTTP 及部分来源仍受备案同步影响，完整公网验收待完成；浏览器交互和长视频性能仍需持续回归。
+当前验证：本次 member 批量自领、角色×视图入口精简、单一勾和场景全选标签的独立精简验收已通过；frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`，后端 `backend/tests/test_assignments.py` 为 `26 passed, 1 warning`（`37.66s`）。未运行后端全量测试；人工浏览器矩阵尚未执行，pointer capture、自动滚动、真实焦点、触屏、键盘/读屏、宽度/缩放和视觉组合不能视为已验收。变更已提交到本地 `feature/assignment-module`，尚未合并 `main`、推送或部署；既有服务器状态不因本次本地实现而改变。
 
 ## 目录结构
 
@@ -107,8 +115,9 @@ frontend/
     ├── main.tsx / App.tsx / vite-env.d.ts
  ├── api/ # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
  ├── auth/ # AuthContext / ProtectedRoute / storage / 401 事件
+ ├── hooks/ # useVideoMarqueeSelection 视频库桌面框选状态机
  ├── components/ # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
- ├── pages/ # LoginPage / ProjectsPage / VideosPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
+ ├── pages/ # LoginPage / ProjectsPage / VideosPage / ProjectManagementPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化
 ```

@@ -32,8 +32,7 @@ const STATUS_LABELS: Record<string, string> = {
   occluded: "被遮挡",
   owner: "所有者",
   admin: "管理员",
-  annotator: "标注者",
-  reviewer: "审核者",
+  member: "成员",
 };
 
 /** 行为标注审核状态独立于视频工作流。 */

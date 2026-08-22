@@ -17,13 +17,13 @@ from ..deps import project_access
 from ..media_jobs import (clip_entities_ready, enqueue_media_job, enqueue_submission_media,
                           media_dedupe_key, submission_media_dedupe_key)
 from ..models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
+from ..permissions import can_review, is_manager
 from ..schemas import JobOut, MediaStatusOut
 
 router = APIRouter(tags=["media"])
 logger = logging.getLogger(__name__)
 
 # 触发生成角色：与审核角色一致（reviewer 只可审核与触发，不可改标注）
-_GENERATE_ROLES = {"owner", "admin", "reviewer"}
 
 
 def _get_video_in_project(db: Session, project_id: int, video_id: int) -> Video:
@@ -110,7 +110,7 @@ def generate_media(
 ) -> JobOut:
     """仅 approved 视频可触发；幂等或重试（见模块 docstring）。"""
     membership = access[1]
-    if membership.role not in _GENERATE_ROLES:
+    if not can_review(membership):
         raise HTTPException(
             status_code=403,
             detail="Only owner/admin/reviewer can generate media",
@@ -146,6 +146,6 @@ def get_job(
     job = db.get(BackgroundJob, job_id)
     if job is None or job.project_id != project_id:
         raise HTTPException(status_code=404, detail="Job not found in this project")
-    if job.job_type == "export" and access[1].role not in {"owner", "admin"}:
+    if job.job_type == "export" and not is_manager(access[1]):
         raise HTTPException(status_code=403, detail="Only owner/admin can view export jobs")
     return _to_job_out(job)

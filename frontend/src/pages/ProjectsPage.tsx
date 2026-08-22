@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { createProject, listProjects } from "../api";
+import { createProject, joinProject, listProjects } from "../api";
 import type { Project } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
@@ -17,6 +17,9 @@ export default function ProjectsPage() {
   const [description, setDescription] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [inviteCode, setInviteCode] = useState("");
+  const [joining, setJoining] = useState(false);
+  const [joinFeedback, setJoinFeedback] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -56,6 +59,24 @@ export default function ProjectsPage() {
     }
   }
 
+  async function handleJoin(e: FormEvent) {
+    e.preventDefault();
+    const code = inviteCode.trim();
+    if (!code) { setJoinFeedback({ tone: "error", text: "请输入邀请码" }); return; }
+    const before = projects ?? [];
+    setJoining(true); setJoinFeedback(null);
+    try {
+      const membership = await joinProject(code);
+      const duplicate = before.some((p) => p.id === membership.project_id);
+      await load();
+      setInviteCode("");
+      setJoinFeedback({ tone: "ok", text: duplicate ? "你已经是该项目成员，无需重复加入。" : "已加入项目，可以从项目列表进入。" });
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : "加入项目失败";
+      setJoinFeedback({ tone: "error", text: raw.includes("Invite code not found") ? "邀请码无效或已被重置，请向项目管理员确认。" : raw });
+    } finally { setJoining(false); }
+  }
+
   return (
     <div className="container">
       <div className="page-header">
@@ -67,6 +88,13 @@ export default function ProjectsPage() {
           {showForm ? "收起" : "+ 创建项目"}
         </button>
       </div>
+
+      <form className="join-project-bar" onSubmit={handleJoin}>
+        <div><b>通过邀请码加入</b><span> 加入后可查看项目内全部视频</span></div>
+        <input className="input mono" aria-label="项目邀请码" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} placeholder="粘贴邀请码" autoComplete="off" />
+        <button className="btn" type="submit" disabled={joining}>{joining ? "加入中…" : "加入项目"}</button>
+      </form>
+      {joinFeedback ? <div className={joinFeedback.tone === "ok" ? "ok-box" : "error-box"} role="status">{joinFeedback.text}</div> : null}
 
       {showForm ? (
         <form className="card create-form" onSubmit={handleCreate}>
@@ -110,7 +138,7 @@ export default function ProjectsPage() {
         <Loading />
       ) : projects.length === 0 ? (
         <Card>
-          <EmptyState title="暂无项目" hint="点击右上角「创建项目」，创建后将自动初始化 12 个行为类别" />
+          <EmptyState title="暂无项目" hint="创建新项目，或在上方粘贴邀请码加入已有项目" />
         </Card>
       ) : (
         <div className="project-grid">

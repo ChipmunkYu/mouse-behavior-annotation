@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { completeImportBatch, createImportBatch, listVideos, uploadBatchFile, uploadVideo } from "../api";
-import type { ImportFileRole, Video, VideoImportBatch } from "../api/types";
+import type { AssigneeDirectoryItem, ImportFileRole, Video, VideoImportBatch } from "../api/types";
 import { formatFileSize } from "../utils/format";
 
 const VIDEO_ACCEPT = ".mp4,.mov,.avi,.mkv,.webm,.m4v,.wmv,.mpeg,.mpg";
@@ -31,6 +31,8 @@ interface Props {
   onUploaded: (video: Video) => void;
   onEnterAnnotation: (video: Video) => void;
   onClose: () => void;
+  canManage: boolean;
+  assignees: AssigneeDirectoryItem[];
 }
 
 function isVideo(file: File) {
@@ -38,7 +40,7 @@ function isVideo(file: File) {
   return VIDEO_EXT.has(ext);
 }
 
-export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotation, onClose }: Props) {
+export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotation, onClose, canManage, assignees }: Props) {
   const [mode, setMode] = useState<"video" | "batch">("video");
   const [file, setFile] = useState<File | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
@@ -50,6 +52,7 @@ export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotat
   const [batchBusy, setBatchBusy] = useState(false);
   const abortRef = useRef(new AbortController());
   const inputRef = useRef<HTMLInputElement>(null);
+  const [assigneeId, setAssigneeId] = useState("");
 
   useEffect(() => () => abortRef.current.abort(), []);
 
@@ -64,7 +67,7 @@ export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotat
     abortRef.current = new AbortController();
     setStage("uploading"); setError(null); setPercent(0);
     try {
-      const video = await uploadVideo(projectId, file, { signal: abortRef.current.signal, onProgress: (p) => setPercent(p.percent) });
+      const video = await uploadVideo(projectId, file, { signal: abortRef.current.signal, onProgress: (p) => setPercent(p.percent), assigneeMembershipId: assigneeId ? Number(assigneeId) : null });
       setSuccessVideo(video); setStage("success"); onUploaded(video);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") { setStage("cancelled"); setError("上传已取消，文件仍保留，可重试。"); }
@@ -117,7 +120,7 @@ export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotat
       for (const role of ["video", "tracks", "metadata"] as ImportFileRole[]) {
         if (slots[role].stage !== "success") await uploadSlot(role, created.id);
       }
-      const completed = await completeImportBatch(projectId, created.id);
+      const completed = await completeImportBatch(projectId, created.id, assigneeId ? Number(assigneeId) : null);
       if (completed.status === "failed") {
         setError("文件配对校验失败，请修正文件并新建批次重试。");
         const ve = (completed as unknown as Record<string, unknown>).validation_errors as Record<string, unknown> ?? null;
@@ -158,6 +161,7 @@ export default function VideoUploadPanel({ projectId, onUploaded, onEnterAnnotat
           <button className={mode === "video" ? "active" : ""} onClick={() => setMode("video")}>仅视频</button>
           <button className={mode === "batch" ? "active" : ""} onClick={() => setMode("batch")}>三文件导入批次</button>
         </div>
+        {canManage ? <div className="upload-assignee"><label htmlFor="upload-assignee">负责人</label><select id="upload-assignee" className="select" value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} disabled={stage === "uploading" || batchBusy}><option value="">未分配</option>{assignees.map((m) => <option key={m.membership_id} value={m.membership_id}>{m.username}</option>)}</select><span>上传完成时设置，之后可在视频库改派。</span></div> : null}
         {mode === "video" ? (
           <>
             <input ref={inputRef} className="visually-hidden" type="file" accept={VIDEO_ACCEPT} onChange={(e) => { chooseSingle(e.target.files?.[0] ?? null); e.target.value = ""; }} />

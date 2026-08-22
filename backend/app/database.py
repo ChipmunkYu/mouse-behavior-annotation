@@ -49,9 +49,11 @@ def ensure_schema(database_url: str) -> None:
     """
     if database_url == "sqlite:///:memory:":
         Base.metadata.create_all(bind=engine)
+        from .assignee_triggers import install_sqlite_assignee_triggers
         from .authority_triggers import install_sqlite_authority_triggers
         with engine.begin() as connection:
             install_sqlite_authority_triggers(connection)
+            install_sqlite_assignee_triggers(connection)
         return
     from .migration import run_migrations
 

@@ -8,15 +8,16 @@ import type { Project } from "../api/types";
 interface NavItem {
   label: string;
   to: (pid: number) => string;
-  roles: string[];
+  visible: (project: Project) => boolean;
 }
 
 const PROJECT_NAV: NavItem[] = [
-  { label: "视频库", to: (pid) => `/projects/${pid}/videos`, roles: ["owner", "admin", "annotator", "reviewer"] },
-  { label: "片段库", to: (pid) => `/projects/${pid}/clips`, roles: ["owner", "admin", "annotator", "reviewer"] },
-  { label: "审核", to: (pid) => `/projects/${pid}/review`, roles: ["owner", "admin", "reviewer"] },
+  { label: "视频库", to: (pid) => `/projects/${pid}/videos`, visible: () => true },
+  { label: "片段库", to: (pid) => `/projects/${pid}/clips`, visible: () => true },
+  { label: "审核", to: (pid) => `/projects/${pid}/review`, visible: (p) => p.can_review },
   // 批次 6：导出入口放在审核之后，仅 owner / admin 可见（与导出权限一致）
-  { label: "导出", to: (pid) => `/projects/${pid}/export`, roles: ["owner", "admin"] },
+  { label: "导出", to: (pid) => `/projects/${pid}/export`, visible: (p) => p.role === "owner" || p.role === "admin" },
+  { label: "项目管理", to: (pid) => `/projects/${pid}/manage`, visible: (p) => p.role === "owner" || p.role === "admin" },
 ];
 
 /** 登录后页面共用外壳：顶栏 + 项目导航 + 内容区。 */
@@ -47,8 +48,7 @@ export default function AppLayout() {
     };
   }, [pid]);
 
-  const role = project?.role ?? null;
-  const navItems = pid != null && role != null ? PROJECT_NAV.filter((n) => n.roles.includes(role)) : [];
+  const navItems = pid != null && project != null ? PROJECT_NAV.filter((n) => n.visible(project)) : [];
 
   function isActive(item: NavItem): boolean {
     const path = item.to(pid as number);
@@ -63,6 +63,7 @@ export default function AppLayout() {
     if (p.includes("/review")) return "审核工作台";
     if (p.includes("/export")) return "导出";
     if (p.includes("/clips")) return "片段库";
+    if (p.includes("/manage")) return "项目管理";
     if (p.includes("/videos")) return "视频库";
     if (p.includes("/projects")) return "项目";
     return "";
