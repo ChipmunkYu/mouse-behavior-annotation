@@ -7,6 +7,7 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge, statusLabel } from "../components/ui";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { MediaStatusSummary } from "../components/MediaStatusPanel";
+import VideoPreviewDialog from "../components/VideoPreviewDialog";
 import { ApiError } from "../api/client";
 import { useVideoMarqueeSelection } from "../hooks/useVideoMarqueeSelection";
 import { formatDate, formatDuration } from "../utils/format";
@@ -64,6 +65,7 @@ export default function VideosPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [selectionAnnouncement, setSelectionAnnouncement] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [previewVideo, setPreviewVideo] = useState<Video | null>(null);
   // 开发用 Mock 元数据表单（折叠区，不参与真实上传）
   const [devOpen, setDevOpen] = useState(false);
   const [form, setForm] = useState<VideoFormState>(EMPTY_FORM);
@@ -86,6 +88,7 @@ export default function VideosPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "加载视频失败"); setVideos([]); return [] as Video[]; }
   }, [pid, view, workflow, assigneeFilter]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (view !== "all") setPreviewVideo(null); }, [view]);
 
   const displayed = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -260,6 +263,7 @@ export default function VideosPage() {
 
   return <div className="container videos-page">
     {confirmDialog}
+    {previewVideo ? <VideoPreviewDialog video={previewVideo} onClose={() => setPreviewVideo(null)} /> : null}
     <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
     {uploadOpen && project ? <VideoUploadPanel projectId={pid} canManage={canManage} assignees={assignees} onUploaded={() => void load()} onEnterAnnotation={(v) => navigate(`/projects/${pid}/annotate/${v.id}`)} onClose={() => setUploadOpen(false)} /> : null}
     {error ? <ErrorBox message={error} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
@@ -283,7 +287,7 @@ export default function VideosPage() {
         {v.submitted_at || v.approved_at ? <div className="workflow-times" data-selection-copy>{v.submitted_at ? <span>提交 <b>{formatDate(v.submitted_at)}</b></span> : null}{v.approved_at ? <span>通过 <b>{formatDate(v.approved_at)}</b></span> : null}</div> : null}
         {v.workflow_status === "approved" ? <div className="card-media-summary" data-selection-copy><MediaStatusSummary projectId={pid} videoId={v.id}/></div> : null}
         <div className="foot" data-selection-copy><span>上传 {formatDate(v.created_at)}</span><StatusBadge value={v.status}/></div>
-        {view === "unassigned" ? <div className="actions card-actions"><button className="btn btn-sm btn-primary" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button></div> : view === "mine" ? <div className="actions card-actions">{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={v.status === "needs_transcode"} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div> : null}
+        {view === "unassigned" ? <div className="actions card-actions"><button className="btn btn-sm btn-primary" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button></div> : view === "mine" ? <div className="actions card-actions">{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={v.status === "needs_transcode"} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div> : <div className="actions card-actions preview-card-actions" data-selection-interactive onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="btn btn-sm" disabled={v.status === "needs_transcode" || !v.storage_path} title={v.status === "needs_transcode" ? "视频需要先转码，暂时无法预览" : !v.storage_path ? "视频没有可用的源文件，暂时无法预览" : `预览 ${v.filename}`} onClick={() => setPreviewVideo(v)}>▶ 预览视频</button>{v.status === "needs_transcode" || !v.storage_path ? <span className="preview-unavailable" role="note">{v.status === "needs_transcode" ? "需先转码" : "缺少源文件"}</span> : null}</div>}
       </article>; })}{marquee.rect ? <div className="marquee-rect" aria-hidden="true" style={marquee.rect}/> : null}</div></>}
     {/* 开发工具与普通分工流程分层，并默认折叠。 */}
     <details className="dev-panel" open={devOpen} onToggle={(event) => setDevOpen(event.currentTarget.open)}>

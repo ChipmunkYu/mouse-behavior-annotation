@@ -45,6 +45,20 @@ export function timeToFrame(time: number, fps: number | null | undefined): numbe
   return Math.max(0, Math.round(time * f));
 }
 
+/** 双端 inclusive 帧区间的规范时间边界。帧是权威，时间只由帧与 FPS 派生。 */
+export function frameToStartTime(frame: number, fps: number): number {
+  return Math.max(0, Math.trunc(frame)) / fps;
+}
+
+export function frameToEndTime(frame: number, fps: number): number {
+  return (Math.max(0, Math.trunc(frame)) + 1) / fps;
+}
+
+export function clampFrame(frame: number, frameCount: number | null | undefined): number {
+  const normalized = Math.max(0, Math.trunc(frame));
+  return frameCount && frameCount > 0 ? Math.min(normalized, frameCount - 1) : normalized;
+}
+
 /** 文件大小：B / KB / MB / GB（≥100 时取整，否则保留 1 位小数）。 */
 export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";

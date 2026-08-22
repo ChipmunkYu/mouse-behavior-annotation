@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useBlocker, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   createAnnotation,
   deleteAnnotation,
@@ -38,13 +38,13 @@ import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
-import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/format";
+import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, frameToStartTime } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
 import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
-type Point = { time: number; frame: number };
+type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
@@ -163,7 +163,7 @@ function CategoryPanel({
       </div>
       {activeCategory ? (
         <div className="frame-preview" style={{ marginTop: 10 }}>
-          当前类别：<b>{activeCategory.name}</b> · 按 S 设起点、D 设终点提交
+          当前类别：<b>{activeCategory.name}</b> · 按 S 设开始、D 设结束，Ctrl+Enter 保存
         </div>
       ) : null}
     </Card>
@@ -236,6 +236,7 @@ function AnnotationEditForm({
   ann,
   categories,
   fps,
+  frameCount,
   onCancel,
   onSave,
   onCategoryChange,
@@ -243,13 +244,14 @@ function AnnotationEditForm({
   ann: Annotation;
   categories: Category[];
   fps: number | null | undefined;
+  frameCount: number | null | undefined;
   onCancel: () => void;
   onSave: (patch: AnnotationPatchInput) => Promise<void>;
   onCategoryChange: (category: Category) => Promise<boolean>;
 }) {
   const [categoryId, setCategoryId] = useState(ann.category_id);
-  const [start, setStart] = useState(ann.start_time.toFixed(3));
-  const [end, setEnd] = useState(ann.end_time.toFixed(3));
+  const [startFrame, setStartFrame] = useState(String(ann.start_frame));
+  const [endFrame, setEndFrame] = useState(String(ann.end_frame));
   const [localError, setLocalError] = useState<string | null>(null);
   const [mouseIds, setMouseIds] = useState(ann.mouse_ids.join(", "));
   const selectedCategory = categories.find((c) => c.id === categoryId);
@@ -259,18 +261,27 @@ function AnnotationEditForm({
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const s = Number(start);
-    const en = Number(end);
-    if (!Number.isFinite(s) || !Number.isFinite(en)) {
-      setLocalError("时间必须是数字");
+    const s = Number(startFrame);
+    const en = Number(endFrame);
+    const resolvedFps = fps && fps > 0 ? fps : null;
+    if (!Number.isInteger(s) || !Number.isInteger(en)) {
+      setLocalError("开始帧和结束帧必须是整数");
       return;
     }
     if (s < 0 || en < 0) {
-      setLocalError("时间不能为负");
+      setLocalError("帧索引不能为负");
       return;
     }
     if (en <= s) {
-      setLocalError("结束时间必须大于开始时间");
+      setLocalError("结束帧必须大于开始帧，单帧行为不能保存");
+      return;
+    }
+    if (frameCount && en >= frameCount) {
+      setLocalError(`结束帧不能超过最后一帧 ${frameCount - 1}`);
+      return;
+    }
+    if (!resolvedFps) {
+      setLocalError("视频 FPS 无效，无法由帧派生时间");
       return;
     }
     setSaving(true);
@@ -278,10 +289,10 @@ function AnnotationEditForm({
     try {
       await onSave({
         category_id: categoryId,
-        start_time: s,
-        end_time: en,
-        start_frame: timeToFrame(s, fps),
-        end_frame: timeToFrame(en, fps),
+        start_time: frameToStartTime(s, resolvedFps),
+        end_time: frameToEndTime(en, resolvedFps),
+        start_frame: s,
+        end_frame: en,
         ...(selectedCategory?.participant_mode === "unordered" ? { mouse_ids: [...new Set(mouseIds.split(/[,，\s]+/).filter(Boolean).map(Number))].filter(Number.isInteger).sort((a, b) => a - b) } : { participant_roles: ann.participant_roles }),
         detection_import_revision: ann.detection_import_revision,
         identity_revision: ann.identity_revision,
@@ -292,8 +303,9 @@ function AnnotationEditForm({
     }
   }
 
-  const sNum = Number(start);
-  const eNum = Number(end);
+  const sNum = Number(startFrame);
+  const eNum = Number(endFrame);
+  const resolvedFps = fps && fps > 0 ? fps : null;
 
   return (
     <form className="anno-edit" onSubmit={submit}>
@@ -318,33 +330,35 @@ function AnnotationEditForm({
       </div>
       <div className="field-row">
         <div className="field">
-          <label htmlFor={`edit-start-${ann.id}`}>开始（秒）</label>
+          <label htmlFor={`edit-start-${ann.id}`}>开始帧</label>
           <input
             id={`edit-start-${ann.id}`}
             className="input"
             type="number"
             min="0"
-            step="0.01"
-            value={start}
-            onChange={(e) => setStart(e.target.value)}
+            max={frameCount ? frameCount - 1 : undefined}
+            step="1"
+            value={startFrame}
+            onChange={(e) => setStartFrame(e.target.value)}
           />
         </div>
         <div className="field">
-          <label htmlFor={`edit-end-${ann.id}`}>结束（秒）</label>
+          <label htmlFor={`edit-end-${ann.id}`}>结束帧（inclusive）</label>
           <input
             id={`edit-end-${ann.id}`}
             className="input"
             type="number"
             min="0"
-            step="0.01"
-            value={end}
-            onChange={(e) => setEnd(e.target.value)}
+            max={frameCount ? frameCount - 1 : undefined}
+            step="1"
+            value={endFrame}
+            onChange={(e) => setEndFrame(e.target.value)}
           />
         </div>
       </div>
       <div className="frame-preview">
-        对应帧：{Number.isFinite(sNum) ? timeToFrame(sNum, fps) : "—"} →{" "}
-        {Number.isFinite(eNum) ? timeToFrame(eNum, fps) : "—"}
+        派生时间（只读）：{resolvedFps && Number.isInteger(sNum) ? formatTime(frameToStartTime(sNum, resolvedFps)) : "—"} →{" "}
+        {resolvedFps && Number.isInteger(eNum) ? formatTime(frameToEndTime(eNum, resolvedFps)) : "—"}
       </div>
       {selectedCategory?.participant_mode === "unordered" ? <div className="field"><label htmlFor={`edit-mice-${ann.id}`}>参与对象（填写 track ID，以逗号分隔）</label><input id={`edit-mice-${ann.id}`} className="input mono" value={mouseIds} onChange={(e) => setMouseIds(e.target.value)} /></div> : <div className="field-hint">角色分配请使用上方参与对象角色槽位；保存时会提交完整角色分配。</div>}
       <div className="form-error">{localError ?? ""}</div>
@@ -365,6 +379,7 @@ function AnnotationList({
   categories,
   categoryById,
   fps,
+  frameCount,
   currentTime,
   readOnly,
   selectedId,
@@ -379,6 +394,7 @@ function AnnotationList({
   categories: Category[];
   categoryById: Map<number, Category>;
   fps: number | null | undefined;
+  frameCount: number | null | undefined;
   currentTime: number;
   readOnly: boolean;
   selectedId: number | null;
@@ -417,7 +433,7 @@ function AnnotationList({
   return (
     <Card title={`标注区间（${annotations.length}）`}>
       {annotations.length === 0 ? (
-        <EmptyState compact title="暂无行为标注" hint="播放视频，选好类别后按 S 设起点、D 设终点" />
+        <EmptyState compact title="暂无行为标注" hint="播放视频并填写行为草稿，再点击“保存此行为”" />
       ) : (
         <div className="anno-list-body">
           {annotations.map((a) =>
@@ -427,6 +443,7 @@ function AnnotationList({
                 ann={a}
                 categories={categories}
                 fps={fps}
+                frameCount={frameCount}
                 onCancel={() => onEditingChange(null)}
                 onSave={async (patch) => {
                   await onEditSave(a.id, patch);
@@ -538,16 +555,17 @@ function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive,
   </Card>;
 }
 
-function RoleSlotsPanel({ category, assignments, activeKey, unlocked, tracks, disabled, message, onActivate, onTrack, onRemove }: {
-  category: Category; assignments: Record<string, number[]>; activeKey: string | null; unlocked: Set<string>; tracks: CorrectedTrackSummary[]; disabled: boolean; message: string | null;
-  onActivate: (key: string) => void; onTrack: (id: number) => void; onRemove: (key: string, id: number) => void;
+function RoleSlotsPanel({ category, assignments, pendingIds, activeKey, unlocked, tracks, disabled, message, onActivate, onTrack, onRemove, onRemovePending }: {
+  category: Category; assignments: Record<string, number[]>; pendingIds: number[]; activeKey: string | null; unlocked: Set<string>; tracks: CorrectedTrackSummary[]; disabled: boolean; message: string | null;
+  onActivate: (key: string) => void; onTrack: (id: number) => void; onRemove: (key: string, id: number) => void; onRemovePending: (id: number) => void;
 }) {
   const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
   const trackRole = new Map<number, string>(); roles.forEach((r) => (assignments[r.key] ?? []).forEach((id) => trackRole.set(id, r.name)));
   return <Card title="参与对象角色" className="role-slots-panel" extra={<span className="role-slot-legend">按角色分配 · 不会自动切换</span>}>
+    {pendingIds.length ? <div className="pending-role-tracks" role="status"><b>待分配：</b>先选择角色槽位，再点击 Track。{pendingIds.map((id) => <button type="button" key={id} className="role-track-chip" onClick={() => onRemovePending(id)}>Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">从待分配中移除</span></button>)}</div> : null}
     <div className="role-slots" role="list" aria-label="参与对象角色槽位">{roles.map((role) => { const ids = assignments[role.key] ?? []; const complete = ids.length >= role.min_count && (role.max_count == null || ids.length <= role.max_count); const accessible = isRoleAccessible(roles, assignments, unlocked, role.key); return <button type="button" role="listitem" key={role.key} disabled={!accessible} title={accessible ? `切换到“${role.name}”` : "请先完成所有前序角色的最少数量"} className={`role-slot${activeKey === role.key ? " active" : ""}${complete ? " complete" : " incomplete"}${!accessible ? " locked" : ""}`} onClick={() => onActivate(role.key)} aria-pressed={activeKey === role.key} aria-label={`${role.name}，${complete ? "已完成" : "未完成"}，已选 ${ids.length}`}><span className="role-slot-index">{accessible ? (complete ? "✓" : "!") : "🔒"}</span><span className="role-slot-main"><b>{role.name}</b><small>{ids.length} / {role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`} · {complete ? "已完成" : accessible ? "可点击切换" : "前序完成后可进入"}</small></span>{activeKey === role.key ? <span className="role-active-label">当前</span> : null}</button>; })}</div>
     <div className="role-slot-chips">{roles.map((role) => (assignments[role.key] ?? []).map((id) => <button type="button" key={`${role.key}-${id}`} className="role-track-chip" onClick={() => onRemove(role.key, id)}><b>{role.name}</b> · Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">移除</span></button>))}{Object.values(assignments).every((ids) => ids.length === 0) ? <span className="muted">先选择角色槽位，再点击视频框或下方 Track。</span> : null}</div>
-    <div className="mouse-id-list">{tracks.map((track) => { const assigned = trackRole.get(track.display_track_id); return <button type="button" key={track.display_track_id} disabled={disabled || !activeKey} className={`mouse-id-item${assigned ? " selected" : ""}`} onClick={() => onTrack(track.display_track_id)}><b>Track {track.display_track_id}</b><span>{assigned ? `已分配：${assigned}` : track.visible_in_current_frame ? "当前可见 · 点击加入" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>; })}</div>
+    <div className="mouse-id-list">{tracks.map((track) => { const assigned = trackRole.get(track.display_track_id); const pending = pendingIds.includes(track.display_track_id); return <button type="button" key={track.display_track_id} disabled={disabled || !activeKey} className={`mouse-id-item${assigned || pending ? " selected" : ""}`} onClick={() => onTrack(track.display_track_id)}><b>Track {track.display_track_id}</b><span>{assigned ? `已分配：${assigned}` : pending ? "待分配 · 点击加入当前角色" : track.visible_in_current_frame ? "当前可见 · 点击加入" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>; })}</div>
     {message ? <div className="mouse-rule-warning" role="status">{message}</div> : null}
   </Card>;
 }
@@ -582,9 +600,10 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
         <kbd>《</kbd><span>上一个视频（物理键 Shift+Comma）</span>
         <kbd>》</kbd><span>下一个视频（物理键 Shift+Period）</span>
         <kbd>?</kbd><span>打开 / 关闭本帮助</span>
-        <kbd>Esc</kbd><span>关闭帮助、取消编辑或退出参与对象导航</span>
+        <kbd>Esc</kbd><span>关闭帮助、取消编辑、退出参与对象导航或确认重置标注</span>
         {mode === "behavior" ? <>
-          <kbd>S / D</kbd><span>设置起点 / 设置终点并创建行为标注</span>
+          <kbd>S / D</kbd><span>设置开始 / 设置结束（不保存）</span>
+          <kbd>Ctrl+Enter</kbd><span>保存此行为；与页面主按钮使用相同校验与确认</span>
           <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个启用行为类别` : "当前没有可映射的启用行为类别"}</span>
           <kbd>↑ / ↓</kbd><span>参与对象导航时移动高亮</span>
           <kbd>Delete</kbd><span>为当前选中的行为标注打开删除确认框</span>
@@ -626,9 +645,11 @@ export default function AnnotatePage() {
   const [playing, setPlaying] = useState(false);
   const [activeCategory, setActiveCategory] = useState<Category | null>(null);
   const [startPoint, setStartPoint] = useState<Point | null>(null);
+  const [endPoint, setEndPoint] = useState<Point | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [workspaceMode, setWorkspaceMode] = useState<"behavior" | "identity">("behavior");
   const [selectedMouseIds, setSelectedMouseIds] = useState<number[]>([]);
+  const [identitySelectedMouseIds, setIdentitySelectedMouseIds] = useState<number[]>([]);
   const [participantRoles, setParticipantRoles] = useState<Record<string, number[]>>({});
   const [activeRoleKey, setActiveRoleKey] = useState<string | null>(null);
   const [unlockedRoleKeys, setUnlockedRoleKeys] = useState<Set<string>>(new Set());
@@ -650,23 +671,22 @@ export default function AnnotatePage() {
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<number | null>(null);
   const [editingAnnotationId, setEditingAnnotationId] = useState<number | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  const draftErrorRef = useRef<HTMLDivElement>(null);
+  const categorySectionRef = useRef<HTMLDivElement>(null);
+  const participantSectionRef = useRef<HTMLDivElement>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [annotationMutationBusy, setAnnotationMutationBusy] = useState(false);
   const [navigationPending, setNavigationPending] = useState(false);
   const navigationPendingRef = useRef(false);
+  const allowNavigationRef = useRef(false);
   const [confirmDialog, confirm] = useConfirm();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hint, setHint] = useState("播放视频，选择类别后按 S 设起点、D 设终点；Space 播放/暂停，←/→ 步进一帧");
 
   useEffect(() => {
-    if (workspaceMode === "identity") {
-      setStartPoint(null);
-      setActiveCategory(null);
-      setSelectedMouseIds([]);
-      setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
-    }
     setParticipantNavigationActive(false);
   }, [workspaceMode]);
 
@@ -681,6 +701,7 @@ export default function AnnotatePage() {
   useLayoutEffect(() => {
     loadAllRequestRef.current += 1;
     navigationPendingRef.current = false;
+    allowNavigationRef.current = false;
     const element = videoRef.current;
     if (element) {
       element.pause();
@@ -701,9 +722,11 @@ export default function AnnotatePage() {
     setPlaying(false);
     setActiveCategory(null);
     setStartPoint(null);
+    setEndPoint(null);
     setSaveState("idle");
     setWorkspaceMode("behavior");
     setSelectedMouseIds([]);
+    setIdentitySelectedMouseIds([]);
     setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
     setTracks([]);
     setCurrentFrame(0);
@@ -722,6 +745,7 @@ export default function AnnotatePage() {
     setSelectedAnnotationId(null);
     setEditingAnnotationId(null);
     setShortcutHelpOpen(false);
+    setDraftErrors([]);
     setSubmitting(false);
     setAnnotationMutationBusy(false);
     setNavigationPending(false);
@@ -730,8 +754,8 @@ export default function AnnotatePage() {
   }, [pid, vid]);
 
   // 供键盘监听读取最新值（避免闭包过期）
-  const latest = useRef({ startPoint, activeCategory, video });
-  latest.current = { startPoint, activeCategory, video };
+  const latest = useRef({ startPoint, endPoint, activeCategory, video });
+  latest.current = { startPoint, endPoint, activeCategory, video };
 
   const categoryById = useMemo(
     () => new Map(categories.map((c) => [c.id, c] as const)),
@@ -770,10 +794,14 @@ export default function AnnotatePage() {
   const toggleMouseId = useCallback((id: number) => {
     setSelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
   }, []);
+  const toggleIdentityMouseId = useCallback((id: number) => {
+    setIdentitySelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
+  }, []);
 
   const roleDefinitions = useMemo(() => activeCategory?.participant_mode === "role_based" ? [...activeCategory.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order) : [], [activeCategory]);
   const roleSelectedIds = useMemo(() => [...new Set(Object.values(participantRoles).flat())].sort((a, b) => a - b), [participantRoles]);
-  const overlaySelectedIds = activeCategory?.participant_mode === "role_based" ? roleSelectedIds : selectedMouseIds;
+  const behaviorSelectedIds = useMemo(() => [...new Set([...selectedMouseIds, ...roleSelectedIds])].sort((a, b) => a - b), [roleSelectedIds, selectedMouseIds]);
+  const overlaySelectedIds = workspaceMode === "identity" ? identitySelectedMouseIds : behaviorSelectedIds;
   const trackRoleLabels = useMemo(() => { const map: Record<number, string> = {}; roleDefinitions.forEach((role) => (participantRoles[role.key] ?? []).forEach((id) => { map[id] = role.name; })); return map; }, [participantRoles, roleDefinitions]);
 
   const activateRole = useCallback((key: string) => {
@@ -788,7 +816,7 @@ export default function AnnotatePage() {
     const role = roleDefinitions.find((r) => r.key === activeRoleKey);
     if (!role) { setRoleMessage("请先选择一个角色槽位。"); return; }
     const currentKey = roleDefinitions.find((r) => (participantRoles[r.key] ?? []).includes(id))?.key;
-    if (currentKey === role.key) { setParticipantRoles((prev) => ({ ...prev, [role.key]: (prev[role.key] ?? []).filter((x) => x !== id) })); setRoleMessage(`${role.name}已移除 Track ${id}。`); return; }
+    if (currentKey === role.key) { setParticipantRoles((prev) => ({ ...prev, [role.key]: (prev[role.key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`${role.name}已移除 Track ${id}，已放回待分配。`); return; }
     if ((participantRoles[role.key] ?? []).length >= (role.max_count ?? Number.POSITIVE_INFINITY)) { setRoleMessage(`${role.name}已达到最多 ${role.max_count} 个参与对象，请先移除后再添加。`); return; }
     if (currentKey) {
       const oldRole = roleDefinitions.find((r) => r.key === currentKey)!;
@@ -796,6 +824,7 @@ export default function AnnotatePage() {
       if (!ok) { setRoleMessage(`Track ${id} 仍保留在“${oldRole.name}”。`); return; }
     }
     setParticipantRoles((prev) => { const next: Record<string, number[]> = {}; roleDefinitions.forEach((r) => { next[r.key] = (prev[r.key] ?? []).filter((x) => x !== id); }); next[role.key] = [...next[role.key], id].sort((a, b) => a - b); return next; });
+    setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id));
     setRoleMessage(`Track ${id} 已分配给“${role.name}”。`);
   }, [activeRoleKey, confirm, participantRoles, roleDefinitions]);
 
@@ -806,20 +835,17 @@ export default function AnnotatePage() {
       setHint(`当前类别仍为“${category.name}”`);
       return;
     }
-    if (activeCategory?.id !== category.id && roleSelectedIds.length > 0) {
-      const ok = await confirm({ title: "切换类别并清空角色分配？", message: <>当前已分配 {roleSelectedIds.length} 个参与对象。切换类别后，现有角色分配会被清空。</>, confirmLabel: "清空并切换", danger: true });
-      if (!ok) return;
-    }
+    const carriedIds = [...new Set([...selectedMouseIds, ...roleSelectedIds])].sort((a, b) => a - b);
     setActiveCategory(category); setRoleMessage(null);
     if (category.participant_mode === "role_based") {
-      setSelectedMouseIds([]);
+      setSelectedMouseIds(carriedIds);
       const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
       const empty = Object.fromEntries(roles.map((r) => [r.key, []]));
       setParticipantRoles(empty); setActiveRoleKey(roles[0]?.key ?? null); setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty));
       setParticipantNavigationActive(false);
       setHint(`已选择类别“${category.name}”；请在角色槽位中分配参与对象`);
       return;
-    } else { setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); }
+    } else { setSelectedMouseIds(carriedIds); setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); }
     setErrorMsg(null);
     if (category.mouse_count_max === 0) {
       setParticipantNavigationActive(false);
@@ -840,7 +866,7 @@ export default function AnnotatePage() {
     setParticipantFocusIndex(0);
     setParticipantNavigationActive(true);
     setHint(`已选择类别“${category.name}”；参与对象选择中：↑/↓ 移动，Space 选择，Esc 退出`);
-  }, [activeCategory, confirm, detectionImport, roleSelectedIds.length, tracks]);
+  }, [activeCategory, detectionImport, roleSelectedIds, selectedMouseIds, tracks]);
 
   useEffect(() => {
     if (!participantNavigationActive) return;
@@ -880,6 +906,50 @@ export default function AnnotatePage() {
   const timelineDuration =
     elementDuration > 0 ? elementDuration : video?.duration && video.duration > 0 ? video.duration : null;
   const videoReady = streamState === "ok" && streamUrl != null;
+  const effectiveFps = detectionImport?.fps && detectionImport.fps > 0 ? detectionImport.fps : video?.fps && video.fps > 0 ? video.fps : null;
+  const authoritativeFrameCount = detectionImport?.frame_count && detectionImport.frame_count > 0
+    ? detectionImport.frame_count
+    : effectiveFps && timelineDuration ? Math.max(1, Math.ceil(timelineDuration * effectiveFps)) : null;
+  const startDisplayTime = startPoint && effectiveFps ? frameToStartTime(startPoint.frame, effectiveFps) : null;
+  const endDisplayTime = endPoint && effectiveFps ? frameToEndTime(endPoint.frame, effectiveFps) : null;
+  const hasRoleAssignments = roleSelectedIds.length > 0;
+  const hasDraft = activeCategory != null || startPoint != null || endPoint != null || selectedMouseIds.length > 0 || hasRoleAssignments;
+  const draftIntervalInvalid = startPoint != null && endPoint != null && endPoint.frame <= startPoint.frame;
+
+  const routeBlocker = useBlocker(({ currentLocation, nextLocation }) => (
+    hasDraft
+    && !allowNavigationRef.current
+    && `${currentLocation.pathname}${currentLocation.search}` !== `${nextLocation.pathname}${nextLocation.search}`
+  ));
+  const routeConfirmingRef = useRef(false);
+  useEffect(() => {
+    if (routeBlocker.state !== "blocked" || routeConfirmingRef.current) return;
+    routeConfirmingRef.current = true;
+    void confirm({
+      title: "离开当前视频？",
+      message: "当前有未保存行为草稿。离开后草稿将被放弃，且不会带入其他视频。",
+      confirmLabel: "放弃草稿并离开",
+      danger: true,
+    }).then((ok) => {
+      if (ok) {
+        allowNavigationRef.current = true;
+        routeBlocker.proceed();
+      } else {
+        routeBlocker.reset();
+      }
+    }).finally(() => { routeConfirmingRef.current = false; });
+  }, [confirm, routeBlocker]);
+
+  useEffect(() => {
+    if (!hasDraft) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasDraft]);
+
+  useEffect(() => {
+    setDraftErrors([]);
+  }, [activeCategory, endPoint, participantRoles, selectedMouseIds, startPoint]);
 
   /* ---------- 数据加载 ---------- */
   const loadAnnotations = useCallback(async () => {
@@ -1128,46 +1198,86 @@ export default function AnnotatePage() {
 
   /* ---------- 标注操作 ---------- */
   function markStart() {
-    const v = videoRef.current;
-    if (!v) return;
-    const time = v.currentTime;
-    const frame = timeToFrame(time, latest.current.video?.fps);
-    setStartPoint({ time, frame });
+    if (!videoRef.current) return;
+    const frame = clampFrame(currentFrame, authoritativeFrameCount);
+    setStartPoint({ frame });
     setErrorMsg(null);
-    setHint(`起点已设置 ${formatTime(time)}（帧 ${frame}），到终点时按 D 提交`);
+    setHint(`开始已设置：帧 ${frame}${effectiveFps ? `（${formatTime(frameToStartTime(frame, effectiveFps))}）` : ""}`);
   }
 
-  async function markEnd() {
-    const v = videoRef.current;
-    if (!v) return;
-    const sp = latest.current.startPoint;
+  function markEnd() {
+    if (!videoRef.current) return;
+    const frame = clampFrame(currentFrame, authoritativeFrameCount);
+    setEndPoint({ frame });
+    setErrorMsg(null);
+    setHint(`结束已设置：帧 ${frame}${effectiveFps ? `（半开边界 ${formatTime(frameToEndTime(frame, effectiveFps))}）` : ""}；保存时统一校验`);
+  }
+
+  async function saveDraft() {
+    if (saveState === "saving" || annotationMutationBusy) return;
     const cat = latest.current.activeCategory;
+    const sp = latest.current.startPoint;
+    const ep = latest.current.endPoint;
+    const errors: string[] = [];
+    let firstTarget: HTMLElement | null = null;
     if (!cat) {
-      setErrorMsg("请先选择行为类别");
-      setHint("");
+      errors.push("请选择行为类别");
+      firstTarget ??= categorySectionRef.current;
+    }
+    if (!sp) errors.push("请设置开始点");
+    if (!ep) errors.push("请设置结束点");
+    if (!effectiveFps) errors.push("视频 FPS 无效，无法由帧派生规范时间");
+    if (sp && (sp.frame < 0 || (authoritativeFrameCount != null && sp.frame >= authoritativeFrameCount))) errors.push("开始帧超出视频范围");
+    if (ep && (ep.frame < 0 || (authoritativeFrameCount != null && ep.frame >= authoritativeFrameCount))) errors.push("结束帧超出视频范围");
+    if (sp && ep && ep.frame <= sp.frame) errors.push("结束帧必须大于开始帧，单帧行为不能保存");
+    if (!detectionImport) errors.push("缺少有效 YOLO 检测数据");
+
+    let participantIds: number[] = [];
+    if (cat?.participant_mode === "role_based") {
+      const seen = new Set<number>();
+      for (const role of cat.role_definitions) {
+        const ids = participantRoles[role.key] ?? [];
+        if (ids.length < role.min_count || (role.max_count != null && ids.length > role.max_count)) {
+          errors.push(`角色“${role.name}”需要${role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`}个参与对象`);
+          firstTarget ??= participantSectionRef.current;
+        }
+        for (const id of ids) {
+          if (seen.has(id)) errors.push(`Track ${id} 不能跨角色重复分配`);
+          seen.add(id);
+        }
+      }
+      participantIds = [...seen];
+      if (selectedMouseIds.length) {
+        errors.push(`还有 ${selectedMouseIds.length} 个 Track 待分配到角色`);
+        firstTarget ??= participantSectionRef.current;
+      }
+    } else if (cat) {
+      participantIds = selectedMouseIds;
+      if (!mouseIdsValid(cat, participantIds)) {
+        const max = cat.mouse_count_max;
+        errors.push(`“${cat.name}”需要${max === cat.mouse_count_min ? `恰好 ${cat.mouse_count_min}` : max == null ? `至少 ${cat.mouse_count_min}` : `${cat.mouse_count_min}–${max}`}个参与对象，当前为 ${participantIds.length} 个`);
+        firstTarget ??= participantSectionRef.current;
+      }
+    }
+    if (sp && ep && ep.frame > sp.frame) {
+      for (const id of participantIds) {
+        const track = tracks.find((item) => item.display_track_id === id);
+        if (track && (track.first_frame == null || track.last_frame == null || track.last_frame < sp.frame || track.first_frame > ep.frame)) {
+          errors.push(`Track ${id} 在所选帧区间内没有有效检测`);
+          firstTarget ??= participantSectionRef.current;
+        }
+      }
+    }
+    if (errors.length) {
+      setDraftErrors([...new Set(errors)]);
+      setSaveState("error");
+      window.requestAnimationFrame(() => (firstTarget ?? draftErrorRef.current)?.focus());
       return;
     }
-    if (!sp) {
-      setErrorMsg("请先按 S 或点击「设起点」设置起点");
-      setHint("");
-      return;
-    }
-    const time = videoRef.current?.currentTime ?? 0;
-    if (time <= sp.time) {
-      setErrorMsg("终点必须晚于起点，请先前进再设终点");
-      return;
-    }
-    const frame = timeToFrame(time, latest.current.video?.fps);
-    if (cat.participant_mode === "unordered" && detectionImport && !mouseIdsValid(cat, selectedMouseIds)) {
-      const max = cat.mouse_count_max;
-      setErrorMsg(`“${cat.name}”需要${max === cat.mouse_count_min ? `恰好 ${cat.mouse_count_min} 个对象` : max == null ? `至少 ${cat.mouse_count_min} 个对象` : `${cat.mouse_count_min}–${max} 个对象`}，请先点击检测框或 track ID 列表选择`);
-      return;
-    }
+    if (!cat || !sp || !ep || !effectiveFps) return;
     // 已提交 / 已通过 / 已退回的视频新增标注前需确认（会退回草稿、审核失效）
     if (!(await guardMutation("新增行为标注"))) {
-      setStartPoint(null);
-      setParticipantNavigationActive(false);
-      setHint("");
+      setHint("已取消保存，未保存行为草稿保持不变");
       return;
     }
     setSaveState("saving");
@@ -1175,10 +1285,10 @@ export default function AnnotatePage() {
     try {
       await createAnnotation(pid, vid, {
         category_id: cat.id,
-        start_time: sp.time,
-        end_time: time,
+        start_time: frameToStartTime(sp.frame, effectiveFps),
+        end_time: frameToEndTime(ep.frame, effectiveFps),
         start_frame: sp.frame,
-        end_frame: frame,
+        end_frame: ep.frame,
         confidence: "certain",
         ...(cat.participant_mode === "role_based" ? { participant_roles: Object.fromEntries(cat.role_definitions.map((role) => [role.key, [...(participantRoles[role.key] ?? [])].sort((a, b) => a - b)])) } : detectionImport ? {
           mouse_ids: selectedMouseIds,
@@ -1189,13 +1299,25 @@ export default function AnnotatePage() {
       });
       setSaveState("saved");
       setStartPoint(null);
+      setEndPoint(null);
+      setSelectedMouseIds([]);
+      if (cat.participant_mode === "role_based") {
+        const roles = [...cat.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+        const empty = Object.fromEntries(roles.map((role) => [role.key, []]));
+        setParticipantRoles(empty);
+        setActiveRoleKey(roles[0]?.key ?? null);
+        setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty));
+      } else {
+        setParticipantRoles({});
+      }
       setParticipantNavigationActive(false);
+      setDraftErrors([]);
       setErrorMsg(null);
       const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
       setHint(
         wasLocked
-          ? `已标注：${cat.name} ${formatTime(sp.time)} → ${formatTime(time)}（视频已退回草稿，请重新提交审核）`
-          : `已标注：${cat.name} ${formatTime(sp.time)} → ${formatTime(time)}（帧 ${sp.frame}→${frame}）`
+          ? `行为已保存：${cat.name}，帧 ${sp.frame}→${ep.frame}（视频已退回草稿，请重新提交审核）`
+          : `行为已保存：${cat.name}，帧 ${sp.frame}→${ep.frame}`
       );
       await loadAnnotations();
       if (wasLocked) await refreshVideo();
@@ -1211,7 +1333,7 @@ export default function AnnotatePage() {
     if (!detectionImport) return;
     const request = {
       operation,
-      track_ids: selectedMouseIds,
+      track_ids: identitySelectedMouseIds,
       frame: operation === "split" ? currentFrame : undefined,
       base_identity_revision: identityRevision,
       base_detection_import_revision: detectionImport.revision,
@@ -1222,7 +1344,7 @@ export default function AnnotatePage() {
       if (check.conflicts?.length) { setErrorMsg(`${check.message ?? "角色分配冲突"}：${check.conflicts.map((c) => `标注 #${c.annotation_id} · 帧 ${c.start_frame}–${c.end_frame} / ${c.start_time}–${c.end_time} 秒 · ${c.role_name ?? c.role_key} · Track ${c.track_id}`).join("；")}`); return; }
       if (check.conflict_frames?.length) { setErrorMsg(`Merge 冲突：帧 ${check.conflict_frames.slice(0, 12).join("、")} 同一 track ID 将对应多个框，请先忽略误检框`); return; }
       const ok = await confirm({
-        title: operation === "split" ? `Split track ID ${selectedMouseIds[0]}？` : `Merge ${selectedMouseIds.length} 个 track？`,
+        title: operation === "split" ? `Split track ID ${identitySelectedMouseIds[0]}？` : `Merge ${identitySelectedMouseIds.length} 个 track？`,
         message: <>{operation === "split" ? <>从帧 <b>{currentFrame}</b> 起生成新 track ID，前后分别有 {check.detections_before} / {check.detections_after} 个检测。</> : <>保留 track ID <b>{check.retained_display_track_id}</b>，影响 {check.affected_detection_count} 个检测。</>}<br />受影响行为标注：<b>{check.affected_annotation_count}</b> 条。</>,
         confirmLabel: operation === "split" ? "确认 Split" : "确认 Merge",
       });
@@ -1230,7 +1352,7 @@ export default function AnnotatePage() {
       const result = await commitIdentityEdit(pid, vid, request);
       setIdentityRevision(result.identity_revision);
       setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v);
-      setSelectedMouseIds(result.new_display_track_id != null ? [result.new_display_track_id] : result.retained_display_track_id != null ? [result.retained_display_track_id] : []);
+      setIdentitySelectedMouseIds(result.new_display_track_id != null ? [result.new_display_track_id] : result.retained_display_track_id != null ? [result.retained_display_track_id] : []);
       if (result.edit_id) {
         setLastIdentityEditId(result.edit_id);
         setUndoHistory((history) => [...history, { kind: "identity", id: result.edit_id!, createdAt: Date.now() }]);
@@ -1245,14 +1367,14 @@ export default function AnnotatePage() {
   }
 
   async function suppressTrack() {
-    if (!detectionImport || selectedMouseIds.length !== 1) return;
-    const selectedId = selectedMouseIds[0];
+    if (!detectionImport || identitySelectedMouseIds.length !== 1) return;
+    const selectedId = identitySelectedMouseIds[0];
     const ok = await confirm({ title: `忽略整个 track（track ID ${selectedId}）？`, message: <>此操作会将所选内容标记为误检并忽略；不会删除原始检测数据。忽略的数据不再参与显示、校验和导出，且可撤销。</>, confirmLabel: "标记为误检并忽略", danger: true });
     if (!ok) return;
     setIdentityBusy(true);
     try {
       const result = await createSuppression(pid, vid, { scope: "corrected_track", track_id: selectedId, base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
-      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastSuppressionId(result.suppression_id ?? null); setSelectedMouseIds([]); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastSuppressionId(result.suppression_id ?? null); setIdentitySelectedMouseIds([]); setOverlayRefresh((x) => x + 1); await loadAnnotations();
       if (result.suppression_id != null) {
         setUndoHistory((history) => [...history, { kind: "suppression", id: result.suppression_id!, createdAt: Date.now() }]);
       } else {
@@ -1393,6 +1515,40 @@ export default function AnnotatePage() {
     }
   }
 
+  function clearDraft(keepCategory = false) {
+    const retainedCategory = keepCategory ? activeCategory : null;
+    setStartPoint(null);
+    setEndPoint(null);
+    setSelectedMouseIds([]);
+    setDraftErrors([]);
+    setRoleMessage(null);
+    setParticipantNavigationActive(false);
+    setActiveCategory(retainedCategory);
+    if (retainedCategory?.participant_mode === "role_based") {
+      const roles = [...retainedCategory.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+      const empty = Object.fromEntries(roles.map((role) => [role.key, []]));
+      setParticipantRoles(empty);
+      setActiveRoleKey(roles[0]?.key ?? null);
+      setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty));
+    } else {
+      setParticipantRoles({});
+      setActiveRoleKey(null);
+      setUnlockedRoleKeys(new Set());
+    }
+  }
+
+  async function requestResetDraft() {
+    const ok = await confirm({
+      title: "重置标注？",
+      message: "将清空当前未保存行为的类别、开始、结束和全部参与对象。此操作不会修改已经保存的行为标注。",
+      confirmLabel: "重置标注",
+      danger: true,
+    });
+    if (!ok) return;
+    clearDraft(false);
+    setHint("已重置当前未保存行为标注");
+  }
+
   const handleVideoNavigation = useCallback(async (direction: "previous" | "next") => {
     if (saveState === "saving" || annotationMutationBusy || submitting || identityBusy) {
       setHint("当前操作尚未完成，请稍后再切换视频");
@@ -1413,14 +1569,14 @@ export default function AnnotatePage() {
     setNavigationPending(true);
     let didNavigate = false;
     try {
-      if (startPoint != null || editingAnnotationId != null) {
+      if (hasDraft || editingAnnotationId != null) {
         const ok = await confirm({
           title: `切换到${direction === "previous" ? "上一个" : "下一个"}视频？`,
           message: <>
-            {startPoint != null && editingAnnotationId != null
-              ? "当前有未完成的临时标注和正在编辑的行为标注，切换后这些未保存内容可能丢失。"
-              : startPoint != null
-                ? "当前有未完成的临时标注，切换后该起点可能丢失。"
+            {hasDraft && editingAnnotationId != null
+              ? "当前有未保存行为草稿和正在编辑的行为标注，切换后这些内容将丢失。"
+              : hasDraft
+                ? "当前有未保存行为草稿，切换后草稿将被放弃。"
                 : "当前有正在编辑的行为标注，切换后未保存的编辑可能丢失。"}
           </>,
           confirmLabel: "仍要切换",
@@ -1428,6 +1584,7 @@ export default function AnnotatePage() {
         if (!ok) return;
       }
       didNavigate = true;
+      allowNavigationRef.current = true;
       navigate(`/projects/${pid}/annotate/${target.id}`);
     } finally {
       if (!didNavigate && routeKeyRef.current === `${pid}:${vid}`) {
@@ -1435,7 +1592,7 @@ export default function AnnotatePage() {
         setNavigationPending(false);
       }
     }
-  }, [annotationMutationBusy, confirm, currentVideoInList, editingAnnotationId, identityBusy, navigate, nextVideo, pid, previousVideo, saveState, startPoint, submitting, vid]);
+  }, [annotationMutationBusy, confirm, currentVideoInList, editingAnnotationId, hasDraft, identityBusy, navigate, nextVideo, pid, previousVideo, saveState, submitting, vid]);
 
   /* ---------- 键盘快捷键（输入聚焦时不触发） ----------
    * 处理函数通过 ref 持有最新闭包：effect 仅注册一次，但每次渲染都更新 ref，
@@ -1485,6 +1642,12 @@ export default function AnnotatePage() {
     if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.code === "Comma" || e.code === "Period")) {
       e.preventDefault();
       void handleVideoNavigation(e.code === "Comma" ? "previous" : "next");
+      return;
+    }
+
+    if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "Enter" && workspaceMode === "behavior") {
+      e.preventDefault();
+      void saveDraft();
       return;
     }
 
@@ -1547,7 +1710,7 @@ export default function AnnotatePage() {
           return;
         }
         void handleDelete(annotation);
-      } else if (!detectionImport || selectedMouseIds.length !== 1 || identityBusy) {
+      } else if (!detectionImport || identitySelectedMouseIds.length !== 1 || identityBusy) {
         setHint("忽略整个 track 需要恰好选择 1 个有效 track ID");
       } else {
         void suppressTrack();
@@ -1579,6 +1742,11 @@ export default function AnnotatePage() {
         void markEnd();
         return;
       }
+    }
+
+    if (e.key === "Escape" && workspaceMode === "behavior" && hasDraft) {
+      e.preventDefault();
+      void requestResetDraft();
     }
   };
 
@@ -1735,7 +1903,11 @@ export default function AnnotatePage() {
                     selectedIds={overlaySelectedIds}
                     trackRoleLabels={trackRoleLabels}
                     interactive
-                    onToggleTrack={(id) => { if (activeCategory?.participant_mode === "role_based") void toggleRoleTrack(id); else toggleMouseId(id); }}
+                    onToggleTrack={(id) => {
+                      if (workspaceMode === "identity") toggleIdentityMouseId(id);
+                      else if (activeCategory?.participant_mode === "role_based") void toggleRoleTrack(id);
+                      else toggleMouseId(id);
+                    }}
                     onFrameData={handleFrameData}
                     refreshKey={overlayRefresh}
                   />
@@ -1797,11 +1969,27 @@ export default function AnnotatePage() {
                       e.currentTarget.blur();
                       void markEnd();
                     }}
-                    title="在当前时间设置终点并保存行为标注"
+                    title="将当前显示帧设置为结束点（不保存）"
                   >
                     设终点 [D]
                   </button>
+                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveDraft()}>
+                    {saveState === "saving" ? "保存中…" : "保存此行为 [Ctrl+Enter]"}
+                  </button>
+                  <button type="button" className="btn btn-sm" disabled={workspaceMode === "identity" || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
+                    重置标注
+                  </button>
                 </div>
+
+                <div className="draft-summary" aria-live="polite" style={{ padding: "0 10px 8px" }}>
+                  <strong>未保存行为</strong>
+                  <span className={activeCategory ? "" : "pending"}>· 类别 {activeCategory ? "✓" : "—"}</span>
+                  <span className={startPoint ? "" : "pending"}>· 开始 {startPoint ? "✓" : "—"}</span>
+                  <span className={endPoint ? "" : "pending"}>· 结束 {endPoint ? "✓" : "—"}</span>
+                  <span>· 参与对象 {behaviorSelectedIds.length}</span>
+                  {draftIntervalInvalid ? <span className="invalid">· 区间待修正</span> : null}
+                </div>
+                {draftErrors.length ? <div ref={draftErrorRef} className="draft-errors" role="alert" tabIndex={-1}><strong>此行为尚不能保存：</strong><ul>{draftErrors.map((message) => <li key={message}>{message}</li>)}</ul></div> : null}
 
                 {timelineDuration && timelineDuration > 0 ? (
                   <div style={{ padding: "0 10px 10px" }}>
@@ -1810,6 +1998,9 @@ export default function AnnotatePage() {
                       currentTime={currentTime}
                       annotations={annotations}
                       categoryById={categoryById}
+                      draftStartTime={startDisplayTime}
+                      draftEndTime={endDisplayTime}
+                      draftColor={activeCategory?.color}
                       onSeek={seekTo}
                     />
                   </div>
@@ -1838,13 +2029,13 @@ export default function AnnotatePage() {
             <span>
               起点{" "}
               <b className="mono">
-                {startPoint ? formatTime(startPoint.time) : "未设置"}
+                {startDisplayTime != null ? `${formatTime(startDisplayTime)}（帧 ${startPoint?.frame}）` : startPoint ? `帧 ${startPoint.frame}` : "未设置"}
               </b>
             </span>
             <span>
               终点{" "}
               <b className="mono">
-                {startPoint ? formatTime(currentTime) : "未设置"}
+                {endDisplayTime != null ? `${formatTime(endDisplayTime)}（帧 ${endPoint?.frame} inclusive）` : endPoint ? `帧 ${endPoint.frame}` : "未设置"}
               </b>
             </span>
             <span className="flex-spacer" />
@@ -1866,14 +2057,19 @@ export default function AnnotatePage() {
             </Card>
           ) : null}
           {workspaceMode === "behavior" ? <>
-            <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
-            {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setRoleMessage(`已移除 Track ${id}；如低于最少数量，该角色会标记为未完成。`); }} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
-          </> : <IdentityPanel tracks={tracks} selected={selectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
+            <div ref={categorySectionRef} tabIndex={-1}>
+              <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
+            </div>
+            <div ref={participantSectionRef} tabIndex={-1}>
+              {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
+            </div>
+          </> : <IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
           <AnnotationList
             annotations={annotations}
             categories={displayCategories}
             categoryById={categoryById}
-            fps={video?.fps}
+            fps={effectiveFps}
+            frameCount={authoritativeFrameCount}
             currentTime={currentTime}
             readOnly={workspaceMode === "identity"}
             selectedId={selectedAnnotationId}
