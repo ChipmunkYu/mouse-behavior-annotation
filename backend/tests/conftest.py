@@ -19,6 +19,7 @@ from app.config import Settings  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.media import MediaCommandError  # noqa: E402
 from app.models import ProjectMembership, User  # noqa: E402
+from app.seed import CATEGORY_COLORS, CATEGORY_MOUSE_COUNTS, INITIAL_CATEGORIES  # noqa: E402
 
 
 def auth_headers(client, username: str = "demo", password: str = "demo123") -> dict:
@@ -28,9 +29,39 @@ def auth_headers(client, username: str = "demo", password: str = "demo123") -> d
     return {"Authorization": f"Bearer {token}"}
 
 
+def minimal_project_categories() -> list[dict]:
+    return [{
+        "name": "测试类别",
+        "group": "测试分组",
+        "color": "#808080",
+        "sort_order": 0,
+        "participant_mode": "unordered",
+        "role_definitions": [],
+        "mouse_count_min": 1,
+    }]
+
+
+class _ProjectCreateClient:
+    """Keep unrelated tests explicit-compatible with mandatory creation categories."""
+
+    def __init__(self, client: TestClient):
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def post(self, url, *args, **kwargs):
+        if url == "/api/projects" and isinstance(kwargs.get("json"), dict):
+            payload = dict(kwargs["json"])
+            payload.setdefault("categories", minimal_project_categories())
+            kwargs["json"] = payload
+        return self._client.post(url, *args, **kwargs)
+
+
 class AppContext:
     def __init__(self, client: TestClient, session_factory):
-        self.client = client
+        self.raw_client = client
+        self.client = _ProjectCreateClient(client)
         self.session_factory = session_factory
 
     def create_user(self, username: str, password: str = "pw123") -> int:
@@ -51,14 +82,36 @@ class AppContext:
             ))
             db.commit()
 
+    def configure_and_lock_minimal_scheme(self, project_id: int, headers: dict) -> list[dict]:
+        """Explicitly create and lock a small four-category compatibility scheme."""
+        definitions = []
+        for group, names in INITIAL_CATEGORIES:
+            for name in names:
+                minimum, maximum = CATEGORY_MOUSE_COUNTS[name]
+                definitions.append({
+                    "name": name, "group": group, "sort_order": len(definitions),
+                    "color": CATEGORY_COLORS[len(definitions) % len(CATEGORY_COLORS)],
+                    "participant_mode": "unordered", "role_definitions": [],
+                    "mouse_count_min": minimum, "mouse_count_max": maximum,
+                })
+        replaced = self.client.put(
+            f"/api/projects/{project_id}/category-scheme",
+            json={"expected_version": 0, "categories": definitions}, headers=headers,
+        )
+        assert replaced.status_code == 200, replaced.text
+        locked = self.client.post(
+            f"/api/projects/{project_id}/category-scheme/lock",
+            json={"expected_version": 1}, headers=headers,
+        )
+        assert locked.status_code == 200, locked.text
+        return locked.json()["categories"]
+
     def make_project_with_video(self, name: str = "标注测试项目") -> dict:
         headers = auth_headers(self.client)
         project = self.client.post(
             "/api/projects", json={"name": name, "description": "测试"}, headers=headers
         ).json()
-        categories = self.client.get(
-            f"/api/projects/{project['id']}/categories", headers=headers
-        ).json()
+        categories = self.configure_and_lock_minimal_scheme(project["id"], headers)
         video = self.client.post(
             f"/api/projects/{project['id']}/videos",
             json={

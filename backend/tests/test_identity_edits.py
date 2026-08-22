@@ -79,6 +79,7 @@ def _setup(ctx, login_headers, *, mergeable: bool = False) -> tuple[dict, int, i
         "/api/projects", json={"name": "Phase2 sparse", "description": "test"}, headers=headers
     ).json()
     project_id = project["id"]
+    ctx.configure_and_lock_minimal_scheme(project_id, headers)
     batch = ctx.client.post(
         f"/api/projects/{project_id}/video-import-batches", headers=headers
     ).json()

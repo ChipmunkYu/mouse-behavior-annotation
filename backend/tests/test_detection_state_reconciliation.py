@@ -52,6 +52,14 @@ def _seed_0007_current(url: str, anomaly: str | None = None) -> None:
         )
         conn.execute(
             text(
+                "INSERT INTO project_memberships "
+                "(id,project_id,user_id,role,status,created_at) "
+                "VALUES (1,1,1,'owner','active',:n)"
+            ),
+            {"n": now},
+        )
+        conn.execute(
+            text(
                 "INSERT INTO videos (id,project_id,filename,status,uploaded_by,created_at,"
                 "workflow_status,annotation_revision,detection_import_revision,identity_revision,"
                 "media_revision) VALUES (1,1,'v.mp4','ready',1,:n,'draft',1,1,3,1)"
@@ -209,11 +217,31 @@ def test_0008_downgrade_reupgrade_preserves_legacy_and_rebackfills(tmp_path):
         assert conn.execute(text("SELECT count(*) FROM clips")).scalar() == 1
 
     run_migrations(url)
-    assert current_revision(url) == "0012"
+    assert current_revision(url) == "0013"
+    inspector = inspect(db_mod.engine)
+    assert {"participant_mode", "role_definitions"} <= {
+        column["name"] for column in inspector.get_columns("behavior_categories")
+    }
+    assert {"participant_roles", "participant_status"} <= {
+        column["name"] for column in inspector.get_columns("annotations")
+    }
+    assert {"category_group", "category_participant_mode", "role_definitions_snapshot",
+            "participant_roles_snapshot"} <= {
+        column["name"] for column in inspector.get_columns("submission_annotations")
+    }
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT display_track_id FROM detection_state_overrides")).scalar() == 10
         assert conn.execute(text("SELECT submission_id FROM reviews")).scalar() is None
         assert conn.execute(text("SELECT submission_annotation_id FROM clips")).scalar() is None
+        assert conn.execute(text("SELECT participant_mode FROM behavior_categories WHERE id=1")).scalar() == "unordered"
+        assert conn.execute(text("SELECT participant_roles FROM annotations WHERE id=1")).scalar() == "{}"
+    # 0013 deliberately leaves pre-existing schemes unlocked and its authority trigger
+    # rejects all live annotation writes until an active owner explicitly locks one.
+    with db_mod.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE projects SET category_scheme_locked_at=CURRENT_TIMESTAMP, "
+            "category_scheme_locked_by=1 WHERE id=1"
+        ))
     summary = reconcile_detection_state(url, legacy_writer_stopped=True)
     assert summary["shadow_difference_count"] == 0
     with db_mod.engine.connect() as conn:

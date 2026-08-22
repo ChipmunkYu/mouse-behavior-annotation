@@ -228,6 +228,7 @@ def test_ready_paths_match_media_generation(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
     project = ctx.client.post("/api/projects", json={"name": "片段库媒体"}, headers=headers).json()
+    ctx.configure_and_lock_minimal_scheme(project["id"], headers)
     categories = ctx.client.get(f"/api/projects/{project['id']}/categories", headers=headers).json()
     src = ctx.app.state.settings.videos_dir / "src.mp4"
     src.parent.mkdir(parents=True, exist_ok=True)
@@ -421,6 +422,7 @@ def test_cross_project_isolation(ctx):
     )
     other = ctx.client.post("/api/projects", json={"name": "别的项目"}, headers=headers).json()
     other_video = _new_video(ctx, other, headers, "other.mp4")
+    ctx.configure_and_lock_minimal_scheme(other["id"], headers)
     other_categories = ctx.client.get(f"/api/projects/{other['id']}/categories", headers=headers).json()
 
     a = _annotate(ctx, headers, project, video, categories[0]["id"])
@@ -532,6 +534,7 @@ def test_categories_isolated_per_project_and_approved_only(ctx):
     )
     other = ctx.client.post("/api/projects", json={"name": "类别隔离项目"}, headers=headers).json()
     other_video = _new_video(ctx, other, headers, "o.mp4")
+    ctx.configure_and_lock_minimal_scheme(other["id"], headers)
     other_categories = ctx.client.get(f"/api/projects/{other['id']}/categories", headers=headers).json()
 
     a = _annotate(ctx, headers, project, video, categories[0]["id"])
@@ -580,5 +583,10 @@ def test_clipitem_field_completeness(ctx):
         "thumbnail_path": item["thumbnail_path"],
         "annotator_name": "demo",
         "review_status": "approved",
+        "category_group": categories[0]["group"],
+        "category_participant_mode": "unordered",
+        "role_definitions": [],
+        "participant_roles": {},
+        "mouse_ids": [],
     }
     assert item["created_at"] == ann["created_at"]

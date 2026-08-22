@@ -14,6 +14,7 @@ import argparse
 import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # 使脚本可从任意目录直接运行（脚本位于 backend/scripts/ 下）
@@ -35,11 +36,17 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.models import (  # noqa: E402
     Annotation,
     BehaviorCategory,
+    CategorySchemeAudit,
     Project,
     ProjectMembership,
     Video,
 )
 from app.seed import ensure_demo_user, init_project_categories  # noqa: E402
+from app.category_scheme_service import (  # noqa: E402
+    categories_for_project,
+    scheme_hash,
+    scheme_snapshot,
+)
 
 PROJECT_NAME = "北医行为标注演示"
 VIDEO_NAME = "demo_attack.mov"
@@ -101,9 +108,9 @@ def seed_demo(
             db.add(project)
             db.flush()  # 获取 project.id
             db.add(ProjectMembership(project_id=project.id, user_id=demo_user.id, role="owner"))
-            init_project_categories(db, project.id)  # 同样的项目级 12 类
-            db.commit()
-            db.refresh(project)
+            # 新项目的 owner、12 类方案、replace/lock 审计和永久锁定必须在
+            # 下方同一次 commit 中原子落库，禁止先提交空 Project。
+            db.flush()
         else:
             # 复用已有项目时，仍保证 demo 用户是 owner 成员
             membership = (
@@ -120,7 +127,46 @@ def seed_demo(
                 )
                 db.commit()
 
-        # ---------- “攻击行为”类别（新建项目时已由 12 类种子初始化） ----------
+        # ---------- 演示类别方案 ----------
+        # 只有该持久演示脚本在方案缺失时受控建立演示类别并永久锁定。
+        # 已锁定项目绝不修改类别或锁状态。
+        categories = categories_for_project(db, project.id)
+        if project.category_scheme_locked_at is None:
+            if not categories:
+                before = scheme_snapshot(project, categories)
+                init_project_categories(db, project.id)
+                project.category_scheme_version += 1
+                db.flush()
+                categories = categories_for_project(db, project.id)
+                after = scheme_snapshot(project, categories)
+                db.add(CategorySchemeAudit(
+                    project_id=project.id,
+                    actor_id=demo_user.id,
+                    action="replace",
+                    scheme_version=project.category_scheme_version,
+                    before_json=before,
+                    after_json=after,
+                    scheme_hash=scheme_hash(after),
+                ))
+
+            before = scheme_snapshot(project, categories)
+            project.category_scheme_locked_at = datetime.utcnow()
+            project.category_scheme_locked_by = demo_user.id
+            db.flush()
+            after = scheme_snapshot(project, categories)
+            db.add(CategorySchemeAudit(
+                project_id=project.id,
+                actor_id=demo_user.id,
+                action="lock",
+                scheme_version=project.category_scheme_version,
+                before_json=before,
+                after_json=after,
+                scheme_hash=scheme_hash(after),
+            ))
+            db.commit()
+            db.refresh(project)
+
+        # ---------- “攻击行为”类别 ----------
         attack_category = (
             db.query(BehaviorCategory)
             .filter(
@@ -130,7 +176,10 @@ def seed_demo(
             .first()
         )
         if attack_category is None:
-            raise RuntimeError(f"项目缺少类别「{ANNOTATION_BEHAVIOR}」，请检查种子数据")
+            raise RuntimeError(
+                f"已锁定演示项目缺少类别「{ANNOTATION_BEHAVIOR}」；"
+                "seed_demo 不会变更已有锁定方案"
+            )
 
         # ---------- 可选：把源视频放到配置 videos_dir ----------
         storage_path: str | None = None

@@ -495,7 +495,7 @@ def test_submit_validation_sql_count_is_bounded_for_120_annotations(ctx, login_h
         assert db.query(SubmissionAnnotation).count() == 120
 
 
-def test_new_clip_copy_survives_category_rename_source_annotation_and_submitter_delete(media_ctx, monkeypatch):
+def test_new_clip_copy_survives_source_annotation_and_submitter_delete(media_ctx, monkeypatch):
     ctx = media_ctx
     login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
     headers, project, categories, video = _setup_video_with_import(ctx, login)
@@ -514,7 +514,6 @@ def test_new_clip_copy_survives_category_rename_source_annotation_and_submitter_
         job_id = db.query(BackgroundJob).one().id
         copy = db.query(SubmissionAnnotation).one()
         frozen_name = copy.category_name
-        db.get(BehaviorCategory, copy.category_id).name = "RENAMED"
         source = db.get(Annotation, annotation["id"])
         db.delete(source)
         submitter = db.get(User, submitter_id)

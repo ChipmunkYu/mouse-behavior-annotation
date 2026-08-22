@@ -276,6 +276,7 @@ def _create_project_for_test(ctx, login_headers) -> tuple[dict, int]:
     project = ctx.client.post(
         "/api/projects", json={"name": "检测导入测试项目", "description": "test"}, headers=headers
     ).json()
+    ctx.configure_and_lock_minimal_scheme(project["id"], headers)
     return headers, project["id"]
 
 
@@ -1096,7 +1097,8 @@ def test_replace_detection_import_new_revision(ctx, login_headers):
     assert body["revision"] == 2
     assert body["detection_count"] == 4
     assert body["track_count"] == 2
-    assert "Old imports preserved" in body["message"]
+    assert body["annotations_must_be_refetched"] is True
+    assert "Refetch annotations" in body["message"]
 
     with ctx.session_factory() as db:
         imports = db.query(models.DetectionImport).filter(
@@ -1258,6 +1260,9 @@ def test_replace_without_confirm_returns_preview(ctx, login_headers):
     assert body["preview"] is True
     assert "confirm=true" in body["message"]
     assert body["affected_annotations_count"] >= 0
+    assert body["unordered_force_reselection_count"] == 0
+    assert body["role_based_revalidation_count"] == 0
+    assert "annotations_must_be_refetched" not in body
     detection_dir = ctx.client.app.state.settings.detection_imports_dir
     with ctx.session_factory() as db:
         from app import models
@@ -1426,7 +1431,12 @@ def test_replace_bumps_revision_and_resets_annotations(ctx, login_headers):
     body = resp.json()
     assert body["revision"] == 2
     assert body["affected_annotations_count"] >= 1
-    assert "needs_mouse_ids" in body["message"]
+    assert body["preview"] is False
+    assert body["annotations_must_be_refetched"] is True
+    assert body["message"] == (
+        "Detection import replaced. Refetch annotations to obtain their current "
+        "participant and track-validation status."
+    )
 
     with ctx.session_factory() as db:
         video = db.get(models.Video, vid)

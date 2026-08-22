@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+StrictBusinessInt = Annotated[int, Field(strict=True)]
+StrictPositiveBusinessInt = Annotated[int, Field(strict=True, gt=0)]
+StrictNonNegativeBusinessInt = Annotated[int, Field(strict=True, ge=0)]
 
 
 # ---------- 认证 ----------
@@ -28,11 +33,6 @@ class LoginResponse(BaseModel):
 
 
 # ---------- 项目 ----------
-class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
-    description: Optional[str] = None
-
-
 class ProjectOut(BaseModel):
     id: int
     name: str
@@ -42,6 +42,9 @@ class ProjectOut(BaseModel):
     role: str
     membership_id: int
     can_review: bool
+    category_scheme_version: int = 0
+    category_scheme_locked_at: Optional[datetime] = None
+    category_scheme_locked_by: Optional[int] = None
 
 
 class MembershipOut(BaseModel):
@@ -76,7 +79,7 @@ class AssigneeDirectoryItem(BaseModel):
 
 
 class AssigneeOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     project_id: int
@@ -102,6 +105,62 @@ class CategoryOut(BaseModel):
     # v0.6：参与小鼠数量范围（max 为 None 表示无固定上限）
     mouse_count_min: int = 1
     mouse_count_max: Optional[int] = None
+    participant_mode: Literal["unordered", "role_based"] = "unordered"
+    role_definitions: list[dict[str, Any]] = []
+
+
+class CategorySchemeCategoryIn(BaseModel):
+    id: Optional[StrictBusinessInt] = None
+    name: str = Field(min_length=1, max_length=64)
+    group: str = Field(min_length=1, max_length=64)
+    color: Optional[str] = Field(default=None, max_length=32)
+    sort_order: int = Field(ge=0, strict=True)
+    is_active: bool = True
+    participant_mode: Literal["unordered", "role_based"] = "unordered"
+    role_definitions: list[dict[str, Any]] = []
+    mouse_count_min: Optional[StrictPositiveBusinessInt] = None
+    mouse_count_max: Optional[StrictPositiveBusinessInt] = None
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: Optional[str] = None
+    categories: list[CategorySchemeCategoryIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_category_colors(self) -> "ProjectCreate":
+        if any(category.color is None or not category.color.strip() for category in self.categories):
+            raise ValueError("Every category requires a non-blank color when creating a project")
+        return self
+
+
+class CategorySchemePut(BaseModel):
+    expected_version: StrictNonNegativeBusinessInt
+    categories: list[CategorySchemeCategoryIn]
+
+
+class CategorySchemeLock(BaseModel):
+    expected_version: StrictNonNegativeBusinessInt
+
+
+class CategorySchemeOut(BaseModel):
+    project_id: int
+    category_scheme_version: int
+    category_scheme_locked_at: Optional[datetime] = None
+    category_scheme_locked_by: Optional[int] = None
+    categories: list[CategoryOut]
+
+
+class CategorySchemeAuditOut(BaseModel):
+    id: int
+    project_id: int
+    actor_id: int
+    action: Literal["replace", "lock"]
+    scheme_version: int
+    before_json: Optional[dict[str, Any]] = None
+    after_json: dict[str, Any]
+    scheme_hash: str
+    created_at: datetime
 
 
 # ---------- 视频 ----------
@@ -113,7 +172,7 @@ class VideoCreate(BaseModel):
     height: Optional[int] = Field(default=None, ge=0)
     status: Optional[str] = None
     storage_path: Optional[str] = None
-    assignee_membership_id: Optional[int] = None
+    assignee_membership_id: Optional[StrictPositiveBusinessInt] = None
 
 
 class VideoOut(BaseModel):
@@ -139,17 +198,18 @@ class VideoOut(BaseModel):
     assignee_membership_id: Optional[int] = None
     assignee: Optional[AssigneeOut] = None
     created_at: datetime
+    submission_annotations: list[dict[str, Any]] = []
 
 
 class AssignmentBatchRequest(BaseModel):
-    video_ids: list[int] = Field(min_length=1)
-    assignee_membership_id: Optional[int] = None
+    video_ids: list[StrictBusinessInt] = Field(min_length=1)
+    assignee_membership_id: Optional[StrictPositiveBusinessInt] = None
 
 
 class VideoClaimsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    video_ids: list[PositiveInt] = Field(min_length=1, max_length=200)
+    video_ids: list[StrictPositiveBusinessInt] = Field(min_length=1, max_length=200)
 
     @field_validator("video_ids")
     @classmethod
@@ -187,7 +247,7 @@ class AssignmentStatsOut(BaseModel):
 
 # ---------- 标注 ----------
 class AnnotationCreate(BaseModel):
-    category_id: int
+    category_id: StrictBusinessInt
     start_time: float = Field(ge=0)
     end_time: float = Field(ge=0)
     start_frame: int = Field(ge=0)
@@ -196,6 +256,7 @@ class AnnotationCreate(BaseModel):
     crop_region: Optional[dict[str, Any]] = None
     # v0.6：参与小鼠 ID + 修订号
     mouse_ids: Optional[list[int]] = None
+    participant_roles: Optional[dict[str, Any]] = None
     detection_import_revision: Optional[int] = None
     identity_revision: Optional[int] = None
     # review_status 不作为有效输入：创建固定 pending；显式传入非 pending 值 → 422
@@ -212,7 +273,7 @@ class AnnotationCreate(BaseModel):
 
 
 class AnnotationUpdate(BaseModel):
-    category_id: Optional[int] = None
+    category_id: Optional[StrictBusinessInt] = None
     start_time: Optional[float] = Field(default=None, ge=0)
     end_time: Optional[float] = Field(default=None, ge=0)
     start_frame: Optional[int] = Field(default=None, ge=0)
@@ -221,6 +282,7 @@ class AnnotationUpdate(BaseModel):
     crop_region: Optional[dict[str, Any]] = None
     # v0.6：参与小鼠 ID + 修订号
     mouse_ids: Optional[list[int]] = None
+    participant_roles: Optional[dict[str, Any]] = None
     detection_import_revision: Optional[int] = None
     identity_revision: Optional[int] = None
     # 禁止用户直接写 review_status：审核状态只能通过审核 API（review）流转
@@ -248,6 +310,8 @@ class AnnotationOut(BaseModel):
     crop_region: Optional[dict[str, Any]] = None
     # v0.6：参与小鼠 ID 与状态
     mouse_ids: list[int] = []
+    participant_roles: dict[str, list[int]] = {}
+    participant_status: Literal["valid", "needs_participants"] = "valid"
     mouse_id_status: str = "needs_mouse_ids"
     detection_import_revision: int = 0
     identity_revision: int = 0
@@ -278,6 +342,7 @@ class ReviewOut(BaseModel):
     # 便捷字段：审核人用户名
     reviewer: Optional[str] = None
     submission_id: Optional[int] = None
+    submission_annotations: list[dict[str, Any]] = []
 
 
 # ---------- 后台任务 / 媒体状态（批次 4） ----------
@@ -329,6 +394,11 @@ class ClipItem(BaseModel):
     annotator_name: Optional[str] = None
     review_status: str
     created_at: datetime
+    category_group: Optional[str] = None
+    category_participant_mode: Literal["unordered", "role_based"] = "unordered"
+    role_definitions: list[dict[str, Any]] = []
+    participant_roles: dict[str, list[int]] = {}
+    mouse_ids: list[int] = []
 
 
 class ClipPageOut(BaseModel):
@@ -349,7 +419,7 @@ class ClipCategoryCount(BaseModel):
 class ExportRequest(BaseModel):
     """导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。"""
 
-    category_ids: Optional[list[int]] = None
+    category_ids: Optional[list[StrictBusinessInt]] = None
 
 
 class MissingClipOut(BaseModel):
@@ -579,14 +649,30 @@ class CorrectedTrackSummaryOut(BaseModel):
     visible_in_current_frame: Optional[bool] = None
 
 
-class DetectionImportReplaceOut(BaseModel):
-    """替换导入后的受影响摘要。"""
+class DetectionImportReplacementPreviewOut(BaseModel):
+    """检测替换确认前的结构化影响预览，不预测 role-based 最终状态。"""
+    preview: Literal[True]
+    message: str
+    current_revision: int
+    new_revision: int
+    affected_annotations_count: int
+    unordered_force_reselection_count: int
+    role_based_revalidation_count: int
+    detection_count: int
+    unique_track_count: int
+
+
+class DetectionImportReplacementConfirmedOut(BaseModel):
+    """检测替换完成摘要；标注状态必须通过标注列表重新获取。"""
+    preview: Literal[False] = False
     id: int
     video_id: int
     revision: int
     detection_count: int
     track_count: int
     status: str
+    affected_annotations_count: int
+    annotations_must_be_refetched: Literal[True]
     message: str
 
 

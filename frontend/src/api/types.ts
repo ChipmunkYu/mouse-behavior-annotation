@@ -26,6 +26,9 @@ export interface Project {
   role: ProjectRole;
   membership_id: number;
   can_review: boolean;
+  category_scheme_version: number;
+  category_scheme_locked_at: string | null;
+  category_scheme_locked_by: number | null;
 }
 
 export type ProjectRole = "owner" | "admin" | "member";
@@ -91,6 +94,7 @@ export interface VideoListParams { view?: VideoView; workflow_status?: string; a
 export interface ProjectCreateInput {
   name: string;
   description?: string | null;
+  categories: CategorySchemeCategoryInput[];
 }
 
 // ---------- 行为类别 ----------
@@ -104,6 +108,50 @@ export interface Category {
   is_active: boolean;
   mouse_count_min: number;
   mouse_count_max: number | null;
+  participant_mode: ParticipantMode;
+  role_definitions: RoleDefinition[];
+}
+
+export type ParticipantMode = "unordered" | "role_based";
+export interface RoleDefinition {
+  key: string;
+  name: string;
+  min_count: number;
+  max_count: number | null;
+  role_sort_order: number;
+}
+export interface RoleDefinitionInput {
+  key?: string;
+  name: string;
+  min_count: number;
+  max_count: number | null;
+  role_sort_order: number;
+}
+export interface CategorySchemeCategoryInput {
+  id?: number;
+  name: string;
+  group: string;
+  color: string | null;
+  sort_order: number;
+  is_active: boolean;
+  participant_mode: ParticipantMode;
+  role_definitions: RoleDefinitionInput[];
+  mouse_count_min?: number;
+  mouse_count_max?: number | null;
+}
+export interface CategoryScheme {
+  project_id: number;
+  category_scheme_version: number;
+  category_scheme_locked_at: string | null;
+  category_scheme_locked_by: number | null;
+  categories: Category[];
+}
+export interface CategorySchemePut { expected_version: number; categories: CategorySchemeCategoryInput[] }
+export interface CategorySchemeLock { expected_version: number }
+export interface CategorySchemeAudit {
+  id: number; project_id: number; actor_id: number; action: "replace" | "lock";
+  scheme_version: number; before_json: Record<string, unknown> | null;
+  after_json: Record<string, unknown>; scheme_hash: string; created_at: string;
 }
 
 // ---------- 视频 ----------
@@ -128,6 +176,7 @@ export interface Video {
   assignee_membership_id: number | null;
   assignee: Assignee | null;
   created_at: string;
+  submission_annotations: SubmissionAnnotationSnapshot[];
 }
 
 export interface VideoClaimsInput {
@@ -165,6 +214,8 @@ export interface Annotation {
   crop_region: unknown;
   mouse_ids: number[];
   mouse_id_status: "valid" | "needs_mouse_ids";
+  participant_roles: Record<string, number[]>;
+  participant_status: "valid" | "needs_participants";
   detection_import_revision: number;
   identity_revision: number;
   created_at: string;
@@ -183,6 +234,7 @@ export interface AnnotationCreateInput {
   confidence?: string;
   crop_region?: unknown;
   mouse_ids?: number[];
+  participant_roles?: Record<string, number[]>;
   detection_import_revision?: number;
   identity_revision?: number;
 }
@@ -196,6 +248,7 @@ export interface AnnotationPatchInput {
   confidence?: string;
   crop_region?: unknown;
   mouse_ids?: number[];
+  participant_roles?: Record<string, number[]>;
   detection_import_revision?: number;
   identity_revision?: number;
 }
@@ -218,6 +271,20 @@ export interface Review {
   /** 便捷字段：审核人用户名（后端返回时显示） */
   reviewer: string | null;
   submission_id: number | null;
+  submission_annotations: SubmissionAnnotationSnapshot[];
+}
+
+export interface SubmissionAnnotationSnapshot {
+  id: number;
+  source_annotation_id: number | null;
+  category_id: number;
+  category_name: string;
+  category_group: string | null;
+  category_participant_mode: ParticipantMode;
+  role_definitions: RoleDefinition[];
+  participant_roles: Record<string, number[]>;
+  mouse_ids: number[];
+  start_time: number; end_time: number; start_frame: number; end_frame: number;
 }
 
 export interface ReviewCreateInput {
@@ -320,18 +387,59 @@ export interface VideoImportBatch {
 
 export interface DetectionImport {
   id: number;
-  video_id?: number;
+  video_id: number;
   revision: number;
   schema_version: string;
-  model?: string | null;
-  tracker?: string | null;
+  tracks_path: string | null;
+  tracks_sha256: string | null;
+  metadata_path: string | null;
+  metadata_sha256: string | null;
+  model: string | null;
+  model_weights_sha256: string | null;
+  tracker: string | null;
+  tracker_params: Record<string, unknown> | null;
   frame_range: Record<string, unknown> | null;
   detection_count: number | null;
   status: string;
   fps: number | null;
   width: number | null;
   height: number | null;
+  frame_count: number | null;
+  source_relative: string | null;
+  error: string | null;
+  active: boolean;
+  created_by: number | null;
+  created_at: string;
 }
+
+/** 替换当前检测导入的预检响应（confirm=false）。 */
+export interface DetectionReplacementPreview {
+  preview: true;
+  current_revision: number;
+  new_revision: number;
+  affected_annotations_count: number;
+  unordered_force_reselection_count: number;
+  role_based_revalidation_count: number;
+  detection_count: number;
+  unique_track_count: number;
+  message: string;
+}
+
+/** 替换当前检测导入的确认响应（confirm=true）。 */
+export interface DetectionReplacementConfirmed {
+  preview: false;
+  id: number;
+  video_id: number;
+  revision: number;
+  detection_count: number;
+  track_count: number;
+  status: string;
+  affected_annotations_count: number;
+  annotations_must_be_refetched: true;
+  message: string;
+}
+
+export type DetectionReplacementResponse = DetectionReplacementPreview | DetectionReplacementConfirmed;
 
 export interface Keypoint {
   x_px?: number;
@@ -398,6 +506,13 @@ export interface IdentityEditCheckResponse {
   affected_detection_count?: number;
   affected_annotation_count: number;
   conflict_frames?: number[];
+  message?: string;
+  conflicts?: TrackRoleConflict[];
+}
+
+export interface TrackRoleConflict {
+  annotation_id: number; start_time: number; end_time: number;
+  start_frame: number; end_frame: number; role_key: string; role_name: string | null; track_id: number;
 }
 
 export type IdentityEditCommitRequest = IdentityEditCheckRequest;
@@ -510,6 +625,11 @@ export interface ClipItem {
   /** 标注审核状态：pending / approved / rejected */
   review_status: string;
   created_at: string;
+  category_group: string | null;
+  category_participant_mode: ParticipantMode;
+  role_definitions: RoleDefinition[];
+  participant_roles: Record<string, number[]>;
+  mouse_ids: number[];
 }
 
 /** 分页响应：{items, total, pages}。 */

@@ -13,20 +13,19 @@ import { Link, useParams } from "react-router-dom";
 import {
   createVideoReview,
   fetchVideoStreamUrl,
-  listAnnotations,
-  listCategories,
   listProjects,
   listReviewQueue,
   listVideoReviews,
 } from "../api";
 import { ApiError } from "../api/client";
-import type { Annotation, Category, Project, Review, Video } from "../api/types";
+import type { Category, Project, Review, SubmissionAnnotationSnapshot, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
-import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge, statusLabel } from "../components/ui";
+import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
+import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 
 type StreamState = "idle" | "loading" | "ok" | "empty" | "error";
@@ -36,7 +35,7 @@ function ReadOnlyAnnotationList({
   annotations,
   categoryById,
 }: {
-  annotations: Annotation[];
+  annotations: SubmissionAnnotationSnapshot[];
   categoryById: Map<number, Category>;
 }) {
   if (annotations.length === 0) {
@@ -53,23 +52,20 @@ function ReadOnlyAnnotationList({
             <div className="anno-row-top">
               <span className="anno-cat" title={cat?.group ?? ""}>
                 <span className="swatch" style={{ background: cat?.color ?? "var(--text-3)" }} />
-                <span className="name">{a.category_name ?? cat?.name ?? `类别 #${a.category_id}`}</span>
+                <span className="name">{a.category_name ?? `类别 #${a.category_id}`}</span>
               </span>
               <span className="anno-times">
                 <b>{formatTimeShort(a.start_time)}</b> – <b>{formatTimeShort(a.end_time)}</b>
               </span>
               <span className="anno-row-actions">
-                <StatusBadge value={a.review_status} />
+                <StatusBadge value="pending" />
               </span>
             </div>
             <div className="anno-row-meta">
               <span>帧 {a.start_frame} → {a.end_frame}</span>
               <span>·</span>
-              <span>标注者 {a.annotator ?? `#${a.annotator_id}`}</span>
-              <span>·</span>
-              <span>可信度 {statusLabel(a.confidence)}</span>
-              <span>·</span><span className="mouse-id-readout">参与对象 {a.mouse_ids.length ? a.mouse_ids.map((id) => `track ID ${id}`).join("、") : "未补选"}</span>
-              <span>· 检测导入版本 {a.detection_import_revision} / track 修正版本 {a.identity_revision}</span>
+              {a.category_group ? <span>{a.category_group}</span> : null}
+              <ParticipantSummary mode={a.category_participant_mode} roles={a.role_definitions} assignments={a.participant_roles} mouseIds={a.mouse_ids} />
             </div>
           </div>
         );
@@ -118,7 +114,7 @@ export default function ReviewPage() {
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
 
   const [categories, setCategories] = useState<Category[]>([]);
-  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [annotations, setAnnotations] = useState<SubmissionAnnotationSnapshot[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
 
   const [streamState, setStreamState] = useState<StreamState>("idle");
@@ -145,7 +141,13 @@ export default function ReviewPage() {
     elementDuration > 0 ? elementDuration : selectedVideo?.duration && selectedVideo.duration > 0 ? selectedVideo.duration : null;
 
   const canReview = project?.can_review === true;
-  const activeMouseIds = annotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time)?.mouse_ids ?? [];
+  const activeSnapshot = annotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time);
+  const activeMouseIds = activeSnapshot?.mouse_ids ?? [];
+  const activeRoleByTrack = useMemo(() => {
+    const result: Record<number, string> = {};
+    if (activeSnapshot?.category_participant_mode === "role_based") for (const role of activeSnapshot.role_definitions) for (const id of activeSnapshot.participant_roles[role.key] ?? []) result[id] = role.name;
+    return result;
+  }, [activeSnapshot]);
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
@@ -211,11 +213,12 @@ export default function ReviewPage() {
     setCategories([]);
     setReviews([]);
 
-    Promise.all([listAnnotations(pid, vid), listCategories(pid), listVideoReviews(pid, vid)])
-      .then(([anns, cats, revs]) => {
+    Promise.all([listVideoReviews(pid, vid)])
+      .then(([revs]) => {
         if (cancelled || gen !== selectGenRef.current) return;
-        setAnnotations(anns);
-        setCategories(cats);
+        const snapshots = selectedVideo?.submission_annotations ?? [];
+        setAnnotations(snapshots);
+        setCategories(snapshots.map((a, index) => ({ id: a.category_id, project_id: pid, name: a.category_name, group: a.category_group ?? "历史类别", color: null, sort_order: index, is_active: true, mouse_count_min: 1, mouse_count_max: null, participant_mode: a.category_participant_mode, role_definitions: a.role_definitions })));
         setReviews(revs);
         setReviewDisabled(false);
       })
@@ -248,7 +251,7 @@ export default function ReviewPage() {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [selectedId, pid]);
+  }, [selectedId, pid, selectedVideo]);
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
     const v = videoRef.current;
@@ -472,7 +475,7 @@ export default function ReviewPage() {
                           onPause={() => setPlaying(false)}
                           playsInline
                         />
-                        <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} />
+                        <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} trackRoleLabels={activeRoleByTrack} />
                       </div>
                       <div className="player-controls">
                         <button
@@ -509,7 +512,7 @@ export default function ReviewPage() {
                           <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}
                         </span>
                         <span className="flex-spacer" />
-                        {annotations[0] ? <span className="revision-context mono">检测导入版本 {annotations[0].detection_import_revision} · track 修正版本 {annotations[0].identity_revision}</span> : null}
+                        <span className="revision-context mono">Submission 快照 · 只读</span>
                         <WorkflowBadge value={selectedVideo?.workflow_status ?? "draft"} revision={selectedVideo?.annotation_revision} />
                       </div>
                       {timelineDuration && timelineDuration > 0 ? (

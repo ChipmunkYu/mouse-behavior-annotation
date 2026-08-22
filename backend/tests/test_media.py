@@ -41,7 +41,7 @@ def _now():
 def _setup(ctx, headers, *, annotations=1, start_times=None, storage_path="src.mp4", with_source=True):
     """创建项目 +（可选）源视频文件 + 元数据视频 + 标注；返回 (project, categories, video, anns)。"""
     project = ctx.client.post("/api/projects", json={"name": "媒体项目"}, headers=headers).json()
-    categories = ctx.client.get(f"/api/projects/{project['id']}/categories", headers=headers).json()
+    categories = ctx.configure_and_lock_minimal_scheme(project["id"], headers)
     if with_source:
         src = ctx.app.state.settings.videos_dir / storage_path
         src.parent.mkdir(parents=True, exist_ok=True)
@@ -698,7 +698,7 @@ def test_absolute_storage_path_within_videos_dir_ok(media_ctx):
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_bytes(b"X")
     project = ctx.client.post("/api/projects", json={"name": "绝对路径项目"}, headers=headers).json()
-    categories = ctx.client.get(f"/api/projects/{project['id']}/categories", headers=headers).json()
+    categories = ctx.configure_and_lock_minimal_scheme(project["id"], headers)
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
         json={"filename": "abs.mp4", "storage_path": str(src), "status": "uploaded"},

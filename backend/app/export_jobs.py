@@ -21,7 +21,7 @@ from .export_contract import (FILES, safe_part, transform_detection, validate_cl
 from .media import MediaCommandError
 from .media_jobs import (_truncate_error, claim_and_render_submission_clip, clip_entities_ready,
                          reset_interrupted_job_clips, resolve_entity_path, stage_submission_input)
-from .models import (BackgroundJob, BehaviorCategory, Clip, DetectionSnapshotState, Project, RawDetection,
+from .models import (BackgroundJob, Clip, DetectionSnapshotState, Project, RawDetection,
                      Submission, SubmissionAnnotation, Video)
 from .submission_media_plan import build_submission_media_plan
 from .submission_service import validate_snapshot_integrity
@@ -74,14 +74,20 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
     used_categories: set[str] = set()
     category_directories = {}
     category_tokens = {str(category_id): secrets.token_hex(16) for category_id in frozen_categories}
+    snapshot_names = {}
+    for annotation, _submission, _clip in rows:
+        snapshot_names.setdefault(annotation.category_id, annotation.category_name)
     for category_id in frozen_categories:
-        category = db.get(BehaviorCategory, category_id)
-        base = safe_part(category.name, fallback="category", limit=80)
+        base = safe_part(snapshot_names.get(category_id), fallback="category", limit=80)
         name = base; suffix = 0; token = category_tokens[str(category_id)]
         while name.casefold() in used_categories:
             suffix += 1
             tail = token[:12] if suffix == 1 else f"{token[:12]}_{suffix}"
-            name = safe_part(f"{base}_{tail}", fallback="category", limit=80)
+            # Reserve the suffix outside the colliding sanitizer result.  Calling the
+            # same sanitizer with the same final limit can otherwise never make progress
+            # for distinct names that normalize to one portable component.
+            stem = safe_part(base, fallback="category", limit=80 - len(tail) - 1)
+            name = f"{stem}_{tail}"
         used_categories.add(name.casefold()); category_directories[str(category_id)] = name
     submission_ids = sorted({submission.id for _annotation, submission, _clip in rows})
     annotation_ids = [annotation.id for annotation, _submission, _clip in rows]
@@ -321,7 +327,17 @@ class ExportWorker:
                     "frame_count": annotation.end_frame - annotation.start_frame + 1}
         probe = self.processor.probe_clip(str(target / "clip.mp4"), expected=expected)
         tracks_summary = self._write_tracks(db, annotation, submission, plan, target / "tracks.json")
+        participants = []
+        if annotation.category_participant_mode == "role_based":
+            assignments = annotation.participant_roles_snapshot or {}
+            participants = [
+                {"role_key": definition["key"], "role_name": definition["name"],
+                 "track_ids": assignments.get(definition["key"], [])}
+                for definition in sorted(annotation.role_definitions_snapshot or [],
+                                         key=lambda item: item["role_sort_order"])
+            ]
         annotation_doc = {"behavior": annotation.category_name, "mouse_ids": annotation.mouse_ids,
+            "participants": participants,
             "confidence": annotation.confidence,
             "frame_range": {"start": 0, "end": expected["frame_count"] - 1},
             "time_range": {"start": 0.0, "end": expected["frame_count"] / snapshot.fps}}

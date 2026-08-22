@@ -30,6 +30,9 @@ import type {
   CorrectedTracksParams,
   CorrectedTracksResponse,
   DetectionImport,
+  DetectionReplacementConfirmed,
+  DetectionReplacementPreview,
+  DetectionReplacementResponse,
   DetectionSuppression,
   DetectionsResponse,
   IdentityEditCheckRequest,
@@ -46,6 +49,7 @@ import type {
   Invite,
   VideoListParams,
   AssigneeDirectoryItem,
+  CategoryScheme, CategorySchemePut, CategorySchemeLock, CategorySchemeAudit,
 } from "./types";
 
 // ---------- 认证 ----------
@@ -93,6 +97,18 @@ export function resetProjectInvite(projectId: number | string): Promise<Invite> 
 // ---------- 类别 ----------
 export function listCategories(projectId: number | string): Promise<Category[]> {
   return apiFetch<Category[]>(`/projects/${projectId}/categories`);
+}
+export function getCategoryScheme(projectId: number | string): Promise<CategoryScheme> {
+  return apiFetch<CategoryScheme>(`/projects/${projectId}/category-scheme`);
+}
+export function putCategoryScheme(projectId: number | string, input: CategorySchemePut): Promise<CategoryScheme> {
+  return apiFetch<CategoryScheme>(`/projects/${projectId}/category-scheme`, { method: "PUT", body: JSON.stringify(input) });
+}
+export function lockCategoryScheme(projectId: number | string, input: CategorySchemeLock): Promise<CategoryScheme> {
+  return apiFetch<CategoryScheme>(`/projects/${projectId}/category-scheme/lock`, { method: "POST", body: JSON.stringify(input) });
+}
+export function listCategorySchemeAudit(projectId: number | string): Promise<CategorySchemeAudit[]> {
+  return apiFetch<CategorySchemeAudit[]>(`/projects/${projectId}/category-scheme/audit`);
 }
 
 // ---------- 视频 ----------
@@ -175,15 +191,24 @@ export function getImportBatch(projectId: number | string, batchId: number): Pro
 }
 
 export function replaceDetectionImport(
+  projectId: number | string, videoId: number | string, tracks: File, metadata: File, confirm: true
+): Promise<DetectionReplacementConfirmed>;
+export function replaceDetectionImport(
+  projectId: number | string, videoId: number | string, tracks: File, metadata: File, confirm?: false
+): Promise<DetectionReplacementPreview>;
+export function replaceDetectionImport(
+  projectId: number | string, videoId: number | string, tracks: File, metadata: File, confirm: boolean
+): Promise<DetectionReplacementResponse>;
+export function replaceDetectionImport(
   projectId: number | string, videoId: number | string, tracks: File, metadata: File, confirm = false
-): Promise<Record<string, unknown>> {
+): Promise<DetectionReplacementResponse> {
   const form = new FormData();
   form.append("tracks_file", tracks, tracks.name);
   form.append("metadata_file", metadata, metadata.name);
   return apiRaw(`/projects/${projectId}/videos/${videoId}/detection-imports?confirm=${confirm}`, { method: "POST", body: form })
-    .then(async (res) => {
+    .then(async (res): Promise<DetectionReplacementResponse> => {
       if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({})) as { detail?: string }).detail ?? "替换检测数据失败");
-      return res.json() as Promise<Record<string, unknown>>;
+      return await res.json() as DetectionReplacementResponse;
     });
 }
 

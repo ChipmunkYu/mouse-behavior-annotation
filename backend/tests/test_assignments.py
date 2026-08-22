@@ -230,6 +230,62 @@ def test_batch_claim_schema_rejects_invalid_requests(body, ctx, login_headers):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("endpoint", ("claims", "assignments"))
+def test_assignment_video_ids_reject_booleans_without_writes(endpoint, ctx, login_headers):
+    project, owner_h, alice_h, _bob_h, alice_mid, _bob_mid = _setup(ctx, login_headers)
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": f"strict-{endpoint}.mp4"},
+        headers=owner_h,
+    ).json()
+    body = {"video_ids": [True]}
+    headers = alice_h
+    if endpoint == "assignments":
+        body["assignee_membership_id"] = alice_mid
+        headers = owner_h
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{endpoint}", json=body, headers=headers,
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        assert db.get(Video, video["id"]).assignee_membership_id is None
+
+
+def test_video_create_assignee_rejects_boolean_without_writes(ctx, login_headers):
+    project, owner_h, _alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "boolean-assignee.mp4", "assignee_membership_id": True},
+        headers=owner_h,
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        assert db.query(Video).filter_by(project_id=project["id"]).count() == 0
+
+
+def test_batch_assignment_assignee_rejects_boolean_without_writes(ctx, login_headers):
+    project, owner_h, _alice_h, _bob_h, _alice_mid, _bob_mid = _setup(ctx, login_headers)
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "boolean-batch-assignee.mp4"},
+        headers=owner_h,
+    ).json()
+
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/assignments",
+        json={"video_ids": [video["id"]], "assignee_membership_id": True},
+        headers=owner_h,
+    )
+
+    assert response.status_code == 422
+    with ctx.session_factory() as db:
+        assert db.get(Video, video["id"]).assignee_membership_id is None
+
+
 @pytest.mark.parametrize("conflict", ("claimed", "submitted", "missing", "cross-project"))
 def test_batch_claim_conflict_rolls_back_without_leaking_reason(
     conflict, ctx, login_headers

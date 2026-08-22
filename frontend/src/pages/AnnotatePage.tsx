@@ -37,8 +37,10 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
+import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort, timeToFrame } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
+import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
@@ -222,8 +224,9 @@ function AnnotationRow({
         <span>
           可信度 {statusLabel(ann.confidence)} · 审核 {statusLabel(ann.review_status)}
         </span>
-        <span>· 参与对象 {ann.mouse_ids.length ? ann.mouse_ids.map((id) => `track ID ${id}`).join("、") : "待补选"}</span>
-        {ann.mouse_id_status === "needs_mouse_ids" ? <span className="mouse-status warning">需补选</span> : null}
+        <ParticipantSummary mode={cat?.participant_mode ?? "unordered"} roles={cat?.role_definitions ?? []} assignments={ann.participant_roles} mouseIds={ann.mouse_ids} compact />
+        {ann.participant_status === "needs_participants" ? <span className="mouse-status warning">角色待补全</span> : null}
+        {ann.mouse_id_status === "needs_mouse_ids" ? <span className="mouse-status warning">{cat?.participant_mode === "role_based" ? "Track 已失效，需要重新分配" : "Track 已失效，需要重新选择"}</span> : null}
       </div>
     </div>
   );
@@ -235,18 +238,21 @@ function AnnotationEditForm({
   fps,
   onCancel,
   onSave,
+  onCategoryChange,
 }: {
   ann: Annotation;
   categories: Category[];
   fps: number | null | undefined;
   onCancel: () => void;
   onSave: (patch: AnnotationPatchInput) => Promise<void>;
+  onCategoryChange: (category: Category) => Promise<boolean>;
 }) {
   const [categoryId, setCategoryId] = useState(ann.category_id);
   const [start, setStart] = useState(ann.start_time.toFixed(3));
   const [end, setEnd] = useState(ann.end_time.toFixed(3));
   const [localError, setLocalError] = useState<string | null>(null);
   const [mouseIds, setMouseIds] = useState(ann.mouse_ids.join(", "));
+  const selectedCategory = categories.find((c) => c.id === categoryId);
   const [saving, setSaving] = useState(false);
 
   const groups = useMemo(() => groupCategories(categories), [categories]);
@@ -276,7 +282,7 @@ function AnnotationEditForm({
         end_time: en,
         start_frame: timeToFrame(s, fps),
         end_frame: timeToFrame(en, fps),
-        mouse_ids: [...new Set(mouseIds.split(/[,，\s]+/).filter(Boolean).map(Number))].filter(Number.isInteger).sort((a, b) => a - b),
+        ...(selectedCategory?.participant_mode === "unordered" ? { mouse_ids: [...new Set(mouseIds.split(/[,，\s]+/).filter(Boolean).map(Number))].filter(Number.isInteger).sort((a, b) => a - b) } : { participant_roles: ann.participant_roles }),
         detection_import_revision: ann.detection_import_revision,
         identity_revision: ann.identity_revision,
       });
@@ -297,7 +303,7 @@ function AnnotationEditForm({
           id={`edit-cat-${ann.id}`}
           className="select"
           value={categoryId}
-          onChange={(e) => setCategoryId(Number(e.target.value))}
+          onChange={(e) => { const next = categories.find((c) => c.id === Number(e.target.value)); if (next) void onCategoryChange(next).then((ok) => { if (ok) setCategoryId(next.id); }); }}
         >
           {groups.map(([group, list]) => (
             <optgroup key={group} label={group}>
@@ -340,7 +346,7 @@ function AnnotationEditForm({
         对应帧：{Number.isFinite(sNum) ? timeToFrame(sNum, fps) : "—"} →{" "}
         {Number.isFinite(eNum) ? timeToFrame(eNum, fps) : "—"}
       </div>
-      <div className="field"><label htmlFor={`edit-mice-${ann.id}`}>参与对象（填写 track ID，以逗号分隔）</label><input id={`edit-mice-${ann.id}`} className="input mono" value={mouseIds} onChange={(e) => setMouseIds(e.target.value)} /></div>
+      {selectedCategory?.participant_mode === "unordered" ? <div className="field"><label htmlFor={`edit-mice-${ann.id}`}>参与对象（填写 track ID，以逗号分隔）</label><input id={`edit-mice-${ann.id}`} className="input mono" value={mouseIds} onChange={(e) => setMouseIds(e.target.value)} /></div> : <div className="field-hint">角色分配请使用上方参与对象角色槽位；保存时会提交完整角色分配。</div>}
       <div className="form-error">{localError ?? ""}</div>
       <div className="actions">
         <button type="button" className="btn btn-sm" onClick={onCancel} disabled={saving}>
@@ -367,6 +373,7 @@ function AnnotationList({
   onEditingChange,
   onEditSave,
   onDelete,
+  onEditCategoryChange,
 }: {
   annotations: Annotation[];
   categories: Category[];
@@ -380,6 +387,7 @@ function AnnotationList({
   onEditingChange: (id: number | null) => void;
   onEditSave: (id: number, patch: AnnotationPatchInput) => Promise<void>;
   onDelete: (ann: Annotation) => Promise<void>;
+  onEditCategoryChange: (category: Category) => Promise<boolean>;
 }) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const activeId = annotations.find(
@@ -424,6 +432,7 @@ function AnnotationList({
                   await onEditSave(a.id, patch);
                   onEditingChange(null);
                 }}
+                onCategoryChange={onEditCategoryChange}
               />
             ) : (
               <AnnotationRow
@@ -465,11 +474,13 @@ function SaveStatus({ state, message }: { state: SaveState; message?: string | n
 function SubmitReviewControl({
   status,
   hasAnnotations,
+  blockedReason,
   submitting,
   onSubmit,
 }: {
   status: string;
   hasAnnotations: boolean;
+  blockedReason: string | null;
   submitting: boolean;
   onSubmit: () => void;
 }) {
@@ -491,8 +502,8 @@ function SubmitReviewControl({
     <button
       type="button"
       className="btn btn-sm btn-primary"
-      disabled={!hasAnnotations || submitting}
-      title={hasAnnotations ? "提交审核后，审核人将按当前行为标注版本审核" : "至少需要一条行为标注才能提交审核"}
+      disabled={!hasAnnotations || blockedReason != null || submitting}
+      title={blockedReason ?? (hasAnnotations ? "提交审核后，审核人将按当前行为标注版本审核" : "至少需要一条行为标注才能提交审核")}
       onClick={onSubmit}
     >
       {submitting ? "提交中…" : "提交审核"}
@@ -524,6 +535,20 @@ function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive,
     <div className="selected-mice">{selected.length ? selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>) : <span>点击视频框或下方 track ID 选择参与对象</span>}</div>
     <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
     {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
+  </Card>;
+}
+
+function RoleSlotsPanel({ category, assignments, activeKey, unlocked, tracks, disabled, message, onActivate, onTrack, onRemove }: {
+  category: Category; assignments: Record<string, number[]>; activeKey: string | null; unlocked: Set<string>; tracks: CorrectedTrackSummary[]; disabled: boolean; message: string | null;
+  onActivate: (key: string) => void; onTrack: (id: number) => void; onRemove: (key: string, id: number) => void;
+}) {
+  const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+  const trackRole = new Map<number, string>(); roles.forEach((r) => (assignments[r.key] ?? []).forEach((id) => trackRole.set(id, r.name)));
+  return <Card title="参与对象角色" className="role-slots-panel" extra={<span className="role-slot-legend">按角色分配 · 不会自动切换</span>}>
+    <div className="role-slots" role="list" aria-label="参与对象角色槽位">{roles.map((role) => { const ids = assignments[role.key] ?? []; const complete = ids.length >= role.min_count && (role.max_count == null || ids.length <= role.max_count); const accessible = isRoleAccessible(roles, assignments, unlocked, role.key); return <button type="button" role="listitem" key={role.key} disabled={!accessible} title={accessible ? `切换到“${role.name}”` : "请先完成所有前序角色的最少数量"} className={`role-slot${activeKey === role.key ? " active" : ""}${complete ? " complete" : " incomplete"}${!accessible ? " locked" : ""}`} onClick={() => onActivate(role.key)} aria-pressed={activeKey === role.key} aria-label={`${role.name}，${complete ? "已完成" : "未完成"}，已选 ${ids.length}`}><span className="role-slot-index">{accessible ? (complete ? "✓" : "!") : "🔒"}</span><span className="role-slot-main"><b>{role.name}</b><small>{ids.length} / {role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`} · {complete ? "已完成" : accessible ? "可点击切换" : "前序完成后可进入"}</small></span>{activeKey === role.key ? <span className="role-active-label">当前</span> : null}</button>; })}</div>
+    <div className="role-slot-chips">{roles.map((role) => (assignments[role.key] ?? []).map((id) => <button type="button" key={`${role.key}-${id}`} className="role-track-chip" onClick={() => onRemove(role.key, id)}><b>{role.name}</b> · Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">移除</span></button>))}{Object.values(assignments).every((ids) => ids.length === 0) ? <span className="muted">先选择角色槽位，再点击视频框或下方 Track。</span> : null}</div>
+    <div className="mouse-id-list">{tracks.map((track) => { const assigned = trackRole.get(track.display_track_id); return <button type="button" key={track.display_track_id} disabled={disabled || !activeKey} className={`mouse-id-item${assigned ? " selected" : ""}`} onClick={() => onTrack(track.display_track_id)}><b>Track {track.display_track_id}</b><span>{assigned ? `已分配：${assigned}` : track.visible_in_current_frame ? "当前可见 · 点击加入" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>; })}</div>
+    {message ? <div className="mouse-rule-warning" role="status">{message}</div> : null}
   </Card>;
 }
 
@@ -604,6 +629,10 @@ export default function AnnotatePage() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [workspaceMode, setWorkspaceMode] = useState<"behavior" | "identity">("behavior");
   const [selectedMouseIds, setSelectedMouseIds] = useState<number[]>([]);
+  const [participantRoles, setParticipantRoles] = useState<Record<string, number[]>>({});
+  const [activeRoleKey, setActiveRoleKey] = useState<string | null>(null);
+  const [unlockedRoleKeys, setUnlockedRoleKeys] = useState<Set<string>>(new Set());
+  const [roleMessage, setRoleMessage] = useState<string | null>(null);
   const [tracks, setTracks] = useState<CorrectedTrackSummary[]>([]);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [detectionImport, setDetectionImport] = useState<DetectionImport | null>(null);
@@ -636,6 +665,7 @@ export default function AnnotatePage() {
       setStartPoint(null);
       setActiveCategory(null);
       setSelectedMouseIds([]);
+      setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
     }
     setParticipantNavigationActive(false);
   }, [workspaceMode]);
@@ -674,6 +704,7 @@ export default function AnnotatePage() {
     setSaveState("idle");
     setWorkspaceMode("behavior");
     setSelectedMouseIds([]);
+    setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
     setTracks([]);
     setCurrentFrame(0);
     setDetectionImport(null);
@@ -706,6 +737,12 @@ export default function AnnotatePage() {
     () => new Map(categories.map((c) => [c.id, c] as const)),
     [categories]
   );
+  const invalidTrackCounts = useMemo(() => annotations.reduce((counts, annotation) => {
+    if (annotation.mouse_id_status !== "needs_mouse_ids") return counts;
+    if (categoryById.get(annotation.category_id)?.participant_mode === "role_based") counts.roleBased += 1;
+    else counts.unordered += 1;
+    return counts;
+  }, { roleBased: 0, unordered: 0 }), [annotations, categoryById]);
 
   const displayCategories = useMemo(() => sortCategoriesForDisplay(categories), [categories]);
   const categoryShortcuts = useMemo(() => buildCategoryShortcuts(displayCategories), [displayCategories]);
@@ -734,10 +771,55 @@ export default function AnnotatePage() {
     setSelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
   }, []);
 
-  const selectCategory = useCallback((category: Category) => {
+  const roleDefinitions = useMemo(() => activeCategory?.participant_mode === "role_based" ? [...activeCategory.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order) : [], [activeCategory]);
+  const roleSelectedIds = useMemo(() => [...new Set(Object.values(participantRoles).flat())].sort((a, b) => a - b), [participantRoles]);
+  const overlaySelectedIds = activeCategory?.participant_mode === "role_based" ? roleSelectedIds : selectedMouseIds;
+  const trackRoleLabels = useMemo(() => { const map: Record<number, string> = {}; roleDefinitions.forEach((role) => (participantRoles[role.key] ?? []).forEach((id) => { map[id] = role.name; })); return map; }, [participantRoles, roleDefinitions]);
+
+  const activateRole = useCallback((key: string) => {
+    const index = roleDefinitions.findIndex((r) => r.key === key);
+    if (index < 0) return;
+    const allowed = isRoleAccessible(roleDefinitions, participantRoles, unlockedRoleKeys, key);
+    if (!allowed) { setRoleMessage("请先补全前序角色的最少参与对象，再进入这个角色。"); return; }
+    setUnlockedRoleKeys((keys) => new Set([...keys, key])); setActiveRoleKey(key); setRoleMessage(null);
+  }, [participantRoles, roleDefinitions, unlockedRoleKeys]);
+
+  const toggleRoleTrack = useCallback(async (id: number) => {
+    const role = roleDefinitions.find((r) => r.key === activeRoleKey);
+    if (!role) { setRoleMessage("请先选择一个角色槽位。"); return; }
+    const currentKey = roleDefinitions.find((r) => (participantRoles[r.key] ?? []).includes(id))?.key;
+    if (currentKey === role.key) { setParticipantRoles((prev) => ({ ...prev, [role.key]: (prev[role.key] ?? []).filter((x) => x !== id) })); setRoleMessage(`${role.name}已移除 Track ${id}。`); return; }
+    if ((participantRoles[role.key] ?? []).length >= (role.max_count ?? Number.POSITIVE_INFINITY)) { setRoleMessage(`${role.name}已达到最多 ${role.max_count} 个参与对象，请先移除后再添加。`); return; }
+    if (currentKey) {
+      const oldRole = roleDefinitions.find((r) => r.key === currentKey)!;
+      const ok = await confirm({ title: `移至“${role.name}”？`, message: <>Track {id} 当前属于“<b>{oldRole.name}</b>”。确认后会从原角色移除，并一次性加入当前角色。</>, confirmLabel: "移至当前角色" });
+      if (!ok) { setRoleMessage(`Track ${id} 仍保留在“${oldRole.name}”。`); return; }
+    }
+    setParticipantRoles((prev) => { const next: Record<string, number[]> = {}; roleDefinitions.forEach((r) => { next[r.key] = (prev[r.key] ?? []).filter((x) => x !== id); }); next[role.key] = [...next[role.key], id].sort((a, b) => a - b); return next; });
+    setRoleMessage(`Track ${id} 已分配给“${role.name}”。`);
+  }, [activeRoleKey, confirm, participantRoles, roleDefinitions]);
+
+  const selectCategory = useCallback(async (category: Category) => {
     // 鼠标点击与数字键复用本函数，全局导航不依赖旧按钮焦点。
     blurActiveButton();
-    setActiveCategory(category);
+    if (activeCategory?.id === category.id) {
+      setHint(`当前类别仍为“${category.name}”`);
+      return;
+    }
+    if (activeCategory?.id !== category.id && roleSelectedIds.length > 0) {
+      const ok = await confirm({ title: "切换类别并清空角色分配？", message: <>当前已分配 {roleSelectedIds.length} 个参与对象。切换类别后，现有角色分配会被清空。</>, confirmLabel: "清空并切换", danger: true });
+      if (!ok) return;
+    }
+    setActiveCategory(category); setRoleMessage(null);
+    if (category.participant_mode === "role_based") {
+      setSelectedMouseIds([]);
+      const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+      const empty = Object.fromEntries(roles.map((r) => [r.key, []]));
+      setParticipantRoles(empty); setActiveRoleKey(roles[0]?.key ?? null); setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty));
+      setParticipantNavigationActive(false);
+      setHint(`已选择类别“${category.name}”；请在角色槽位中分配参与对象`);
+      return;
+    } else { setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); }
     setErrorMsg(null);
     if (category.mouse_count_max === 0) {
       setParticipantNavigationActive(false);
@@ -758,7 +840,7 @@ export default function AnnotatePage() {
     setParticipantFocusIndex(0);
     setParticipantNavigationActive(true);
     setHint(`已选择类别“${category.name}”；参与对象选择中：↑/↓ 移动，Space 选择，Esc 退出`);
-  }, [detectionImport, tracks]);
+  }, [activeCategory, confirm, detectionImport, roleSelectedIds.length, tracks]);
 
   useEffect(() => {
     if (!participantNavigationActive) return;
@@ -786,12 +868,12 @@ export default function AnnotatePage() {
     getCorrectedTracks(pid, vid, { current_frame: currentFrame, search: identitySearch || undefined, page_size: 200 })
       .then((result) => {
         if (!alive) return;
-        const items = showAllTracks ? result.items : result.items.filter((t) => t.visible_in_current_frame || selectedMouseIds.includes(t.display_track_id));
+        const items = showAllTracks ? result.items : result.items.filter((t) => t.visible_in_current_frame || overlaySelectedIds.includes(t.display_track_id));
         setTracks(items);
       })
       .catch((err: unknown) => { if (alive) setErrorMsg(err instanceof Error ? err.message : "加载 track ID 失败"); });
     return () => { alive = false; };
-  }, [pid, vid, detectionImport, currentFrame, identitySearch, showAllTracks, identityRevision, selectedMouseIds]);
+  }, [pid, vid, detectionImport, currentFrame, identitySearch, showAllTracks, identityRevision, overlaySelectedIds]);
 
   // 优先使用浏览器实际解析的媒体时长（elementDuration）作为时间轴基准，
   // DB 元数据时长仅作回退：避免元数据 duration 与真实播放时长不一致时时间轴错位。
@@ -818,6 +900,21 @@ export default function AnnotatePage() {
       setEditingAnnotationId(null);
     }
   }, [annotations, editingAnnotationId, selectedAnnotationId]);
+
+  useEffect(() => {
+    if (editingAnnotationId == null) return;
+    const annotation = annotations.find((a) => a.id === editingAnnotationId);
+    const category = annotation ? categoryById.get(annotation.category_id) : null;
+    if (!annotation || !category) return;
+    setActiveCategory(category);
+    if (category.participant_mode === "role_based") {
+      const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+      const complete = Object.fromEntries(roles.map((r) => [r.key, [...(annotation.participant_roles[r.key] ?? [])]]));
+      setParticipantRoles(complete); setSelectedMouseIds([]); setActiveRoleKey(roles[0]?.key ?? null);
+      setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, complete));
+      setRoleMessage("已恢复这条标注的角色分配，可在槽位中继续调整。");
+    } else { setSelectedMouseIds(annotation.mouse_ids); setParticipantRoles({}); setActiveRoleKey(null); }
+  }, [annotations, categoryById, editingAnnotationId]);
 
   const syncSuppressions = useCallback(async () => {
     const routeKey = `${pid}:${vid}`;
@@ -920,9 +1017,15 @@ export default function AnnotatePage() {
       setErrorMsg("至少需要一条行为标注才能提交审核");
       return;
     }
-    const invalid = annotations.filter((a) => a.mouse_id_status === "needs_mouse_ids" || !mouseIdsValid(categoryById.get(a.category_id) ?? null, a.mouse_ids));
-    if (!detectionImport || invalid.length > 0) {
-      setErrorMsg(!detectionImport ? "缺少有效 YOLO 检测数据，不能提交审核" : `有 ${invalid.length} 条行为标注需要补选参与对象，不能提交审核`);
+    const roleInvalid = annotations.filter((a) => a.participant_status === "needs_participants");
+    const trackInvalid = invalidTrackCounts.roleBased + invalidTrackCounts.unordered;
+    if (!detectionImport || roleInvalid.length > 0 || trackInvalid > 0) {
+      if (!detectionImport) setErrorMsg("缺少有效 YOLO 检测数据，不能提交审核");
+      else setErrorMsg([
+        roleInvalid.length ? `${roleInvalid.length} 条角色待补全` : "",
+        invalidTrackCounts.roleBased ? `${invalidTrackCounts.roleBased} 条 Track 已失效，需要重新分配` : "",
+        invalidTrackCounts.unordered ? `${invalidTrackCounts.unordered} 条 Track 已失效，需要重新选择` : "",
+      ].filter(Boolean).join("；"));
       return;
     }
     const ok = await confirm({
@@ -948,7 +1051,7 @@ export default function AnnotatePage() {
     } finally {
       setSubmitting(false);
     }
-  }, [video, annotations, pid, vid, confirm, mouseIdsValid, categoryById, detectionImport]);
+  }, [video, annotations, pid, vid, confirm, detectionImport, invalidTrackCounts]);
 
   /* ---------- 视频流（带 token 拉取 blob） ---------- */
   useEffect(() => {
@@ -1055,7 +1158,7 @@ export default function AnnotatePage() {
       return;
     }
     const frame = timeToFrame(time, latest.current.video?.fps);
-    if (detectionImport && !mouseIdsValid(cat, selectedMouseIds)) {
+    if (cat.participant_mode === "unordered" && detectionImport && !mouseIdsValid(cat, selectedMouseIds)) {
       const max = cat.mouse_count_max;
       setErrorMsg(`“${cat.name}”需要${max === cat.mouse_count_min ? `恰好 ${cat.mouse_count_min} 个对象` : max == null ? `至少 ${cat.mouse_count_min} 个对象` : `${cat.mouse_count_min}–${max} 个对象`}，请先点击检测框或 track ID 列表选择`);
       return;
@@ -1077,11 +1180,12 @@ export default function AnnotatePage() {
         start_frame: sp.frame,
         end_frame: frame,
         confidence: "certain",
-        ...(detectionImport ? {
+        ...(cat.participant_mode === "role_based" ? { participant_roles: Object.fromEntries(cat.role_definitions.map((role) => [role.key, [...(participantRoles[role.key] ?? [])].sort((a, b) => a - b)])) } : detectionImport ? {
           mouse_ids: selectedMouseIds,
           detection_import_revision: detectionImport.revision,
           identity_revision: identityRevision,
         } : {}),
+        ...(cat.participant_mode === "role_based" && detectionImport ? { detection_import_revision: detectionImport.revision, identity_revision: identityRevision } : {}),
       });
       setSaveState("saved");
       setStartPoint(null);
@@ -1115,6 +1219,7 @@ export default function AnnotatePage() {
     setIdentityBusy(true); setErrorMsg(null);
     try {
       const check = await checkIdentityEdit(pid, vid, request);
+      if (check.conflicts?.length) { setErrorMsg(`${check.message ?? "角色分配冲突"}：${check.conflicts.map((c) => `标注 #${c.annotation_id} · 帧 ${c.start_frame}–${c.end_frame} / ${c.start_time}–${c.end_time} 秒 · ${c.role_name ?? c.role_key} · Track ${c.track_id}`).join("；")}`); return; }
       if (check.conflict_frames?.length) { setErrorMsg(`Merge 冲突：帧 ${check.conflict_frames.slice(0, 12).join("、")} 同一 track ID 将对应多个框，请先忽略误检框`); return; }
       const ok = await confirm({
         title: operation === "split" ? `Split track ID ${selectedMouseIds[0]}？` : `Merge ${selectedMouseIds.length} 个 track？`,
@@ -1204,7 +1309,13 @@ export default function AnnotatePage() {
     setSaveState("saving");
     setAnnotationMutationBusy(true);
     try {
-      await updateAnnotation(pid, vid, id, patch);
+      const target = categoryById.get(patch.category_id ?? annotations.find((a) => a.id === id)?.category_id ?? -1);
+      const authorityPatch: AnnotationPatchInput = { ...patch };
+      if (target?.participant_mode === "role_based") {
+        delete authorityPatch.mouse_ids;
+        authorityPatch.participant_roles = Object.fromEntries(target.role_definitions.map((role) => [role.key, [...(participantRoles[role.key] ?? [])].sort((a, b) => a - b)]));
+      } else { delete authorityPatch.participant_roles; }
+      await updateAnnotation(pid, vid, id, authorityPatch);
       setSaveState("saved");
       const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
       setHint(wasLocked ? "行为标注已更新，视频已退回草稿，请重新提交审核" : "行为标注已更新");
@@ -1217,6 +1328,15 @@ export default function AnnotatePage() {
     } finally {
       setAnnotationMutationBusy(false);
     }
+  }
+
+  async function handleEditCategoryChange(category: Category): Promise<boolean> {
+    if (activeCategory?.id === category.id) return true;
+    if (roleSelectedIds.length > 0 && !await confirm({ title: "切换类别并清空角色分配？", message: "这条标注已有参与对象角色分配。切换类别后将清空现有分配。", confirmLabel: "清空并切换", danger: true })) return false;
+    setActiveCategory(category); setSelectedMouseIds([]); setRoleMessage(null);
+    if (category.participant_mode === "role_based") { const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order); const empty = Object.fromEntries(roles.map((r) => [r.key, []])); setParticipantRoles(empty); setActiveRoleKey(roles[0]?.key ?? null); setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty)); }
+    else { setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); }
+    return true;
   }
 
   async function handleDelete(ann: Annotation) {
@@ -1387,7 +1507,7 @@ export default function AnnotatePage() {
       if (e.code === "Space") {
         e.preventDefault();
         const track = tracks[participantFocusIndex];
-        if (track) toggleMouseId(track.display_track_id);
+        if (track) void (activeCategory?.participant_mode === "role_based" ? toggleRoleTrack(track.display_track_id) : Promise.resolve(toggleMouseId(track.display_track_id)));
         return;
       }
       if (e.code === "Delete") {
@@ -1478,6 +1598,18 @@ export default function AnnotatePage() {
     : currentVideoInList
       ? "已到项目视频列表末尾，没有下一个视频"
       : "当前视频不在项目视频列表中，无法定位下一个视频";
+  const submitBlockedReason = useMemo(() => {
+    if (annotations.length === 0) return "至少需要一条行为标注才能提交审核";
+    if (!detectionImport) return "缺少有效 YOLO 检测数据，不能提交审核";
+    const roleInvalid = annotations.filter((annotation) => annotation.participant_status === "needs_participants").length;
+    const trackInvalid = invalidTrackCounts.roleBased + invalidTrackCounts.unordered;
+    if (!roleInvalid && !trackInvalid) return null;
+    return [
+      roleInvalid ? `${roleInvalid} 条角色待补全` : "",
+      invalidTrackCounts.roleBased ? `${invalidTrackCounts.roleBased} 条 Track 已失效，需要重新分配` : "",
+      invalidTrackCounts.unordered ? `${invalidTrackCounts.unordered} 条 Track 已失效，需要重新选择` : "",
+    ].filter(Boolean).join("；");
+  }, [annotations, detectionImport, invalidTrackCounts]);
 
   return (
     <div className="annotate-page">
@@ -1539,6 +1671,7 @@ export default function AnnotatePage() {
           <SubmitReviewControl
             status={video?.workflow_status ?? "draft"}
             hasAnnotations={annotations.length > 0}
+            blockedReason={submitBlockedReason}
             submitting={submitting}
             onSubmit={() => void handleSubmitReview()}
           />
@@ -1552,7 +1685,9 @@ export default function AnnotatePage() {
       </div>
 
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
-      {annotations.some((a) => a.mouse_id_status === "needs_mouse_ids") ? <div className="mouse-warning-banner" role="status">⚠ 有 {annotations.filter((a) => a.mouse_id_status === "needs_mouse_ids").length} 条行为标注需要补选参与对象，补齐前不能提交审核。</div> : null}
+      {invalidTrackCounts.roleBased > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.roleBased} 条行为标注的 Track 已失效，需要重新分配；完成前不能提交审核。</div> : null}
+      {invalidTrackCounts.unordered > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.unordered} 条行为标注的 Track 已失效，需要重新选择；完成前不能提交审核。</div> : null}
+      {annotations.some((a) => a.participant_status === "needs_participants") ? <div className="mouse-warning-banner role-warning" role="status">⚠ 有 {annotations.filter((a) => a.participant_status === "needs_participants").length} 条行为标注角色待补全；草稿可继续保存，补全前不能提交审核。</div> : null}
       {confirmDialog}
       {shortcutHelpOpen ? <ShortcutHelp mode={workspaceMode} categoryShortcuts={categoryShortcuts} onClose={() => setShortcutHelpOpen(false)} /> : null}
 
@@ -1597,9 +1732,10 @@ export default function AnnotatePage() {
                     video={videoRef.current}
                     currentTime={currentTime}
                     fallbackFps={video?.fps}
-                    selectedIds={selectedMouseIds}
+                    selectedIds={overlaySelectedIds}
+                    trackRoleLabels={trackRoleLabels}
                     interactive
-                    onToggleTrack={toggleMouseId}
+                    onToggleTrack={(id) => { if (activeCategory?.participant_mode === "role_based") void toggleRoleTrack(id); else toggleMouseId(id); }}
                     onFrameData={handleFrameData}
                     refreshKey={overlayRefresh}
                   />
@@ -1731,7 +1867,7 @@ export default function AnnotatePage() {
           ) : null}
           {workspaceMode === "behavior" ? <>
             <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
-            <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />
+            {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setRoleMessage(`已移除 Track ${id}；如低于最少数量，该角色会标记为未完成。`); }} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
           </> : <IdentityPanel tracks={tracks} selected={selectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
           <AnnotationList
             annotations={annotations}
@@ -1746,6 +1882,7 @@ export default function AnnotatePage() {
             onEditingChange={setEditingAnnotationId}
             onEditSave={handleEditSave}
             onDelete={handleDelete}
+            onEditCategoryChange={handleEditCategoryChange}
           />
           {project ? (
             <div className="frame-preview" style={{ color: "var(--text-3)" }}>

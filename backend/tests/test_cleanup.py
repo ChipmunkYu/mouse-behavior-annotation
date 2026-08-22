@@ -14,7 +14,16 @@ from app import database as db_mod
 from app.cleanup import RetentionCleaner, run_retention_cleanup
 from app.cleanup_io import append_cleanup_issues
 from app.config import Settings
-from app.models import Annotation, BackgroundJob, Clip, Video
+from app.models import (
+    Annotation,
+    BackgroundJob,
+    BehaviorCategory,
+    Clip,
+    Project,
+    ProjectMembership,
+    User,
+    Video,
+)
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -127,8 +136,23 @@ def test_issue_retry_requires_program_name_and_db_proof(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", fail_retry)
     with db_mod.SessionLocal() as db:
-        # Disable FK checks only for this focused cleanup unit fixture.
-        db.connection().exec_driver_sql("PRAGMA foreign_keys=OFF")
+        # Build the smallest valid locked project: cleanup behavior is tested
+        # without bypassing the annotation authority triggers.
+        db.add(User(id=1, username="cleanup-owner", password_hash="unused"))
+        project = Project(
+            id=1, name="cleanup", created_by=1,
+            category_scheme_version=1,
+        )
+        db.add(project)
+        db.add(ProjectMembership(project_id=1, user_id=1, role="owner"))
+        db.add(BehaviorCategory(
+            id=1, project_id=1, name="cleanup-category", group="test",
+            color="#000000", sort_order=0, mouse_count_min=1, mouse_count_max=1,
+        ))
+        db.flush()
+        project.category_scheme_locked_at = now
+        project.category_scheme_locked_by = 1
+        db.flush()
         db.add(Video(id=20, project_id=1, filename="v.mp4", annotation_revision=2))
         db.add(
             Annotation(
@@ -140,6 +164,18 @@ def test_issue_retry_requires_program_name_and_db_proof(tmp_path, monkeypatch):
                 end_time=1,
                 start_frame=0,
                 end_frame=1,
+            )
+        )
+        db.add(
+            Annotation(
+                id=12,
+                video_id=20,
+                annotator_id=1,
+                category_id=1,
+                start_time=2,
+                end_time=3,
+                start_frame=2,
+                end_frame=3,
             )
         )
         db.add(Clip(project_id=1, annotation_id=12, source_revision=1, status="failed", clip_path=referenced.name))

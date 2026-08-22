@@ -15,6 +15,7 @@ from ..draft_detection_edits import (
 )
 from ..models import DetectionImport, DraftIdentityEdit, Video
 from ..permissions import require_editor as require_edit_permission
+from ..participant_role_conflicts import conflict_payload, role_track_conflicts
 from ..schemas import IdentityEditCheckRequest, IdentityEditCommitRequest, IdentityEditRevertRequest
 from ..video_write_gate import video_write_gate
 
@@ -55,8 +56,20 @@ def check_identity_edit(
     if body.operation == "split":
         if len(body.track_ids) != 1:
             raise HTTPException(status_code=400, detail="Split requires exactly one track_id")
-        return split_preview(db, detection_import, body.track_ids[0], body.frame)
-    return merge_preview(db, detection_import, body.track_ids)
+        result = split_preview(db, detection_import, body.track_ids[0], body.frame)
+        conflicts = role_track_conflicts(db, video_id, {body.track_ids[0]}, split_frame=body.frame)
+        if conflicts:
+            result.update(conflict_payload("Split conflicts with participant role assignments", conflicts))
+        return result
+    result = merge_preview(db, detection_import, body.track_ids)
+    matches = role_track_conflicts(db, video_id, set(body.track_ids))
+    grouped: dict[int, list[dict]] = {}
+    for match in matches:
+        grouped.setdefault(match["annotation_id"], []).append(match)
+    conflicts = [item for items in grouped.values() if len(items) != 1 for item in items]
+    if conflicts:
+        result.update(conflict_payload("Merge conflicts with participant role assignments", conflicts))
+    return result
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits")

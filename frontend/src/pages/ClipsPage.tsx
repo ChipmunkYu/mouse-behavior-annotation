@@ -33,6 +33,7 @@ import type {
 import { DEFAULT_PAGE_SIZE } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
 import { formatDate, formatDuration, formatTime, formatTimeShort } from "../utils/format";
+import { ParticipantSummary } from "../components/ParticipantSummary";
 
 /** 待生成片段存在时自动刷新列表的间隔（仅当前页有 clip_path 为空的片段时轮询）。 */
 const POLL_INTERVAL_MS = 5000;
@@ -488,6 +489,7 @@ export default function ClipsPage() {
               </span>
               <ReviewStatusBadge value={selected.review_status} />
               <ClipStatusChip clipPath={selected.clip_path} />
+              <ParticipantSummary mode={selected.category_participant_mode} roles={selected.role_definitions} assignments={selected.participant_roles} mouseIds={selected.mouse_ids} compact />
             </div>
             <div className="preview-actions">
               <Link
@@ -730,6 +732,7 @@ export default function ClipsPage() {
                   </span>
                 </span>
                 <span className="clip-created">{formatDate(c.created_at)}</span>
+                <ParticipantSummary mode={c.category_participant_mode} roles={c.role_definitions} assignments={c.participant_roles} mouseIds={c.mouse_ids} compact />
               </span>
             </button>
           ))}

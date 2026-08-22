@@ -13,11 +13,13 @@ export const API_BASE: string =
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly detail: unknown;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -40,6 +42,28 @@ function extractDetail(data: unknown): string | null {
     const message = (detail as { message?: unknown }).message;
     const ids = (detail as { video_ids?: unknown }).video_ids;
     if (typeof message === "string") {
+      const conflicts = (detail as { conflicts?: unknown }).conflicts;
+      if (Array.isArray(conflicts) && conflicts.length) {
+        const rows = conflicts.map((item) => {
+          if (!item || typeof item !== "object") return "未知冲突";
+          const c = item as Record<string, unknown>;
+          return `标注 #${c.annotation_id ?? "?"} · 帧 ${c.start_frame ?? "?"}–${c.end_frame ?? "?"} / ${c.start_time ?? "?"}–${c.end_time ?? "?"} 秒 · ${c.role_name ?? c.role_key ?? "未知角色"} · track ID ${c.track_id ?? "?"}`;
+        });
+        return `${message}：${rows.join("；")}`;
+      }
+      const conflictFrames = (detail as { conflict_frames?: unknown }).conflict_frames;
+      if (Array.isArray(conflictFrames) && conflictFrames.length) {
+        return `${message}（冲突帧：${conflictFrames.join("、")}）`;
+      }
+      const invalidAnnotations = (detail as { invalid_annotations?: unknown }).invalid_annotations;
+      if (Array.isArray(invalidAnnotations) && invalidAnnotations.length) {
+        const rows = invalidAnnotations.map((item) => {
+          if (!item || typeof item !== "object") return "未知标注";
+          const row = item as Record<string, unknown>;
+          return `标注 #${row.annotation_id ?? "?"}：${row.reason ?? "需要重新校验"}`;
+        });
+        return `${message}：${rows.join("；")}`;
+      }
       return Array.isArray(ids) && ids.length ? `${message}（视频 ID：${ids.join("、")}）` : message;
     }
   }
@@ -80,13 +104,14 @@ async function handleResponse<T>(res: Response): Promise<T> {
 
   if (!res.ok) {
     let detail = `请求失败（HTTP ${res.status}）`;
+    let rawDetail: unknown;
     try {
-      const data: unknown = await res.json();
-      detail = extractDetail(data) ?? detail;
+      rawDetail = await res.json();
+      detail = extractDetail(rawDetail) ?? detail;
     } catch {
       // 响应体不是 JSON，保留默认错误信息
     }
-    throw new ApiError(res.status, friendlyDetail(res.status, detail));
+    throw new ApiError(res.status, friendlyDetail(res.status, detail), rawDetail);
   }
 
   if (res.status === 204) return undefined as T;

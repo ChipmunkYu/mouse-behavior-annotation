@@ -36,6 +36,7 @@ export default function DetectionOverlay({
   onOptionsChange,
   refreshKey = 0,
   onTruncated,
+  trackRoleLabels = {},
 }: {
   projectId: number;
   videoId: number;
@@ -50,6 +51,7 @@ export default function DetectionOverlay({
   onOptionsChange?: (options: OverlayOptions) => void;
   refreshKey?: number;
   onTruncated?: (frame: number) => void;
+  trackRoleLabels?: Record<number, string>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheRef = useRef(new Map<number, DetectionWithTrack[]>());
@@ -170,7 +172,8 @@ export default function DetectionOverlay({
           ctx.strokeRect(x, y, w, h);
         }
         if (options.ids) {
-          const label = `track ID ${det.display_track_id}`;
+          const roleName = trackRoleLabels[det.display_track_id];
+          const label = roleName ? `track ${det.display_track_id} · ${roleName}` : `track ID ${det.display_track_id}`;
           ctx.font = "600 12px Cascadia Mono, monospace";
           const tw = ctx.measureText(label).width + 10;
           ctx.fillStyle = selected ? "#ffd43b" : "rgba(10, 14, 20, .82)";
@@ -192,7 +195,7 @@ export default function DetectionOverlay({
         pts.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(geo.ox + x * geo.scale, geo.oy + y * geo.scale, 2.5, 0, Math.PI * 2); ctx.fill(); });
       }
     }
-  }, [detections, geometry, options, selectedIds]);
+  }, [detections, geometry, options, selectedIds, trackRoleLabels]);
 
   useEffect(() => {
     if (!video) return;

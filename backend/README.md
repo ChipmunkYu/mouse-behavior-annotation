@@ -38,7 +38,8 @@ backend/
 │ ├── 0009_submission_media_authority.py # Submission 媒体 authority 与独立片段关系
 │ ├── 0010_submission_integrity_digests.py # snapshot 完整性 digest
 │ ├── 0011_immutable_authority_file_identity.py # authority 不可变 trigger 与源文件 identity
-│ └── 0012_assignment_members_invites.py # 三角色、审核能力、邀请码与视频负责人
+│ ├── 0012_assignment_members_invites.py # 三角色、审核能力、邀请码与视频负责人
+│ └── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -47,7 +48,7 @@ backend/
 │ ├── models.py # 业务、审核/媒体、YOLO 检测结果导入与 track 修正模型
 │ ├── schemas.py # Pydantic 请求/响应模型
 │ ├── auth.py # 密码哈希（PBKDF2）+ JWT
-│ ├── seed.py # 北医 12 类初始化 + demo 账号
+│ ├── seed.py # 北医演示类别定义 + demo 账号
 │ ├── deps.py # 项目成员权限依赖
 │ ├── media.py # 媒体执行器：ffmpeg/ffprobe 子进程封装（无 shell）+ 命令构造
 │ ├── media_jobs.py # 媒体任务编排：单 worker 领取 / 逐片重编码 / 重启恢复 / 修订隔离
@@ -91,7 +92,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0012），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0013），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -120,9 +121,9 @@ baseline（0001）再升级到 head（0012），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加三角色、审核能力、项目邀请码、视频负责人复合外键及 active 约束 trigger）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案永久锁定、参与对象角色 JSON、快照、审计与数据库保护）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0011 已版本化库 → 按迁移链增量 `upgrade head` 到 0012；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority。
+- 0002～0012 已版本化库 → 按迁移链增量 `upgrade head` 到 0013；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -206,7 +207,9 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 .venv\Scripts\python scripts\seed_demo.py --duration 5 --fps 30
 ```
 
-- 幂等创建/复用项目 `北医行为标注演示`，demo 用户为 `owner`；新建项目时初始化同样的项目级 12 类。
+- 幂等创建/复用项目 `北医行为标注演示`，demo 用户为 `owner`；新建时 Project、owner membership、
+  12 类演示方案、replace/lock audit 与永久锁定在同一次事务提交，中途失败不留下空项目。
+  复用既有项目时仍按原语义受控补齐/锁定缺失方案；已有锁定项目的类别方案不会被脚本变更。
 - 可选 `--video-source`：校验源文件存在后，以硬链接优先、复制回退的方式放入 `DATA_DIR/videos/demo_attack.mov`，
   数据库 `storage_path` 存相对名；不提供则仅创建 Mock 元数据。
 - 创建/复用视频 `demo_attack.mov`（默认 `duration=10.0`、`fps=25`、`status=ready`，可用 `--duration` / `--fps` 覆盖），
@@ -256,7 +259,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/projects` | 当前用户的成员项目及项目内角色 `role` |
-| `POST` | `/api/projects` | 创建项目；创建者自动获得 `owner` 并初始化 12 个类别 |
+| `POST` | `/api/projects` | 创建项目；body 必须携带至少一个完整 `categories`（名称、分组、非空颜色、参与对象模式及数量/角色）。Project、owner、规范化类别和初始 replace audit 原子写入，version=0、未锁定；非法请求不落库 |
 | `POST` | `/api/projects/join` | 使用项目邀请码幂等加入，成为 `member + can_review=false` |
 | `GET` | `/api/projects/{project_id}/members` | owner/admin 查询完整成员目录 |
 | `GET` | `/api/projects/{project_id}/assignees` | 项目成员查询 active 负责人的精简目录 |
@@ -265,11 +268,15 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `GET` | `/api/projects/{project_id}/invite` | owner/admin 查看邀请码 |
 | `POST` | `/api/projects/{project_id}/invite/reset` | owner/admin 重置邀请码并使旧码失效 |
 
-### 类别（仅项目成员可访问，返回启用类别）
+### 类别方案与运行时类别
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/projects/{project_id}/categories` | 按 `sort_order` 返回启用的类别 |
+| `GET` | `/api/projects/{project_id}/category-scheme` | active owner-only；读取版本、锁定状态及完整类别/角色方案 |
+| `PUT` | `/api/projects/{project_id}/category-scheme` | active owner-only；按 `expected_version` 原子替换未锁定方案 |
+| `POST` | `/api/projects/{project_id}/category-scheme/lock` | active owner-only；按 `expected_version` 永久锁定，重复请求幂等 |
+| `GET` | `/api/projects/{project_id}/category-scheme/audit` | active owner-only；读取追加式方案审计 |
+| `GET` | `/api/projects/{project_id}/categories` | active 项目成员；仅在方案锁定后按 `sort_order` 返回运行时类别 |
 
 ### 视频
 
@@ -557,7 +564,10 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 
 - `User`：独立登录账号，**无全局角色**。
 - `ProjectMembership`：`user_id + project_id` 唯一，`role ∈ {owner, admin, member}`；owner/admin 有效审核能力固定为 true，member 读取 `can_review`。
-- `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；创建项目时初始化北医 12 类。
+- `BehaviorCategory`：项目级类别（name/group/color/sort_order/is_active）；普通项目创建时必须原子提交至少一个完整类别，创建输入的 category id/role key 由服务端生成。创建成功后方案保持未锁定，由 owner 在管理页复核并另行永久锁定。
+- 创建与后续完整方案 PUT 共用 `category_scheme_service` 的规范化/持久化规则；创建表单本地草稿可为空，但未完整前不能发起创建请求。
+- `Project.category_scheme_*`：项目级版本与永久锁定 authority；完整方案 GET/PUT/lock/audit 均为 active owner-only，锁定后类别和角色定义由数据库 trigger 禁止旁路修改。
+- `BehaviorCategory.participant_mode/role_definitions`：`unordered|role_based` 与角色 JSON；role key 由服务端生成，role-based 总对象范围由各角色 min/max 派生。
 - `DetectionImport` / `RawDetection`：保存不可变导入与逐帧原始检测；当前修正状态由 sparse override 表达。
 - `DetectionStateOverride`：当前 draft 相对 RawDetection baseline 的稀疏 display/suppressed 状态。
 - `DraftIdentityEdit` / `DraftDetectionChange`：当前 draft 的紧凑 LIFO undo 栈与受影响 detection before/after；不是永久审计。
@@ -569,6 +579,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
     `workflow_status ∈ {draft, submitted, approved, rejected}`（默认 `draft`）、
     `annotation_revision`（≥1，默认 1）、`submitted_at` / `approved_at` / `approved_by`（可空）。
 - `Annotation`：视频级标注（起止时间、起止帧、confidence、review_status、crop_region 可空）。
+  role-based 时 `participant_roles` 是 authority，`mouse_ids` 为去重升序并集；`participant_status` 表示角色待补全，和 Track 有效性的 `mouse_id_status` 分离。
   `annotator_id` `NOT NULL + ON DELETE RESTRICT`（仍被引用时不可删用户），
   `reviewer_id` 可空并 `ON DELETE SET NULL`（删除用户不销毁标注）。
 - `Video.uploaded_by` 可空并 `ON DELETE SET NULL`（删除上传者后视频元数据保留）；
@@ -584,7 +595,9 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
   `project_id` 可空以支持全局清理任务；`status ∈ {queued, running, succeeded, failed, cancelled}`；
   批次 4 新增 `dedupe_key`（可空唯一，同视频+修订仅一行任务，防重复）与 `attempts`
   （领取/中断重排计数，重启恢复重试上限判定）。
-- 类别被标注引用时不可物理删除（外键约束）；P1 仅提供类别读取。
+- 类别被标注引用时不可物理删除；锁定后方案及角色定义由数据库 trigger 永久禁止修改。
+- `SubmissionAnnotation` 冻结类别分组、参与模式、角色定义和角色分配；Review、Clips 与正式 ZIP 读取快照。正式 `annotation.json` 同时输出 `participants` 与兼容 `mouse_ids`，`tracks.json` 不保存角色。
+- 已接受遗留边界：应用层无追加接口，现有 SubmissionAnnotation 行及快照列不可 UPDATE/DELETE，但集合仍可能被 raw SQL 追加，本期不宣称旁路完全不可追加。
 
 ## 校验规则
 
@@ -632,15 +645,15 @@ cd backend
 pytest -q
 ```
 
-`feature/assignment-module@5c447198` 的 main+assignment 联合验证已完成：聚焦联合后端为 `228 passed, 5 skipped, 1 warning`，后端全量为 `437 passed, 8 skipped, 1 warning`，assignment frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`。仅在单条测试命令中临时将 clip venv `Scripts` 加入 `PATH` 后，`backend/tests/test_media_ffmpeg_integration.py` 真实 FFmpeg/ffprobe 集成为 `5 passed, 1 warning`，使用 FFmpeg 7.1 与 ffprobe 2023-02-13 git build；该 `PATH` 不是系统配置。category 仍未合入，分工变更尚未进入 `main` 或部署，人工浏览器矩阵尚未执行。
+当前联合分支 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成导出快照、严格整数契约和测试有效性修复；Oracle 最终确认实现问题关闭。在当前 backend 目录，仅对单次命令临时将 clip venv `Scripts` 加入 `PATH` 后，后端全量为 `516 passed, 3 skipped, 1 warning`；其中 `tests/test_media_ffmpeg_integration.py` 的 5 项真实 FFmpeg/ffprobe 测试均实际执行并通过。该 `PATH` 不是系统配置，生产 FFmpeg/ffprobe 4.4.2 仍未验证。前端 production build 同步通过（62 modules）。既有类别角色人工浏览器矩阵是在合并前 category 基线上完成，不能解释为合并后已重新执行完整人工矩阵。
 
 已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-上述联合验证不替代部署、公网入口、备份恢复或浏览器人工验收。
+当前联合分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；上述联合自动验收不替代生产候选、部署、公网入口、备份恢复或合并后完整浏览器人工验收。
 
-覆盖：登录、创建项目（owner + 12 类）、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
+覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
 视频流式上传（权限/跨项目、扩展名大小写、空文件、同名不覆盖、分块流式写入、磁盘不足 507、
 写入异常/DB 失败清理、上传后流式读取与路径安全、无固定大小限制、Content-Type 仅辅助），
@@ -660,8 +673,8 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
 分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
-以及迁移验收（全新库建至 head 0012 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011）升级至 head 0012 /
+以及迁移验收（全新库建至 head 0013 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011、0012）按 0012→0013 顺序升级至 head 0013 /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -678,6 +691,5 @@ dedupe_key 唯一约束防重复任务）。
 - 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），
   本机无 ffmpeg 时不影响 API 与审核流程（任务以失败状态记录，可重试）。
-- 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；
-  类别停用/删除管理界面留待后续批次。
+- 批次 5 片段库只读接口、批次 6 项目分类 ZIP 导出与批次 7 生命周期清理已实现；类别方案采用锁定前完整替换、锁定后永久只读，不提供停用/删除状态机。
 - 未实现源视频 `needs_transcode` 的自动转码或片段库播放；本次也未扩展 crop 与 cleanup。

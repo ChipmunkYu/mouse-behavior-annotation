@@ -11,6 +11,7 @@ EXPECTED_FIELDS = {
     "end_frame",
     "behavior",
     "mouse_ids",
+    "participants",
     "detection_import_revision",
     "identity_revision",
     "crop_region",
@@ -59,6 +60,7 @@ def test_export_event_fields_and_behavior_name(ctx):
     assert ev["end_frame"] == 212
     assert ev["behavior"] == "奔跑"  # 类别名
     assert ev["mouse_ids"] == []
+    assert ev["participants"] == []
     assert ev["detection_import_revision"] == 0
     assert ev["identity_revision"] == 0
     assert ev["crop_region"] == {"x": 10, "y": 20, "w": 50, "h": 30}

@@ -8,7 +8,7 @@
 ## 功能
 
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
-- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。
+- **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。创建表单复用类别方案编辑器，本地草稿可从空列表开始，但至少一个类别的名称、分组、颜色、参与对象模式及对应数量/角色完整前不能提交；创建成功后进入未锁定的项目管理页复核，永久锁定仍需 owner 另行确认。
 - **视频库** `/projects/:projectId/videos`：
   - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
   - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
@@ -63,7 +63,7 @@
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
-- **项目管理** `/projects/:projectId/manage`（owner/admin）：管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
+- **项目管理** `/projects/:projectId/manage`：owner 可复核创建时原子保存的完整类别方案并另行永久锁定；类别方案 GET/PUT/lock/audit 为 active owner-only。owner/admin 另可管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
 - **项目内导航**：视频库 / 片段库 / 审核 / 导出 / 项目管理；审核入口按有效审核能力显示，导出和项目管理仅 owner/admin，片段库全员可见。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 
@@ -99,7 +99,7 @@ npm run build
 npm run preview
 ```
 
-当前验证：本次 member 批量自领、角色×视图入口精简、单一勾和场景全选标签的独立精简验收已通过；frontend `npm run build` 的 TypeScript/Vite 构建通过并处理 `59 modules`，后端 `backend/tests/test_assignments.py` 为 `26 passed, 1 warning`（`37.66s`）。未运行后端全量测试；人工浏览器矩阵尚未执行，pointer capture、自动滚动、真实焦点、触屏、键盘/读屏、宽度/缩放和视觉组合不能视为已验收。变更已提交到本地 `feature/assignment-module`，尚未合并 `main`、推送或部署；既有服务器状态不因本次本地实现而改变。
+当前 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成后续修复；Oracle 最终确认实现问题关闭。当前联合代码的 production `npm run build` 通过并处理 62 modules；后端全量为 `516 passed, 3 skipped, 1 warning`，且单次命令临时加入 clip venv `Scripts` 到 `PATH` 后，5 项真实 FFmpeg/ffprobe 集成测试均实际通过。既有类别角色人工矩阵是在合并前 category 基线上完成，覆盖创建与锁定、真实三文件导入、角色槽位与草稿、提交/Review、窄屏及键盘，但合并后未重新执行完整人工矩阵。当前分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；生产 FFmpeg/ffprobe 4.4.2 仍未验证。
 
 ## 目录结构
 
