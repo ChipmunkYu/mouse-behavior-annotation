@@ -46,6 +46,17 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 type StreamState = "loading" | "ok" | "empty" | "error";
 type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
+type DraftField = "category" | "start" | "end" | "participants";
+type DraftSnapshot = {
+  activeCategory: Category | null;
+  startPoint: Point | null;
+  endPoint: Point | null;
+  selectedMouseIds: number[];
+  participantRoles: Record<string, number[]>;
+  activeRoleKey: string | null;
+  unlockedRoleKeys: Set<string>;
+  roleMessage: string | null;
+};
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
 
@@ -96,6 +107,48 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function blurActiveButton(): void {
   if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+}
+
+function draftApiErrorMessages(error: unknown): string[] {
+  if (!(error instanceof ApiError)) return [error instanceof Error ? error.message : "保存行为标注失败"];
+  const messages: string[] = [];
+  const raw = error.detail && typeof error.detail === "object" && "detail" in error.detail
+    ? (error.detail as { detail?: unknown }).detail
+    : error.detail;
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      if (value.trim()) messages.push(value.trim());
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const row = value as Record<string, unknown>;
+    const text = row.message ?? row.msg ?? row.reason;
+    if (typeof text === "string") {
+      const trackId = row.track_id ?? row.display_track_id ?? row.mouse_id;
+      messages.push(trackId == null ? text : `Track ${trackId}：${text}`);
+    }
+    for (const key of ["errors", "invalid_tracks", "invalid_track_ids", "missing_tracks", "missing_track_ids", "conflicts"]) {
+      if (key in row) visit(row[key]);
+    }
+  };
+  visit(raw);
+  if (messages.length === 0) messages.push(error.message);
+  return [...new Set(messages)];
+}
+
+function inferDraftErrorFields(messages: string[]): Set<DraftField> {
+  const fields = new Set<DraftField>();
+  for (const message of messages) {
+    if (/类别|category/i.test(message)) fields.add("category");
+    if (/开始|start/i.test(message)) fields.add("start");
+    if (/结束|end|单帧|区间/i.test(message)) fields.add("end");
+    if (/track|mouse|参与|角色|检测/i.test(message)) fields.add("participants");
+  }
+  return fields;
 }
 
 /* ================= 行为类别面板（按 group 动态分组，绝不硬编码类别） ================= */
@@ -270,6 +323,10 @@ function AnnotationEditForm({
     }
     if (s < 0 || en < 0) {
       setLocalError("帧索引不能为负");
+      return;
+    }
+    if (frameCount && s >= frameCount) {
+      setLocalError(`开始帧不能超过最后一帧 ${frameCount - 1}`);
       return;
     }
     if (en <= s) {
@@ -672,9 +729,13 @@ export default function AnnotatePage() {
   const [editingAnnotationId, setEditingAnnotationId] = useState<number | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  const [draftErrorFields, setDraftErrorFields] = useState<Set<DraftField>>(new Set());
   const draftErrorRef = useRef<HTMLDivElement>(null);
   const categorySectionRef = useRef<HTMLDivElement>(null);
   const participantSectionRef = useRef<HTMLDivElement>(null);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+  const endButtonRef = useRef<HTMLButtonElement>(null);
+  const draftBeforeEditRef = useRef<DraftSnapshot | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [annotationMutationBusy, setAnnotationMutationBusy] = useState(false);
@@ -684,7 +745,7 @@ export default function AnnotatePage() {
   const [confirmDialog, confirm] = useConfirm();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [hint, setHint] = useState("播放视频，选择类别后按 S 设起点、D 设终点；Space 播放/暂停，←/→ 步进一帧");
+  const [hint, setHint] = useState("可按任意顺序选择类别、参与对象并按 S/D 设置开始/结束；Ctrl+Enter 保存");
 
   useEffect(() => {
     setParticipantNavigationActive(false);
@@ -746,11 +807,13 @@ export default function AnnotatePage() {
     setEditingAnnotationId(null);
     setShortcutHelpOpen(false);
     setDraftErrors([]);
+    setDraftErrorFields(new Set());
+    draftBeforeEditRef.current = null;
     setSubmitting(false);
     setAnnotationMutationBusy(false);
     setNavigationPending(false);
     setErrorMsg(null);
-    setHint("播放视频，选择类别后按 S 设起点、D 设终点；Space 播放/暂停，←/→ 步进一帧");
+    setHint("可按任意顺序选择类别、参与对象并按 S/D 设置开始/结束；Ctrl+Enter 保存");
   }, [pid, vid]);
 
   // 供键盘监听读取最新值（避免闭包过期）
@@ -838,12 +901,19 @@ export default function AnnotatePage() {
     const carriedIds = [...new Set([...selectedMouseIds, ...roleSelectedIds])].sort((a, b) => a - b);
     setActiveCategory(category); setRoleMessage(null);
     if (category.participant_mode === "role_based") {
-      setSelectedMouseIds(carriedIds);
       const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
-      const empty = Object.fromEntries(roles.map((r) => [r.key, []]));
-      setParticipantRoles(empty); setActiveRoleKey(roles[0]?.key ?? null); setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, empty));
+      const nextRoleKeys = new Set(roles.map((role) => role.key));
+      const compatible = activeCategory?.participant_mode === "role_based"
+        ? Object.fromEntries(roles.map((role) => [role.key, [...(participantRoles[role.key] ?? [])]]))
+        : Object.fromEntries(roles.map((role) => [role.key, []]));
+      const retainedRoleIds = new Set(Object.values(compatible).flat());
+      const pending = activeCategory?.participant_mode === "role_based"
+        ? [...new Set([...selectedMouseIds, ...Object.entries(participantRoles).filter(([key]) => !nextRoleKeys.has(key)).flatMap(([, ids]) => ids)])].filter((id) => !retainedRoleIds.has(id)).sort((a, b) => a - b)
+        : carriedIds;
+      setSelectedMouseIds(pending);
+      setParticipantRoles(compatible); setActiveRoleKey(roles[0]?.key ?? null); setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, compatible));
       setParticipantNavigationActive(false);
-      setHint(`已选择类别“${category.name}”；请在角色槽位中分配参与对象`);
+      setHint(retainedRoleIds.size ? `已选择类别“${category.name}”；已保留兼容角色分配` : `已选择类别“${category.name}”；请在角色槽位中分配参与对象`);
       return;
     } else { setSelectedMouseIds(carriedIds); setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); }
     setErrorMsg(null);
@@ -866,7 +936,7 @@ export default function AnnotatePage() {
     setParticipantFocusIndex(0);
     setParticipantNavigationActive(true);
     setHint(`已选择类别“${category.name}”；参与对象选择中：↑/↓ 移动，Space 选择，Esc 退出`);
-  }, [activeCategory, detectionImport, roleSelectedIds, selectedMouseIds, tracks]);
+  }, [activeCategory, detectionImport, participantRoles, roleSelectedIds, selectedMouseIds, tracks]);
 
   useEffect(() => {
     if (!participantNavigationActive) return;
@@ -949,7 +1019,46 @@ export default function AnnotatePage() {
 
   useEffect(() => {
     setDraftErrors([]);
+    setDraftErrorFields(new Set());
+    setSaveState((state) => state === "error" ? "idle" : state);
   }, [activeCategory, endPoint, participantRoles, selectedMouseIds, startPoint]);
+
+  function changeEditingAnnotation(id: number | null) {
+    if (id != null) {
+      if (editingAnnotationId == null) {
+        draftBeforeEditRef.current = {
+          activeCategory,
+          startPoint,
+          endPoint,
+          selectedMouseIds: [...selectedMouseIds],
+          participantRoles: Object.fromEntries(Object.entries(participantRoles).map(([key, ids]) => [key, [...ids]])),
+          activeRoleKey,
+          unlockedRoleKeys: new Set(unlockedRoleKeys),
+          roleMessage,
+        };
+      }
+      setStartPoint(null);
+      setEndPoint(null);
+      setDraftErrors([]);
+      setDraftErrorFields(new Set());
+      setEditingAnnotationId(id);
+      return;
+    }
+    setEditingAnnotationId(null);
+    const snapshot = draftBeforeEditRef.current;
+    draftBeforeEditRef.current = null;
+    if (!snapshot) return;
+    setActiveCategory(snapshot.activeCategory);
+    setStartPoint(snapshot.startPoint);
+    setEndPoint(snapshot.endPoint);
+    setSelectedMouseIds(snapshot.selectedMouseIds);
+    setParticipantRoles(snapshot.participantRoles);
+    setActiveRoleKey(snapshot.activeRoleKey);
+    setUnlockedRoleKeys(snapshot.unlockedRoleKeys);
+    setRoleMessage(snapshot.roleMessage);
+    setDraftErrors([]);
+    setDraftErrorFields(new Set());
+  }
 
   /* ---------- 数据加载 ---------- */
   const loadAnnotations = useCallback(async () => {
@@ -967,7 +1076,7 @@ export default function AnnotatePage() {
       setSelectedAnnotationId(null);
     }
     if (editingAnnotationId != null && !annotations.some((annotation) => annotation.id === editingAnnotationId)) {
-      setEditingAnnotationId(null);
+      changeEditingAnnotation(null);
     }
   }, [annotations, editingAnnotationId, selectedAnnotationId]);
 
@@ -1219,17 +1328,27 @@ export default function AnnotatePage() {
     const sp = latest.current.startPoint;
     const ep = latest.current.endPoint;
     const errors: string[] = [];
+    const errorFields = new Set<DraftField>();
     let firstTarget: HTMLElement | null = null;
     if (!cat) {
       errors.push("请选择行为类别");
+      errorFields.add("category");
       firstTarget ??= categorySectionRef.current;
     }
-    if (!sp) errors.push("请设置开始点");
-    if (!ep) errors.push("请设置结束点");
+    if (!sp) {
+      errors.push("请设置开始点");
+      errorFields.add("start");
+      firstTarget ??= startButtonRef.current;
+    }
+    if (!ep) {
+      errors.push("请设置结束点");
+      errorFields.add("end");
+      firstTarget ??= endButtonRef.current;
+    }
     if (!effectiveFps) errors.push("视频 FPS 无效，无法由帧派生规范时间");
-    if (sp && (sp.frame < 0 || (authoritativeFrameCount != null && sp.frame >= authoritativeFrameCount))) errors.push("开始帧超出视频范围");
-    if (ep && (ep.frame < 0 || (authoritativeFrameCount != null && ep.frame >= authoritativeFrameCount))) errors.push("结束帧超出视频范围");
-    if (sp && ep && ep.frame <= sp.frame) errors.push("结束帧必须大于开始帧，单帧行为不能保存");
+    if (sp && (sp.frame < 0 || (authoritativeFrameCount != null && sp.frame >= authoritativeFrameCount))) { errors.push("开始帧超出视频范围"); errorFields.add("start"); firstTarget ??= startButtonRef.current; }
+    if (ep && (ep.frame < 0 || (authoritativeFrameCount != null && ep.frame >= authoritativeFrameCount))) { errors.push("结束帧超出视频范围"); errorFields.add("end"); firstTarget ??= endButtonRef.current; }
+    if (sp && ep && ep.frame <= sp.frame) { errors.push("结束帧必须大于开始帧，单帧行为不能保存"); errorFields.add("end"); firstTarget ??= endButtonRef.current; }
     if (!detectionImport) errors.push("缺少有效 YOLO 检测数据");
 
     let participantIds: number[] = [];
@@ -1239,16 +1358,18 @@ export default function AnnotatePage() {
         const ids = participantRoles[role.key] ?? [];
         if (ids.length < role.min_count || (role.max_count != null && ids.length > role.max_count)) {
           errors.push(`角色“${role.name}”需要${role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`}个参与对象`);
+          errorFields.add("participants");
           firstTarget ??= participantSectionRef.current;
         }
         for (const id of ids) {
-          if (seen.has(id)) errors.push(`Track ${id} 不能跨角色重复分配`);
+          if (seen.has(id)) { errors.push(`Track ${id} 不能跨角色重复分配`); errorFields.add("participants"); }
           seen.add(id);
         }
       }
       participantIds = [...seen];
       if (selectedMouseIds.length) {
         errors.push(`还有 ${selectedMouseIds.length} 个 Track 待分配到角色`);
+        errorFields.add("participants");
         firstTarget ??= participantSectionRef.current;
       }
     } else if (cat) {
@@ -1256,6 +1377,7 @@ export default function AnnotatePage() {
       if (!mouseIdsValid(cat, participantIds)) {
         const max = cat.mouse_count_max;
         errors.push(`“${cat.name}”需要${max === cat.mouse_count_min ? `恰好 ${cat.mouse_count_min}` : max == null ? `至少 ${cat.mouse_count_min}` : `${cat.mouse_count_min}–${max}`}个参与对象，当前为 ${participantIds.length} 个`);
+        errorFields.add("participants");
         firstTarget ??= participantSectionRef.current;
       }
     }
@@ -1264,12 +1386,14 @@ export default function AnnotatePage() {
         const track = tracks.find((item) => item.display_track_id === id);
         if (track && (track.first_frame == null || track.last_frame == null || track.last_frame < sp.frame || track.first_frame > ep.frame)) {
           errors.push(`Track ${id} 在所选帧区间内没有有效检测`);
+          errorFields.add("participants");
           firstTarget ??= participantSectionRef.current;
         }
       }
     }
     if (errors.length) {
       setDraftErrors([...new Set(errors)]);
+      setDraftErrorFields(errorFields);
       setSaveState("error");
       window.requestAnimationFrame(() => (firstTarget ?? draftErrorRef.current)?.focus());
       return;
@@ -1312,6 +1436,7 @@ export default function AnnotatePage() {
       }
       setParticipantNavigationActive(false);
       setDraftErrors([]);
+      setDraftErrorFields(new Set());
       setErrorMsg(null);
       const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
       setHint(
@@ -1323,7 +1448,11 @@ export default function AnnotatePage() {
       if (wasLocked) await refreshVideo();
     } catch (err) {
       setSaveState("error");
-      setErrorMsg(err instanceof Error ? err.message : "保存行为标注失败");
+      const messages = draftApiErrorMessages(err);
+      setDraftErrors(messages);
+      setDraftErrorFields(inferDraftErrorFields(messages));
+      setErrorMsg(null);
+      window.requestAnimationFrame(() => draftErrorRef.current?.focus());
     } finally {
       setAnnotationMutationBusy(false);
     }
@@ -1521,6 +1650,7 @@ export default function AnnotatePage() {
     setEndPoint(null);
     setSelectedMouseIds([]);
     setDraftErrors([]);
+    setDraftErrorFields(new Set());
     setRoleMessage(null);
     setParticipantNavigationActive(false);
     setActiveCategory(retainedCategory);
@@ -1606,7 +1736,7 @@ export default function AnnotatePage() {
     if (isEditableTarget(e.target)) {
       if (e.key === "Escape" && editingAnnotationId != null) {
         e.preventDefault();
-        setEditingAnnotationId(null);
+        changeEditingAnnotation(null);
         setHint("已取消编辑行为标注");
       }
       return;
@@ -1616,7 +1746,7 @@ export default function AnnotatePage() {
     if (editingAnnotationId != null && !isVideoNavigationShortcut) {
       if (e.key === "Escape") {
         e.preventDefault();
-        setEditingAnnotationId(null);
+        changeEditingAnnotation(null);
         setHint("已取消编辑行为标注");
       }
       return;
@@ -1948,30 +2078,39 @@ export default function AnnotatePage() {
                     <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}
                   </span>
                   <span className="flex-spacer" />
-                  <div className="workspace-tabs" role="tablist"><button className={workspaceMode === "behavior" ? "active" : ""} onClick={() => setWorkspaceMode("behavior")}>行为标注</button><button className={workspaceMode === "identity" ? "active" : ""} disabled={!detectionImport} onClick={() => setWorkspaceMode("identity")}>track 修正</button></div>
+                  <div className="workspace-tabs" role="tablist" aria-label="标注工作模式">
+                    <button id="behavior-tab" type="button" role="tab" aria-selected={workspaceMode === "behavior"} aria-controls="behavior-panel" tabIndex={workspaceMode === "behavior" ? 0 : -1} className={workspaceMode === "behavior" ? "active" : ""} onClick={() => setWorkspaceMode("behavior")} onKeyDown={(e) => { if (e.key === "ArrowRight" && detectionImport) { e.preventDefault(); e.stopPropagation(); setWorkspaceMode("identity"); document.getElementById("identity-tab")?.focus(); } }}>行为标注</button>
+                    <button id="identity-tab" type="button" role="tab" aria-selected={workspaceMode === "identity"} aria-controls="identity-panel" tabIndex={workspaceMode === "identity" ? 0 : -1} className={workspaceMode === "identity" ? "active" : ""} disabled={!detectionImport} onClick={() => setWorkspaceMode("identity")} onKeyDown={(e) => { if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); setWorkspaceMode("behavior"); document.getElementById("behavior-tab")?.focus(); } }}>track 修正</button>
+                  </div>
                   <button
+                    ref={startButtonRef}
                     type="button"
-                    className={startPoint ? "btn btn-sm btn-point armed" : "btn btn-sm btn-point"}
+                    className={`${startPoint ? "btn btn-sm btn-point armed" : "btn btn-sm btn-point"}${draftErrorFields.has("start") ? " draft-field-error" : ""}`}
                     disabled={workspaceMode === "identity"}
+                    aria-invalid={draftErrorFields.has("start") || undefined}
+                    aria-describedby={draftErrorFields.has("start") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
                       e.currentTarget.blur();
                       markStart();
                     }}
-                    title="在当前时间设置起点"
+                    title="将当前显示帧设置为开始点"
                   >
-                    设起点 [S]
+                    设开始 [S]
                   </button>
                   <button
+                    ref={endButtonRef}
                     type="button"
-                    className="btn btn-sm btn-point"
+                    className={`btn btn-sm btn-point${draftErrorFields.has("end") ? " draft-field-error" : ""}`}
                     disabled={workspaceMode === "identity"}
+                    aria-invalid={draftErrorFields.has("end") || undefined}
+                    aria-describedby={draftErrorFields.has("end") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
                       e.currentTarget.blur();
                       void markEnd();
                     }}
                     title="将当前显示帧设置为结束点（不保存）"
                   >
-                    设终点 [D]
+                    设结束 [D]
                   </button>
                   <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveDraft()}>
                     {saveState === "saving" ? "保存中…" : "保存此行为 [Ctrl+Enter]"}
@@ -1981,15 +2120,18 @@ export default function AnnotatePage() {
                   </button>
                 </div>
 
-                <div className="draft-summary" aria-live="polite" style={{ padding: "0 10px 8px" }}>
+                <div className="draft-summary" style={{ padding: "0 10px 8px" }}>
                   <strong>未保存行为</strong>
                   <span className={activeCategory ? "" : "pending"}>· 类别 {activeCategory ? "✓" : "—"}</span>
                   <span className={startPoint ? "" : "pending"}>· 开始 {startPoint ? "✓" : "—"}</span>
                   <span className={endPoint ? "" : "pending"}>· 结束 {endPoint ? "✓" : "—"}</span>
                   <span>· 参与对象 {behaviorSelectedIds.length}</span>
                   {draftIntervalInvalid ? <span className="invalid">· 区间待修正</span> : null}
+                  <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+                    {`未保存行为。类别${activeCategory ? `：${activeCategory.name}` : "未设置"}；开始${startPoint ? `：帧 ${startPoint.frame}${startDisplayTime == null ? "" : `，${formatTime(startDisplayTime)}`}` : "未设置"}；结束${endPoint ? `：帧 ${endPoint.frame}${endDisplayTime == null ? "" : `，${formatTime(endDisplayTime)}`}` : "未设置"}；参与对象 ${behaviorSelectedIds.length} 个${draftIntervalInvalid ? "；区间待修正" : ""}。`}
+                  </span>
                 </div>
-                {draftErrors.length ? <div ref={draftErrorRef} className="draft-errors" role="alert" tabIndex={-1}><strong>此行为尚不能保存：</strong><ul>{draftErrors.map((message) => <li key={message}>{message}</li>)}</ul></div> : null}
+                {draftErrors.length ? <div id="draft-error-summary" ref={draftErrorRef} className="draft-errors" role="alert" tabIndex={-1}><strong>此行为尚不能保存：</strong><ul>{draftErrors.map((message) => <li key={message}>{message}</li>)}</ul></div> : null}
 
                 {timelineDuration && timelineDuration > 0 ? (
                   <div style={{ padding: "0 10px 10px" }}>
@@ -2000,6 +2142,8 @@ export default function AnnotatePage() {
                       categoryById={categoryById}
                       draftStartTime={startDisplayTime}
                       draftEndTime={endDisplayTime}
+                      draftStartFrame={startPoint?.frame}
+                      draftEndFrame={endPoint?.frame}
                       draftColor={activeCategory?.color}
                       onSeek={seekTo}
                     />
@@ -2027,13 +2171,13 @@ export default function AnnotatePage() {
               时间 <b className="mono">{formatTime(currentTime)}</b>
             </span>
             <span>
-              起点{" "}
+              开始{" "}
               <b className="mono">
                 {startDisplayTime != null ? `${formatTime(startDisplayTime)}（帧 ${startPoint?.frame}）` : startPoint ? `帧 ${startPoint.frame}` : "未设置"}
               </b>
             </span>
             <span>
-              终点{" "}
+              结束{" "}
               <b className="mono">
                 {endDisplayTime != null ? `${formatTime(endDisplayTime)}（帧 ${endPoint?.frame} inclusive）` : endPoint ? `帧 ${endPoint.frame}` : "未设置"}
               </b>
@@ -2056,14 +2200,14 @@ export default function AnnotatePage() {
               />
             </Card>
           ) : null}
-          {workspaceMode === "behavior" ? <>
-            <div ref={categorySectionRef} tabIndex={-1}>
+          {workspaceMode === "behavior" ? <div id="behavior-panel" className="workspace-panel" role="tabpanel" aria-labelledby="behavior-tab">
+            <div ref={categorySectionRef} tabIndex={-1} className={draftErrorFields.has("category") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("category") || undefined} aria-describedby={draftErrorFields.has("category") ? "draft-error-summary" : undefined}>
               <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
             </div>
-            <div ref={participantSectionRef} tabIndex={-1}>
+            <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
               {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
-          </> : <IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} />}
+          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab"><IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
           <AnnotationList
             annotations={annotations}
             categories={displayCategories}
@@ -2075,7 +2219,7 @@ export default function AnnotatePage() {
             selectedId={selectedAnnotationId}
             editingId={editingAnnotationId}
             onSelect={setSelectedAnnotationId}
-            onEditingChange={setEditingAnnotationId}
+            onEditingChange={changeEditingAnnotation}
             onEditSave={handleEditSave}
             onDelete={handleDelete}
             onEditCategoryChange={handleEditCategoryChange}

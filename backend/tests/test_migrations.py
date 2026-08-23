@@ -16,6 +16,7 @@ from app.config import Settings
 from app.main import create_app
 from app.migration import (
     MigrationStateError,
+    alembic_config,
     current_revision,
     inspect_state,
     run_migrations,
@@ -249,7 +250,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -289,6 +290,34 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
     assert _fk_options(url, "annotations", "annotator_id")["ondelete"] == "RESTRICT"
+
+
+def test_0015_blocks_dirty_single_frame_rows_until_explicitly_repaired(tmp_path):
+    from alembic import command
+    from sqlalchemy import text
+
+    url = _settings(tmp_path, "dirty-frame.db").resolved_database_url
+    _video_id, annotation_id = _build_unversioned_p1(url)
+    command.stamp(alembic_config(url), "0001")
+    upgrade_to(url, "0013")
+    db_mod.configure_engine(url)
+    with db_mod.engine.begin() as conn:
+        _lock_category_scheme_connection_if_supported(conn, project_id=1, actor_id=1)
+        conn.execute(
+            text("UPDATE annotations SET end_frame = start_frame WHERE id = :id"),
+            {"id": annotation_id},
+        )
+    with pytest.raises(RuntimeError, match="explicitly correct or remove"):
+        upgrade_to(url, "0015")
+    assert current_revision(url) == "0014"
+
+    with db_mod.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE annotations SET end_frame = start_frame + 1 WHERE id = :id"),
+            {"id": annotation_id},
+        )
+    upgrade_to(url, "0015")
+    assert current_revision(url) == "0015"
 
 
 def test_p1_old_db_upgrade_preserves_data(tmp_path):
@@ -412,7 +441,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -431,7 +460,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -505,7 +534,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -537,7 +566,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -729,7 +758,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -779,7 +808,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -850,7 +879,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -906,7 +935,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0014" in proc.stdout
+    assert "0015" in proc.stdout
 
 
 
@@ -1067,7 +1096,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1112,7 +1141,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1122,7 +1151,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1228,7 +1257,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1297,7 +1326,8 @@ def test_0014_adds_only_batch_owner_and_updated_at_with_safe_backfill(tmp_path):
             "VALUES (:project_id, 'uploading', 'pending', 'pending', 'pending', :created_at)"
         ), {"project_id": project_id, "created_at": created_at})
 
-    run_migrations(url)
+    upgrade_to(url, "0014")
+    assert current_revision(url) == "0014"
     columns = {column["name"] for column in sa_inspect(db_mod.engine).get_columns(
         "video_import_batches"
     )}
@@ -1521,7 +1551,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1563,7 +1593,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1585,7 +1615,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1695,7 +1725,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
             conn.execute(text(sql), params)
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.engine.connect() as conn:
         imports = conn.execute(
             text(
@@ -1717,7 +1747,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
 
     # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
     db_mod.ensure_schema(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
 
@@ -1830,7 +1860,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
     fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
     run_migrations(fresh_url)
     fresh_engine = create_engine(fresh_url)
-    assert current_revision(fresh_url) == "0014"
+    assert current_revision(fresh_url) == "0015"
     assert {"raw_digest", "state_digest", "metadata_digest"} <= {
         column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
     }
@@ -1865,7 +1895,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         ))
 
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         snapshot = db.get(models.DetectionSnapshot, 93)
         assert all(len(getattr(snapshot, name)) == 64 for name in
@@ -1878,7 +1908,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
     })
     run_migrations(url)
-    assert current_revision(url) == "0014"
+    assert current_revision(url) == "0015"
     with db_mod.SessionLocal() as db:
         assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
 

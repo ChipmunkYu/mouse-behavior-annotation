@@ -1,6 +1,8 @@
 """验收：有效/无效标注、更新与删除。"""
 from __future__ import annotations
 
+import pytest
+
 
 def _base_payload(category_id: int) -> dict:
     return {
@@ -34,6 +36,49 @@ def test_create_valid_annotation(ctx):
     assert ann["review_status"] == "pending"
     assert ann["confidence"] == "certain"
     assert ann["crop_region"] is None
+    assert ann["start_time"] == pytest.approx(25 / 25)
+    assert ann["end_time"] == pytest.approx(76 / 25)
+
+
+def test_create_normalizes_client_times_and_rejects_single_frame(ctx):
+    setup = ctx.make_project_with_video()
+    headers, project, categories, video = (
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
+    )
+    url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
+    payload = _base_payload(categories[0]["id"])
+    payload.update(start_time=99.25, end_time=100.5, start_frame=0, end_frame=1)
+    response = ctx.client.post(url, json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["start_time"] == 0.0
+    assert response.json()["end_time"] == pytest.approx(2 / 25)
+
+    payload.update(start_frame=7, end_frame=7)
+    response = ctx.client.post(url, json=payload, headers=headers)
+    assert response.status_code == 400
+    assert "greater than" in response.json()["detail"]
+
+    payload = _base_payload(categories[0]["id"])
+    payload.pop("start_time")
+    payload.pop("end_time")
+    response = ctx.client.post(url, json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["end_time"] == pytest.approx(76 / 25)
+
+
+def test_create_accepts_last_inclusive_frame_and_rejects_frame_count(ctx):
+    setup = ctx.make_project_with_video()
+    headers, project, categories, video = (
+        setup["headers"], setup["project"], setup["categories"], setup["video"]
+    )
+    url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
+    payload = _base_payload(categories[0]["id"])
+    payload.update(start_frame=2998, end_frame=2999)
+    response = ctx.client.post(url, json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["end_time"] == pytest.approx(120.0)
+    payload.update(start_frame=2999, end_frame=3000)
+    assert ctx.client.post(url, json=payload, headers=headers).status_code == 400
 
 
 def test_create_annotation_with_crop_region_and_confidence(ctx):
@@ -63,10 +108,10 @@ def test_create_annotation_invalid_interval(ctx):
     headers, project, categories, video = setup["headers"], setup["project"], setup["categories"], setup["video"]
     url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
 
-    # 时间顺序错误
+    # 客户端时间不具权威，错误值由服务端规范化
     payload = _base_payload(categories[0]["id"])
     payload["end_time"] = 0.5
-    assert ctx.client.post(url, json=payload, headers=headers).status_code == 400
+    assert ctx.client.post(url, json=payload, headers=headers).status_code == 201
 
     # 帧号顺序错误
     payload = _base_payload(categories[0]["id"])
@@ -126,18 +171,25 @@ def test_update_and_delete_annotation(ctx, login_headers):
     # PATCH 更新时间/类别
     resp = ctx.client.patch(
         f"{base_url}/{ann_id}",
-        json={"end_time": 5.0, "end_frame": 125, "category_id": categories[1]["id"]},
+        json={"end_frame": 125, "category_id": categories[1]["id"]},
         headers=headers,
     )
     assert resp.status_code == 200
     updated = resp.json()
-    assert updated["end_time"] == 5.0
+    assert updated["end_time"] == pytest.approx(126 / 25)
     assert updated["end_frame"] == 125
     assert updated["category_name"] == categories[1]["name"]
 
-    # PATCH 产生非法区间 → 400
+    # PATCH 只传时间会被忽略并保持帧派生值
     resp = ctx.client.patch(
         f"{base_url}/{ann_id}", json={"end_time": 0.1}, headers=headers
+    )
+    assert resp.status_code == 200
+    assert resp.json()["end_time"] == pytest.approx(126 / 25)
+
+    # PATCH 产生单帧区间 → 400
+    resp = ctx.client.patch(
+        f"{base_url}/{ann_id}", json={"start_frame": 125}, headers=headers
     )
     assert resp.status_code == 400
 
@@ -156,14 +208,14 @@ def test_update_and_delete_annotation(ctx, login_headers):
     ctx.add_member(project["id"], bob_id, role="annotator")
     bob_headers = login_headers(username="bob", password="pw123")
     assert (
-        ctx.client.patch(f"{base_url}/{ann_id}", json={"end_time": 6.0}, headers=bob_headers).status_code
+        ctx.client.patch(f"{base_url}/{ann_id}", json={"end_frame": 150}, headers=bob_headers).status_code
         == 403
     )
     assert ctx.client.delete(f"{base_url}/{ann_id}", headers=bob_headers).status_code == 403
 
     # owner 修改/删除 → 200 / 204
     assert (
-        ctx.client.patch(f"{base_url}/{ann_id}", json={"end_time": 6.0}, headers=headers).status_code
+        ctx.client.patch(f"{base_url}/{ann_id}", json={"end_frame": 150}, headers=headers).status_code
         == 200
     )
     assert ctx.client.delete(f"{base_url}/{ann_id}", headers=headers).status_code == 204
@@ -176,7 +228,7 @@ def test_annotation_not_found_in_video(ctx):
     setup = ctx.make_project_with_video()
     headers, project, video = setup["headers"], setup["project"], setup["video"]
     url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
-    assert ctx.client.patch(f"{url}/9999", json={"end_time": 9.0}, headers=headers).status_code == 404
+    assert ctx.client.patch(f"{url}/9999", json={"end_frame": 225}, headers=headers).status_code == 404
     assert ctx.client.delete(f"{url}/9999", headers=headers).status_code == 404
 
 
@@ -195,7 +247,7 @@ def test_annotation_cross_video_rejected(ctx):
         headers=headers,
     ).json()
     url2 = f"/api/projects/{project['id']}/videos/{video2['id']}/annotations"
-    assert ctx.client.patch(f"{url2}/{ann['id']}", json={"end_time": 9.0}, headers=headers).status_code == 404
+    assert ctx.client.patch(f"{url2}/{ann['id']}", json={"end_frame": 225}, headers=headers).status_code == 404
 
 
 def test_update_stale_annotation_revision_409(ctx, login_headers):
@@ -213,7 +265,7 @@ def test_update_stale_annotation_revision_409(ctx, login_headers):
 
     resp = ctx.client.patch(
         f"{base_url}/{ann_id}",
-        json={"detection_import_revision": 1, "end_time": 3.0},
+        json={"detection_import_revision": 1, "end_frame": 100},
         headers=headers,
     )
     assert resp.status_code == 409
@@ -221,7 +273,7 @@ def test_update_stale_annotation_revision_409(ctx, login_headers):
 
     resp2 = ctx.client.patch(
         f"{base_url}/{ann_id}",
-        json={"identity_revision": 1, "end_time": 3.0},
+        json={"identity_revision": 1, "end_frame": 100},
         headers=headers,
     )
     assert resp2.status_code == 409

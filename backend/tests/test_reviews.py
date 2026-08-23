@@ -616,7 +616,7 @@ def test_review_history_accumulates_across_revisions(ctx, login_headers):
 
     patch = ctx.client.patch(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations/{ann['id']}",
-        json={"end_time": 0.12, "end_frame": 3},
+        json={"end_frame": 3},
         headers=headers,
     )
     assert patch.status_code == 200

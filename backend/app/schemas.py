@@ -248,8 +248,9 @@ class AssignmentStatsOut(BaseModel):
 # ---------- 标注 ----------
 class AnnotationCreate(BaseModel):
     category_id: StrictBusinessInt
-    start_time: float = Field(ge=0)
-    end_time: float = Field(ge=0)
+    # Compatibility inputs only; the service derives persisted times from frames and FPS.
+    start_time: Optional[float] = Field(default=None, ge=0)
+    end_time: Optional[float] = Field(default=None, ge=0)
     start_frame: int = Field(ge=0)
     end_frame: int = Field(ge=0)
     confidence: str = "certain"

@@ -109,6 +109,20 @@
 .batch-count, .batch-label { flex: none; white-space: nowrap; }
 .batch-actions { display: flex; flex: none; align-items: center; gap: 6px; white-space: nowrap; }
 .batch-bar-claim .batch-actions { margin-left: auto; }
+.selection-action-bar { display: grid; grid-template-columns: auto minmax(280px, 2fr) minmax(180px, 1fr) minmax(150px, .9fr); align-items: stretch; gap: 8px; overflow: visible; }
+.selection-action-bar .batch-count { align-self: center; padding-right: 3px; }
+.selection-action-group { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; min-width: 0; padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); overflow: visible; }
+.selection-action-group .select { width: 100%; min-width: 0; max-width: none; }
+.selection-action-group small { grid-column: 1 / -1; color: var(--text-3); font-size: 10px; line-height: 1.35; }
+.selection-action-delete, .selection-action-cancel { grid-template-columns: 1fr; align-content: center; }
+.selection-action-delete .btn, .selection-action-cancel .btn { width: 100%; }
+.batch-delete-result { display: grid; gap: 3px; margin: -4px 0 12px; padding: 9px 11px; border: 1px solid var(--ok); border-radius: var(--radius); color: var(--text-2); background: var(--ok-weak); font-size: 12px; }
+.batch-delete-result strong { color: var(--ok); }
+.batch-delete-result.has-errors { border-color: var(--danger); background: var(--danger-weak); }
+.batch-delete-result.has-errors strong { color: var(--danger); }
+.batch-delete-result ul { margin: 4px 0 0; padding-left: 20px; }
+.batch-delete-result li + li { margin-top: 3px; }
+.batch-delete-result:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px 14px; min-width: 0; margin: 3px 0 9px; }
 .select-all { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--text-2); }
 .select-all span { color: var(--text-3); }
@@ -166,6 +180,9 @@
   .batch-bar .select { width: 100%; min-width: 0; max-width: none; }
   .batch-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .batch-bar-claim .batch-actions { margin-left: 0; }
+  .selection-action-bar { grid-template-columns: 1fr; }
+  .selection-action-bar .batch-count { padding: 0 2px; }
+  .selection-action-group { min-height: 76px; }
   .selection-tools { align-items: flex-start; }
   .selection-hint { display: none; }
   .view-tabs { overflow-x: auto; }
@@ -1264,6 +1281,15 @@ a:focus-visible,
   white-space: nowrap;
 }
 
+.timeline-draft-start.near-end {
+  transform: translateX(-2px);
+}
+
+.timeline-draft-start.near-end span {
+  right: 7px;
+  left: auto;
+}
+
 .playhead {
   position: absolute;
   top: 0;
@@ -1562,6 +1588,12 @@ a:focus-visible,
   outline: 2px solid color-mix(in srgb, var(--danger) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius);
+}
+
+.workspace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .pending-role-tracks {
@@ -2209,6 +2241,10 @@ a:focus-visible,
 .preview-card-actions { align-items: center; }
 .preview-card-actions .btn { margin-left: auto; }
 .preview-unavailable { color: var(--text-3); font-size: 11px; }
+.video-delete-confirm { display: grid; gap: 10px; }
+.video-delete-confirm p { margin: 0; }
+.video-delete-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--danger); background: var(--danger-weak); line-height: 1.55; }
+.ok-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .video-preview-overlay { padding: clamp(10px, 3vw, 28px); background: rgba(10, 12, 16, .76); backdrop-filter: blur(4px); }
 .video-preview-dialog { display: flex; flex-direction: column; width: min(1040px, 100%); max-width: none; max-height: calc(100vh - clamp(20px, 6vw, 56px)); max-height: calc(100dvh - clamp(20px, 6vw, 56px)); padding: 0; overflow: hidden; }
 .video-preview-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 14px 16px; border-bottom: 1px solid var(--border); }

@@ -24,6 +24,7 @@ from .conftest import auth_headers
 from .test_reviews import (_add_reviewer, _annotate_with_mouse, _review, _setup_video_with_import,
                            _submit)
 from app.submission_media_plan import build_submission_media_plan
+from app.frame_intervals import canonical_frame_interval
 from app.file_identity import hash_file_handle
 
 
@@ -112,6 +113,22 @@ def test_submit_creates_immutable_authority_and_reuses_snapshot(ctx, login_heade
         assert db.query(SubmissionAnnotation).count() == 2
         copies = db.query(SubmissionAnnotation).order_by(SubmissionAnnotation.id).all()
         assert copies[0].source_annotation_id == copies[1].source_annotation_id == annotation["id"]
+
+
+def test_submit_renormalizes_live_times_from_authoritative_frames(ctx, login_headers):
+    headers, project, video, annotation = _ready(ctx, login_headers)
+    with ctx.session_factory() as db:
+        source = db.get(Annotation, annotation["id"])
+        source.start_time = 7.75
+        source.end_time = 8.25
+        db.commit()
+    response = _submit(ctx, headers, project, video)
+    assert response.status_code == 200, response.text
+    with ctx.session_factory() as db:
+        source = db.get(Annotation, annotation["id"])
+        frozen = db.query(SubmissionAnnotation).one()
+        assert source.start_time == frozen.start_time == pytest.approx(source.start_frame / 25)
+        assert source.end_time == frozen.end_time == pytest.approx((source.end_frame + 1) / 25)
 
 
 def test_review_uses_copy_and_approval_enqueues_atomically(ctx, login_headers):
@@ -241,20 +258,42 @@ def test_snapshot_same_count_content_tamper_blocks_review(ctx, login_headers):
         assert db.get(RawDetection, raw.id).raw_track_id == original_track_id
 
 
-def test_submission_media_plan_inclusive_frames_and_crop():
+@pytest.mark.parametrize("fps", [25.0, 30.0, 60.0])
+def test_submission_media_plan_inclusive_frames_and_crop(fps):
+    end_frame = int(fps) + 9
     plan = build_submission_media_plan(start_time=1.0, end_time=1.4, start_frame=25,
-        end_frame=34, fps=25.0, frame_count=100, width=1280, height=720,
+        end_frame=end_frame, fps=fps, frame_count=int(fps) * 3, width=1280, height=720,
         crop_region={"x": 10, "y": 20, "w": 300, "h": 200})
-    assert plan.start == 1.0 and plan.end == 1.4
-    assert plan.thumbnail_at == 1.2 and plan.crop == (10, 20, 300, 200)
+    assert plan.start == pytest.approx(25 / fps)
+    assert plan.end == pytest.approx((end_frame + 1) / fps)
+    assert plan.thumbnail_at == pytest.approx((plan.start + plan.end) / 2)
+    assert plan.crop == (10, 20, 300, 200)
     assert (plan.output_width, plan.output_height) == (300, 200)
 
 
+@pytest.mark.parametrize("fps", [25.0, 30.0, 60.0])
+def test_frame_authority_first_last_and_single_frame(fps):
+    frame_count = int(fps) * 2
+    interval = canonical_frame_interval(
+        start_frame=0, end_frame=frame_count - 1, fps=fps, frame_count=frame_count
+    )
+    assert interval.start_time == 0.0
+    assert interval.end_time == pytest.approx(2.0)
+    assert interval.frame_count == frame_count
+    with pytest.raises(ValueError):
+        canonical_frame_interval(start_frame=0, end_frame=0, fps=fps, frame_count=frame_count)
+    with pytest.raises(ValueError):
+        canonical_frame_interval(
+            start_frame=frame_count - 1, end_frame=frame_count, fps=fps,
+            frame_count=frame_count,
+        )
+
+
 @pytest.mark.parametrize("kwargs", [
-    dict(start_time=9.0, end_time=1.4, start_frame=25, end_frame=34),
+    dict(start_time=9.0, end_time=1.4, start_frame=25, end_frame=25),
     dict(start_time=1.0, end_time=1.4, start_frame=25, end_frame=100),
 ])
-def test_submission_media_plan_rejects_inconsistent_time_and_frame_boundaries(kwargs):
+def test_submission_media_plan_rejects_invalid_frame_boundaries(kwargs):
     with pytest.raises(ValueError):
         build_submission_media_plan(**kwargs, fps=25.0, frame_count=100,
                                     width=1280, height=720, crop_region=None)

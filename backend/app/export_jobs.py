@@ -19,7 +19,10 @@ from .effective_detections import effective_detection_query
 from .export_contract import (FILES, safe_part, transform_detection, validate_clip_directory,
                               validate_track_frame)
 from .media import MediaCommandError
-from .media_jobs import (_truncate_error, claim_and_render_submission_clip, clip_entities_ready,
+from .media_jobs import (WorkerCleanupIncomplete, _cleanup_incomplete_error,
+                         _cleanup_paths, _is_cleanup_incomplete,
+                         _truncate_error,
+                         claim_and_render_submission_clip, clip_entities_ready,
                          reset_interrupted_job_clips, resolve_entity_path, stage_submission_input)
 from .models import (BackgroundJob, Clip, DetectionSnapshotState, Project, RawDetection,
                      Submission, SubmissionAnnotation, Video)
@@ -176,6 +179,7 @@ class ExportWorker:
         self._executor = None if self.synchronous else ThreadPoolExecutor(max_workers=1)
         self._futures = set()
         self.before_publish_hook = None
+        self.before_terminal_hook = None
 
     def start(self, *, recover: bool = True) -> None:
         if recover:
@@ -200,6 +204,8 @@ class ExportWorker:
     def _recover_interrupted(self) -> None:
         with self.session_factory() as db:
             for job in db.query(BackgroundJob).filter_by(status="running", job_type=JOB_TYPE_EXPORT):
+                if _is_cleanup_incomplete(job):
+                    continue
                 if job.attempts >= self.settings.media_max_attempts:
                     job.status, job.error, job.finished_at = "failed", "Interrupted; retry limit reached", _now()
                     _release_export_key(job)
@@ -221,13 +227,46 @@ class ExportWorker:
                 job = db.get(BackgroundJob, job_id)
                 try:
                     self._build(db, job)
+                except WorkerCleanupIncomplete as exc:
+                    db.rollback()
+                    self._record_cleanup_incomplete(job_id, exc)
                 except Exception as exc:
                     db.rollback(); job = db.get(BackgroundJob, job_id)
                     if job and job.status == "running":
+                        if self.before_terminal_hook:
+                            self.before_terminal_hook()
                         job.status, job.error, job.finished_at = "failed", _truncate_error(f"Export failed: {exc}"), _now()
                         _release_export_key(job); db.commit()
         except Exception:
             logger.exception("Export job %s crashed", job_id)
+
+    def _record_cleanup_incomplete(self, job_id: int, exc: BaseException) -> None:
+        try:
+            with self.session_factory() as db:
+                job = db.get(BackgroundJob, job_id)
+                if job is not None and job.status == "running":
+                    job.error = _cleanup_incomplete_error(exc)
+                    if getattr(exc, "result_path", None):
+                        job.result_path = exc.result_path
+                    job.finished_at = None
+                    db.commit()
+        except Exception:
+            logger.exception("Failed to record incomplete cleanup for export job %s", job_id)
+
+    @staticmethod
+    def _cleanup_artifacts(staging: Path, temp_zip: Path, sources, *, final: Path | None = None) -> None:
+        errors = []
+        if staging.exists():
+            try:
+                shutil.rmtree(staging)
+            except OSError as exc:
+                errors.append(f"remove export staging {staging}: {exc}")
+        try:
+            _cleanup_paths([temp_zip, *sources, final], operation="remove export artifact")
+        except WorkerCleanupIncomplete as exc:
+            errors.append(str(exc))
+        if errors:
+            raise WorkerCleanupIncomplete("; ".join(errors))
 
     def _frozen_rows(self, db: Session, job: BackgroundJob, *, require_ready: bool):
         payload = job.payload or {}
@@ -378,10 +417,11 @@ class ExportWorker:
         db.rollback()
         staging = self.settings.exports_dir / f".export-{job.id}.staging"
         temp_zip = self.settings.exports_dir / f".export-{job.id}.tmp.zip"
-        shutil.rmtree(staging, ignore_errors=True); temp_zip.unlink(missing_ok=True)
-        staging.mkdir(parents=True, exist_ok=True)
         staged_sources = {}; expected_dirs = set(); used = set(); final = None
+        published = False
         try:
+            self._cleanup_artifacts(staging, temp_zip, [])
+            staging.mkdir(parents=True, exist_ok=True)
             for index, (annotation, submission, clip) in enumerate(rows, 1):
                 source = staged_sources.get(submission.id)
                 if source is None:
@@ -409,6 +449,8 @@ class ExportWorker:
                     if path.is_file(): archive.write(path, path.relative_to(staging).as_posix())
             self._validate_zip(temp_zip, expected_dirs)
             if self.before_publish_hook: self.before_publish_hook()
+            # Transaction A is intentionally short: validate the claim, atomically publish,
+            # and persist the published path while the job remains running.
             db.rollback(); db.execute(text("BEGIN IMMEDIATE"))
             current = db.get(BackgroundJob, job.id)
             if current is None or current.status != "running" or current.payload != frozen_payload:
@@ -420,14 +462,45 @@ class ExportWorker:
             final_name = f"export_project_{job.project_id}_{job.id}.zip"
             final = self.settings.exports_dir / final_name
             os.replace(temp_zip, final)
-            current.status, current.progress, current.result_path = "succeeded", 100, final_name
+            current.result_path = final_name
+            db.commit()
+            published = True
+
+            # Large filesystem cleanup must never hold SQLite's write lock.
+            self._cleanup_artifacts(staging, temp_zip, staged_sources.values())
+
+            # Transaction B fresh-reads and CAS-validates the same running claim/payload.
+            db.expire_all(); db.execute(text("BEGIN IMMEDIATE"))
+            current = db.get(BackgroundJob, job.id)
+            if (current is None or current.status != "running" or current.payload != frozen_payload
+                    or current.result_path != final_name):
+                db.rollback()
+                raise WorkerCleanupIncomplete("published export claim/payload changed before terminal commit")
+            if self.before_terminal_hook:
+                self.before_terminal_hook()
+            current.status, current.progress = "succeeded", 100
             current.finished_at = _now(); current.expires_at = _now() + timedelta(days=self.settings.export_retention_days)
             _release_export_key(current); db.commit()
-        except Exception:
+        except WorkerCleanupIncomplete as exc:
             db.rollback()
-            if final is not None:
-                final.unlink(missing_ok=True)
+            if published:
+                # Transaction A made this path authoritative. Preserve both the file and
+                # result_path for deterministic administrator cleanup/recovery.
+                raise
+            try:
+                self._cleanup_artifacts(staging, temp_zip, staged_sources.values(), final=final)
+            except WorkerCleanupIncomplete as cleanup_exc:
+                result_path = final.name if final is not None and final.exists() else None
+                raise WorkerCleanupIncomplete(f"{exc}; {cleanup_exc}", result_path=result_path) from exc
             raise
-        finally:
-            shutil.rmtree(staging, ignore_errors=True); temp_zip.unlink(missing_ok=True)
-            for source in staged_sources.values(): source.unlink(missing_ok=True)
+        except Exception as exc:
+            db.rollback()
+            if published:
+                # Once transaction A commits, deleting the final would contradict result_path.
+                raise WorkerCleanupIncomplete(f"post-publish export failure: {exc}") from exc
+            try:
+                self._cleanup_artifacts(staging, temp_zip, staged_sources.values(), final=final)
+            except WorkerCleanupIncomplete as cleanup_exc:
+                result_path = final.name if final is not None and final.exists() else None
+                raise WorkerCleanupIncomplete(str(cleanup_exc), result_path=result_path) from exc
+            raise

@@ -104,7 +104,7 @@ def test_annotation_write_vs_submit_only_one_commits(ctx, login_headers, monkeyp
         base = f"/api/projects/{project_id}/videos/{video_id}/annotations"
         if operation == "update":
             return ctx.client.patch(f"{base}/{annotation['id']}",
-                json={"end_time": 0.2, "identity_revision": 0}, headers=headers)
+                json={"end_frame": 3, "identity_revision": 0}, headers=headers)
         if operation == "delete":
             return ctx.client.delete(f"{base}/{annotation['id']}", headers=headers)
         return ctx.client.post(base, json={"category_id": category_id, "start_time": 0.04,
@@ -126,10 +126,10 @@ def test_annotation_write_vs_submit_only_one_commits(ctx, login_headers, monkeyp
         video = db.get(models.Video, video_id)
         stored = db.get(models.Annotation, annotation["id"])
         if video.workflow_status == "submitted":
-            assert stored is not None and stored.end_time == annotation["end_time"]
+            assert stored is not None and stored.end_frame == annotation["end_frame"]
         else:
             assert video.annotation_revision == 3
-            if operation == "update": assert stored.end_time == 0.2
+            if operation == "update": assert stored.end_frame == 3
             elif operation == "delete": assert stored is None
             else: assert db.query(models.Annotation).filter_by(video_id=video_id).count() == 2
 
@@ -149,7 +149,7 @@ def test_submitted_hard_locks_annotation_crud_and_replacement(ctx, login_headers
         ),
         ctx.client.patch(
             f"/api/projects/{project_id}/videos/{video_id}/annotations/{annotation['id']}",
-            json={"end_time": 0.2}, headers=headers,
+            json={"end_frame": 3}, headers=headers,
         ),
         ctx.client.delete(
             f"/api/projects/{project_id}/videos/{video_id}/annotations/{annotation['id']}",
@@ -203,7 +203,7 @@ def test_future_submitted_submission_hard_locks_annotation_crud_and_replacement(
         ),
         ctx.client.patch(
             f"/api/projects/{project_id}/videos/{video_id}/annotations/{annotation['id']}",
-            json={"end_time": .2}, headers=headers,
+            json={"end_frame": 3}, headers=headers,
         ),
         ctx.client.delete(
             f"/api/projects/{project_id}/videos/{video_id}/annotations/{annotation['id']}",

@@ -39,12 +39,6 @@ export function formatDate(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 秒 → 帧（fps 未知时按 DEFAULT_FPS 估算，调用方需自行保证一致性）。 */
-export function timeToFrame(time: number, fps: number | null | undefined): number {
-  const f = fps && fps > 0 ? fps : 30;
-  return Math.max(0, Math.round(time * f));
-}
-
 /** 双端 inclusive 帧区间的规范时间边界。帧是权威，时间只由帧与 FPS 派生。 */
 export function frameToStartTime(frame: number, fps: number): number {
   return Math.max(0, Math.trunc(frame)) / fps;

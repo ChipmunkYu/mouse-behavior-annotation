@@ -246,6 +246,10 @@ class Annotation(Base):
     __tablename__ = "annotations"
     __table_args__ = (
         CheckConstraint(
+            "start_frame >= 0 AND end_frame > start_frame",
+            name="ck_annotations_frame_range",
+        ),
+        CheckConstraint(
             "participant_status IN ('valid', 'needs_participants')",
             name="ck_annotations_participant_status",
         ),
@@ -1119,7 +1123,7 @@ class SubmissionAnnotation(Base):
             name="ck_submission_annotations_participant_mode",
         ),
         CheckConstraint(
-            "start_frame >= 0 AND end_frame >= start_frame",
+            "start_frame >= 0 AND end_frame > start_frame",
             name="ck_submission_annotations_frame_range",
         ),
         CheckConstraint(

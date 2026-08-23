@@ -54,6 +54,8 @@ from ..schemas import (
 )
 from ..track_ids import TRACK_ID_UPPER_BOUND, is_valid_track_id, next_display_track_id
 from ..video_write_gate import video_write_gate
+from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
+from ..video_operation_gate import VideoOperationBusyError
 
 router = APIRouter(tags=["detection-imports"])
 
@@ -61,9 +63,18 @@ router = APIRouter(tags=["detection-imports"])
 def _after_corrected_export_candidate() -> None:
     """Test synchronization point after materialization and before publish validation."""
 
+
+def _after_import_video_visible_commit() -> None:
+    """Test synchronization point while the new video's operation gate is held."""
+
+
+def _before_batch_upload_commit() -> None:
+    """Test synchronization point after file save and before the guarded batch update."""
+
 ALLOWED_TRACKS_EXT = ".jsonl"
 ALLOWED_METADATA_EXT = ".json"
 SUPPORTED_SCHEMA_VERSIONS = ["1.0"]
+_BATCH_UPLOAD_CONFLICT_DETAIL = "Import batch no longer accepts file uploads"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +175,11 @@ def _require_batch_access(
     if not is_manager(membership) and batch.created_by != membership.user_id:
         raise HTTPException(status_code=403, detail="Import batch belongs to another user")
     return batch
+
+
+def _require_uploadable_batch(batch: VideoImportBatch) -> None:
+    if batch.status != "uploading" or batch.created_video_id is not None:
+        raise HTTPException(status_code=409, detail=_BATCH_UPLOAD_CONFLICT_DETAIL)
 
 
 def _require_video(db: Session, video_id: int, project_id: int) -> Video:
@@ -764,8 +780,7 @@ async def upload_batch_file(
         raise HTTPException(status_code=403, detail="Project membership is not active")
 
     batch = _require_batch_access(db, batch_id, project_id, membership)
-    if batch.status != "uploading":
-        raise HTTPException(status_code=409, detail="Import batch is not accepting uploads")
+    _require_uploadable_batch(batch)
 
     raw_name = file.filename or ""
     if not raw_name:
@@ -811,6 +826,7 @@ async def upload_batch_file(
         VideoImportBatch.id == batch_id,
         VideoImportBatch.project_id == project_id,
         VideoImportBatch.status == "uploading",
+        VideoImportBatch.created_video_id.is_(None),
         state_column != "uploading",
     ).update({
         state_column: "uploading",
@@ -863,10 +879,12 @@ async def upload_batch_file(
         }
         if role == "video":
             values[VideoImportBatch.video_filename] = display_name
+        _before_batch_upload_commit()
         published = db.query(VideoImportBatch).filter(
             VideoImportBatch.id == batch_id,
             VideoImportBatch.project_id == project_id,
             VideoImportBatch.status == "uploading",
+            VideoImportBatch.created_video_id.is_(None),
             state_column == "uploading",
         ).update(values, synchronize_session=False)
         if published != 1:
@@ -991,6 +1009,9 @@ def complete_import_batch(
             },
         )
 
+    if batch.status != "uploading":
+        raise HTTPException(status_code=409, detail="Import batch cannot be completed in its current state")
+
     if batch.video_upload_state != "uploaded" or not batch.video_path:
         raise HTTPException(status_code=400, detail="Video file must be uploaded before completing the batch")
 
@@ -1000,7 +1021,7 @@ def complete_import_batch(
     if not video_path.is_file():
         raise HTTPException(status_code=400, detail="Video file not found on disk")
 
-    # Fix 1: 先标记 processing 防止并发
+    # Atomically claim completion only when no persistent upload slot is active.
     activity = datetime.utcnow()
     claimed = db.query(VideoImportBatch).filter(
         VideoImportBatch.id == batch_id,
@@ -1024,12 +1045,15 @@ def complete_import_batch(
     batch = _require_batch(db, batch_id, project_id)
 
     # Fix 1: 使用已有 video_id，避免重复创建视频
-    if batch.created_video_id is not None:
+    linked_video_id = batch.created_video_id
+    if linked_video_id is not None:
         video = db.get(Video, batch.created_video_id)
         if video is None:
-            # video 被外部删除，创建新的
-            batch.created_video_id = None
-            video = None
+            batch.status = "failed"
+            batch.validation_errors = {"created_video_missing": True}
+            batch.updated_at = datetime.utcnow()
+            db.commit()
+            raise HTTPException(status_code=409, detail="Import batch video was deleted")
         else:
             video_id_created = video.id
     else:
@@ -1058,8 +1082,6 @@ def complete_import_batch(
             db.add(video)
             db.flush()
             video_id_created = video.id
-            batch.created_video_id = video_id_created
-            db.commit()
         except IntegrityError as exc:
             db.rollback()
             if not is_assignee_write_conflict(exc):
@@ -1073,26 +1095,68 @@ def complete_import_batch(
             batch.updated_at = datetime.utcnow()
             db.commit()
             raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
-    else:
-        video_id_created = video.id
 
+    try:
+        with request.app.state.video_operation_gate.acquire(video_id_created):
+            try:
+                # The gate is acquired before the commit that first exposes a new
+                # Video ID, and remains held through every completion/rollback path.
+                if linked_video_id is None:
+                    batch.created_video_id = video_id_created
+                    batch.updated_at = datetime.utcnow()
+                    db.commit()
+                    _after_import_video_visible_commit()
+                else:
+                    db.expire_all()
+                    video = db.get(Video, video_id_created)
+                    if video is None or video.project_id != project_id:
+                        batch = _require_batch(db, batch_id, project_id)
+                        batch.status = "failed"
+                        batch.validation_errors = {"created_video_missing": True}
+                        batch.updated_at = datetime.utcnow()
+                        db.commit()
+                        raise HTTPException(status_code=409, detail="Import batch video was deleted")
+                return _finish_import_batch(
+                    db=db, batch_id=batch_id, project_id=project_id,
+                    video_id=video_id_created, user_id=membership.user_id,
+                    settings=settings,
+                )
+            except BaseException:
+                db.rollback()
+                batch = _require_batch(db, batch_id, project_id)
+                if batch.status == "processing":
+                    batch.status = "failed"
+                    batch.validation_errors = {"import_failed": True}
+                    batch.updated_at = datetime.utcnow()
+                    db.commit()
+                raise
+    except VideoOperationBusyError as exc:
+        db.rollback()
+        batch = _require_batch(db, batch_id, project_id)
+        batch.status = "uploading"
+        batch.validation_errors = {"video_operation_busy": True}
+        batch.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=409, detail=VIDEO_OPERATION_BUSY_DETAIL) from exc
+
+
+def _finish_import_batch(*, db: Session, batch_id: int, project_id: int,
+                         video_id: int, user_id: int, settings):
+    """Finish one claimed batch while its app-scoped video gate is held."""
+    batch = _require_batch(db, batch_id, project_id)
+    video = db.get(Video, video_id)
     tracks_ready = batch.tracks_upload_state == "uploaded" and batch.tracks_path
     metadata_ready = batch.metadata_upload_state == "uploaded" and batch.metadata_path
-
     if not tracks_ready or not metadata_ready:
-        # Fix 1: 仅有视频无检测数据 → video_only 状态
         batch.status = "video_only"
         batch.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(batch)
         return _build_video_only_response(batch)
 
-    # 先提交视频，确保视频行不因后续导入失败而回滚
+    # The video is durable here, but DELETE remains excluded by the operation gate.
     db.commit()
-
     detection_imports_dir = settings.detection_imports_dir.resolve()
-
-    # Fix 1: DB 级别事务校验 — 在事务中重新读取 batch 确认状态仍为 processing
     try:
         meta_info, seen_frames, flat_detections = _run_validation_pipeline(
             batch.tracks_path, batch.metadata_path, detection_imports_dir, settings
@@ -1108,44 +1172,27 @@ def complete_import_batch(
         batch.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(batch)
-        validation_errors = (
-            exc.detail.get("validation_errors", []) if isinstance(exc.detail, dict) else []
-        )
+        validation_errors = exc.detail.get("validation_errors", []) if isinstance(exc.detail, dict) else []
         if any("track_id must satisfy" in str(error) for error in validation_errors):
-            # Domain violations are rejected as input errors before ORM insertion;
-            # retain the failed batch record while preserving HTTP 400 semantics.
-            raise exc
+            raise
         return {
-            "batch_id": batch.id,
-            "video_id": batch.created_video_id,
-            "created_video_id": batch.created_video_id,
-            "status": "failed",
+            "batch_id": batch.id, "video_id": batch.created_video_id,
+            "created_video_id": batch.created_video_id, "status": "failed",
             "validation_errors": batch.validation_errors,
             "message": "Validation failed. Fix the files and create a new batch to retry.",
         }
 
     try:
-        # Fix 1: DB 级检查 — 事务中重新读取 batch
         batch_check = db.get(VideoImportBatch, batch_id)
         if batch_check is None or batch_check.status != "processing":
-            raise HTTPException(
-                status_code=409,
-                detail="Batch state changed during processing; concurrent completion detected",
-            )
-
+            raise HTTPException(status_code=409, detail="Batch state changed during processing; concurrent completion detected")
         imp = _insert_detection_import_data(
-            db=db,
-            video_id=video_id_created,
-            revision=1,
-            meta_info=meta_info,
-            tracks_rel_path=batch.tracks_path,
-            metadata_rel_path=batch.metadata_path,
-            seen_frames=seen_frames,
-            flat_detections=flat_detections,
-            user_id=membership.user_id,
-            detection_imports_dir=detection_imports_dir,
+            db=db, video_id=video_id, revision=1, meta_info=meta_info,
+            tracks_rel_path=batch.tracks_path, metadata_rel_path=batch.metadata_path,
+            seen_frames=seen_frames, flat_detections=flat_detections,
+            user_id=user_id, detection_imports_dir=detection_imports_dir,
         )
-        video_ref = db.get(Video, video_id_created)
+        video_ref = db.get(Video, video_id)
         video_ref.fps = meta_info["fps"]
         video_ref.width = meta_info["width"]
         video_ref.height = meta_info["height"]
@@ -1171,7 +1218,6 @@ def complete_import_batch(
         batch_ref.updated_at = datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=500, detail="Failed to import detection data")
-
     return _build_ready_response(db, batch_ref, imp)
 
 
@@ -1370,6 +1416,7 @@ async def replace_detection_import(
     try:
         with video_write_gate(
             db, project_id=project_id, video_id=video_id,
+            operation_gate=request.app.state.video_operation_gate,
             expected_active_import_id=initial_active_id,
             expected_detection_revision=initial_detection_revision,
             expected_edit_version=initial_edit_version,
@@ -1735,6 +1782,7 @@ def export_corrected_detections(
     _after_corrected_export_candidate()
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=initial_import_id,
         expected_detection_revision=initial_detection_revision,
         expected_edit_version=initial_edit_version,

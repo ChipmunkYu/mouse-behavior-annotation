@@ -91,9 +91,17 @@ def test_known_temps_orphan_and_original_video_retention(tmp_path):
     referenced = settings.exports_dir / "export_project_9_9.zip"
     staging = settings.exports_dir / ".export_9_8.staging"
     staging.mkdir()
-    for path in (old_temp, boundary, original, unknown, media_temp, detection_temp, outside_detection_temp, orphan, referenced):
+    current_staging = settings.exports_dir / ".export-8.staging"
+    current_staging.mkdir()
+    current_temp_zip = settings.exports_dir / ".export-8.tmp.zip"
+    submission_staging = settings.videos_dir / (
+        ".submission-media-job-8-" + "f" * 32 + ".staging"
+    )
+    for path in (old_temp, boundary, original, unknown, media_temp, detection_temp,
+                 outside_detection_temp, orphan, referenced, current_temp_zip, submission_staging):
         path.write_bytes(b"x")
-    for path in (old_temp, media_temp, detection_temp, outside_detection_temp, orphan, staging):
+    for path in (old_temp, media_temp, detection_temp, outside_detection_temp, orphan,
+                 staging, current_staging, current_temp_zip, submission_staging):
         _age(path, now, 25)
     _age(boundary, now, 24)
     with db_mod.SessionLocal() as db:
@@ -101,7 +109,8 @@ def test_known_temps_orphan_and_original_video_retention(tmp_path):
         db.commit()
         run_retention_cleanup(db, settings, now=now)
     assert not old_temp.exists() and not media_temp.exists() and not detection_temp.exists() and not orphan.exists()
-    assert not staging.exists()
+    assert not staging.exists() and not current_staging.exists()
+    assert not current_temp_zip.exists() and not submission_staging.exists()
     assert boundary.exists() and original.exists() and unknown.exists() and referenced.exists()
     assert outside_detection_temp.exists()
 

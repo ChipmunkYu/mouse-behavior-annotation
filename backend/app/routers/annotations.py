@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from ..cleanup_io import append_cleanup_issues, remove_checked, safe_path
 from ..database import get_db
 from ..deps import project_access
 from ..effective_detections import has_effective_detection
+from ..frame_intervals import FrameInterval, canonical_frame_interval
 from ..models import (
     Annotation,
     BehaviorCategory,
@@ -97,20 +99,26 @@ def _legacy_event_record(annotation: Annotation, clip_file: str | None = None) -
     }
 
 
-def _validate_interval(
-    start_time: float | None,
-    end_time: float | None,
-    start_frame: int | None,
-    end_frame: int | None,
-) -> None:
-    if start_time is not None and start_time < 0:
-        raise HTTPException(status_code=400, detail="start_time must be >= 0")
-    if start_frame is not None and start_frame < 0:
-        raise HTTPException(status_code=400, detail="start_frame must be >= 0")
-    if end_time is not None and start_time is not None and end_time <= start_time:
-        raise HTTPException(status_code=400, detail="end_time must be greater than start_time")
-    if end_frame is not None and start_frame is not None and end_frame <= start_frame:
-        raise HTTPException(status_code=400, detail="end_frame must be greater than start_frame")
+def _frame_authority(video: Video, imp: DetectionImport | None) -> tuple[float, int | None]:
+    fps = imp.fps if imp is not None else video.fps
+    if fps is None or not math.isfinite(fps) or fps <= 0:
+        raise HTTPException(status_code=400, detail="Video FPS is required for annotations")
+    frame_count = imp.frame_count if imp is not None else None
+    if (frame_count is None and video.duration is not None
+            and math.isfinite(video.duration)):
+        frame_count = int(round(video.duration * fps))
+    return fps, frame_count
+
+
+def _canonical_interval(video: Video, imp: DetectionImport | None,
+                        start_frame: int, end_frame: int) -> FrameInterval:
+    fps, frame_count = _frame_authority(video, imp)
+    try:
+        return canonical_frame_interval(
+            start_frame=start_frame, end_frame=end_frame, fps=fps, frame_count=frame_count
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _get_video_in_project(db: Session, project_id: int, video_id: int) -> Video:
@@ -426,6 +434,7 @@ def create_annotation(
     observed_import = _get_active_import(db, video_id)
     with video_write_gate(
         db, project_id=project_id, video_id=video_id,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,
@@ -437,9 +446,8 @@ def create_annotation(
             raise HTTPException(status_code=400, detail="Category is disabled")
         if body.confidence not in VALID_CONFIDENCE:
             raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
-        _validate_interval(body.start_time, body.end_time, body.start_frame, body.end_frame)
-
         imp = state.detection_import
+        interval = _canonical_interval(video, imp, body.start_frame, body.end_frame)
         mouse_ids: list[int] = []
         mouse_id_status = "needs_mouse_ids"
         di_rev = imp.revision if imp else 0
@@ -473,7 +481,7 @@ def create_annotation(
         plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
         annotation = Annotation(
             video_id=video_id, annotator_id=access[1].user_id, category_id=category.id,
-            start_time=body.start_time, end_time=body.end_time,
+            start_time=interval.start_time, end_time=interval.end_time,
             start_frame=body.start_frame, end_frame=body.end_frame,
             confidence=body.confidence, review_status="pending", crop_region=body.crop_region,
             mouse_ids=mouse_ids, mouse_id_status=mouse_id_status,
@@ -529,6 +537,7 @@ def update_annotation(
     observed_import = _get_active_import(db, video_id)
     with video_write_gate(
         db, project_id=project_id, video_id=video_id,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,
@@ -558,12 +567,16 @@ def update_annotation(
         if body.confidence is not None and body.confidence not in VALID_CONFIDENCE:
             raise HTTPException(status_code=400, detail=f"confidence must be one of {sorted(VALID_CONFIDENCE)}")
 
+        target_start_frame = body.start_frame if body.start_frame is not None else annotation.start_frame
+        target_end_frame = body.end_frame if body.end_frame is not None else annotation.end_frame
+        interval = _canonical_interval(video, state.detection_import, target_start_frame, target_end_frame)
         changed_fields = {
-            field for field in ("category_id", "start_time", "end_time", "start_frame",
-                                "end_frame", "confidence", "crop_region")
+            field for field in ("category_id", "start_frame", "end_frame", "confidence", "crop_region")
             if getattr(body, field) is not None
             and getattr(body, field) != getattr(annotation, field)
         }
+        if (annotation.start_time != interval.start_time or annotation.end_time != interval.end_time):
+            changed_fields.update({"start_time", "end_time"})
         target_category = category if body.category_id is not None else annotation.category
         if target_category.participant_mode == "role_based" and "mouse_ids" in body.model_fields_set:
             raise HTTPException(status_code=422, detail="role_based annotations must not submit mouse_ids")
@@ -590,12 +603,10 @@ def update_annotation(
             annotation.confidence = body.confidence
         if body.crop_region is not None:
             annotation.crop_region = body.crop_region
-        for field in ("start_time", "end_time", "start_frame", "end_frame"):
-            value = getattr(body, field)
-            if value is not None:
-                setattr(annotation, field, value)
-        _validate_interval(annotation.start_time, annotation.end_time,
-                           annotation.start_frame, annotation.end_frame)
+        annotation.start_frame = interval.start_frame
+        annotation.end_frame = interval.end_frame
+        annotation.start_time = interval.start_time
+        annotation.end_time = interval.end_time
 
         if target_category.participant_mode == "role_based":
             assert canonical_roles is not None
@@ -656,6 +667,7 @@ def delete_annotation(
     observed_import = _get_active_import(db, video_id)
     with video_write_gate(
         db, project_id=project_id, video_id=video_id,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,

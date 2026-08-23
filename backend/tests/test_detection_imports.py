@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.track_ids import TRACK_ID_UPPER_BOUND
+from app import models
+from app.routers import detection_imports as imports_router
+from fastapi.testclient import TestClient
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +384,99 @@ def test_upload_independent_retry(ctx, login_headers):
     assert p1 != p2
 
 
+def test_complete_retries_after_active_upload_slot_publishes(ctx, login_headers, monkeypatch):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+    detection_dir = ctx.client.app.state.settings.detection_imports_dir
+    before_detection_files = {path.name for path in detection_dir.iterdir()}
+    reached = Barrier(2)
+    release = Event()
+
+    def pause_upload():
+        reached.wait(timeout=60)
+        assert release.wait(timeout=60)
+
+    monkeypatch.setattr(imports_router, "_before_batch_upload_commit", pause_upload)
+    with TestClient(ctx.client.app) as upload_client, ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            _upload_file, upload_client, pid, batch["id"], "tracks", "tracks.jsonl",
+            make_tracks_jsonl(), headers,
+        )
+        reached.wait(timeout=60)
+        blocked_once = ctx.client.post(
+            f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+        )
+        blocked_twice = ctx.client.post(
+            f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+        )
+        release.set()
+        uploaded = future.result(timeout=90)
+
+    assert blocked_once.status_code == 409
+    assert blocked_once.json()["detail"] == "Import batch has a file upload in progress"
+    assert blocked_twice.status_code == 409
+    assert blocked_twice.json()["detail"] == "Import batch has a file upload in progress"
+    assert uploaded.status_code == 200, uploaded.text
+
+    completed = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "ready"
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        assert stored.status == "ready"
+        assert db.query(models.Video).filter_by(project_id=pid).count() == 1
+        assert db.query(models.DetectionImport).filter_by(video_id=stored.created_video_id).count() == 1
+        referenced = {
+            name
+            for imported in db.query(models.DetectionImport).all()
+            for name in (imported.tracks_path, imported.metadata_path)
+            if name
+        }
+    after_detection_files = {path.name for path in detection_dir.iterdir()}
+    assert after_detection_files == referenced
+    assert len(after_detection_files) == len(before_detection_files) == 2
+    assert len(after_detection_files - before_detection_files) == 1
+    assert len(before_detection_files - after_detection_files) == 1
+
+
+def test_upload_failure_after_save_removes_new_file(ctx, login_headers, monkeypatch):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    detection_dir = ctx.client.app.state.settings.detection_imports_dir
+    before = {path.name for path in detection_dir.iterdir()} if detection_dir.exists() else set()
+
+    def fail_after_save():
+        raise RuntimeError("injected upload failure")
+
+    monkeypatch.setattr(imports_router, "_before_batch_upload_commit", fail_after_save)
+    failed = _upload_file(
+        ctx.client, pid, batch["id"], "tracks", "tracks.jsonl",
+        make_tracks_jsonl(), headers,
+    )
+
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == "Failed to save uploaded file"
+    assert {path.name for path in detection_dir.iterdir()} == before
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        assert stored.status == "uploading"
+        assert stored.tracks_path is None
+        assert stored.tracks_upload_state == "pending"
+
+    monkeypatch.setattr(imports_router, "_before_batch_upload_commit", lambda: None)
+    retried = _upload_file(
+        ctx.client, pid, batch["id"], "tracks", "tracks.jsonl",
+        make_tracks_jsonl(), headers,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["tracks_upload_state"] == "uploaded"
+
+
 # ---------------------------------------------------------------------------
 # 完成导入：完整三文件
 # ---------------------------------------------------------------------------
@@ -435,6 +533,116 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
 
         video = db.get(models.Video, body["video_id"])
         assert video.detection_import_revision == 1
+
+
+def test_complete_holds_delete_gate_from_first_visible_commit(
+    ctx, login_headers, monkeypatch
+):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+    visible = Barrier(2)
+    release = Event()
+
+    def pause_after_visible_commit():
+        visible.wait(timeout=60)
+        assert release.wait(timeout=60)
+
+    monkeypatch.setattr(imports_router, "_after_import_video_visible_commit", pause_after_visible_commit)
+    with TestClient(ctx.client.app) as complete_client, ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            complete_client.post,
+            f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete",
+            headers=headers,
+        )
+        visible.wait(timeout=60)
+        with ctx.session_factory() as db:
+            video_id = db.get(models.VideoImportBatch, batch["id"]).created_video_id
+        deleted = ctx.client.delete(
+            f"/api/projects/{pid}/videos/{video_id}", headers=headers,
+        )
+        release.set()
+        completed = future.result(timeout=90)
+
+    assert sorted((deleted.status_code, completed.status_code)) == [200, 409]
+    with ctx.session_factory() as db:
+        stored_batch = db.get(models.VideoImportBatch, batch["id"])
+        assert stored_batch.status == "ready"
+        assert db.get(models.Video, video_id) is not None
+        imported = db.query(models.DetectionImport).filter_by(video_id=video_id).one()
+        assert db.query(models.RawDetection).filter_by(detection_import_id=imported.id).count() == 12
+
+
+def test_exception_after_first_visible_commit_releases_gate_and_allows_delete(
+    ctx, login_headers, monkeypatch
+):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+
+    def fail_after_visible_commit():
+        raise RuntimeError("injected post-visibility failure")
+
+    monkeypatch.setattr(imports_router, "_after_import_video_visible_commit", fail_after_visible_commit)
+    with pytest.raises(RuntimeError, match="post-visibility failure"):
+        ctx.client.post(
+            f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+        )
+
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        video_id = stored.created_video_id
+        assert stored.status == "failed"
+        assert stored.validation_errors == {"import_failed": True}
+        assert db.get(models.Video, video_id) is not None
+
+    deleted = ctx.client.delete(f"/api/projects/{pid}/videos/{video_id}", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    with ctx.session_factory() as db:
+        assert db.get(models.Video, video_id) is None
+    quarantine = ctx.client.app.state.video_delete_service.io.quarantine_dir
+    assert not quarantine.exists() or not list(quarantine.iterdir())
+
+
+def test_complete_gate_busy_rolls_back_video_and_restores_batch(
+    ctx, login_headers, monkeypatch
+):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    gate = ctx.client.app.state.video_operation_gate
+    original_acquire = gate.acquire
+
+    def busy(video_id):
+        from app.video_operation_gate import VideoOperationBusyError
+        raise VideoOperationBusyError(video_id, (video_id,))
+
+    monkeypatch.setattr(gate, "acquire", busy)
+    blocked = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+    )
+    assert blocked.status_code == 409
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        assert stored.status == "uploading"
+        assert stored.created_video_id is None
+        assert stored.validation_errors == {"video_operation_busy": True}
+        assert db.query(models.Video).filter_by(project_id=pid).count() == 0
+
+    monkeypatch.setattr(gate, "acquire", original_acquire)
+    retried = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "video_only"
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        assert stored.status == "video_only"
+        assert db.get(models.Video, stored.created_video_id) is not None
 
 
 def test_three_file_complete_assignee_race_is_retryable_409(monkeypatch, ctx, login_headers):

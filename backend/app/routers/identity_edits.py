@@ -1,7 +1,7 @@
 """Sparse draft identity Split/Merge and strict LIFO undo HTTP compatibility."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -77,6 +77,7 @@ def commit_identity_edit(
     project_id: int,
     video_id: int,
     body: IdentityEditCommitRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -86,6 +87,7 @@ def commit_identity_edit(
         project_id=project_id,
         video_id=video_id,
         require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
@@ -145,12 +147,14 @@ def revert_identity_edit(
     video_id: int,
     edit_id: int,
     body: IdentityEditRevertRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> dict:
     _require_editor(access[1])
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:

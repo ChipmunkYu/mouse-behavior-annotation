@@ -39,6 +39,36 @@ logger = logging.getLogger(__name__)
 JOB_TYPE_MEDIA = "media"
 # Clip 错误字段与任务摘要的截断上限
 ERROR_TRUNCATE_LIMIT = 2000
+CLEANUP_INCOMPLETE_PREFIX = "Worker cleanup incomplete: "
+
+
+class WorkerCleanupIncomplete(RuntimeError):
+    """A required worker cleanup failed; the owning job must remain active."""
+
+    def __init__(self, message: str, *, result_path: str | None = None) -> None:
+        super().__init__(message)
+        self.result_path = result_path
+
+
+def _cleanup_paths(paths, *, operation: str) -> None:
+    errors = []
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            errors.append(f"{operation} {path}: {exc}")
+    if errors:
+        raise WorkerCleanupIncomplete("; ".join(errors))
+
+
+def _cleanup_incomplete_error(exc: BaseException) -> str:
+    return _truncate_error(f"{CLEANUP_INCOMPLETE_PREFIX}{exc}")
+
+
+def _is_cleanup_incomplete(job: BackgroundJob) -> bool:
+    return bool(job.error and job.error.startswith(CLEANUP_INCOMPLETE_PREFIX))
 
 
 def _fault(_stage: str) -> None:
@@ -152,8 +182,11 @@ def stage_submission_input(settings, submission: Submission, job_id: int) -> Pat
         if digest.hexdigest() != submission.source_video_sha256:
             raise MediaCommandError("immutable submission source SHA-256 mismatch")
         return staging
-    except Exception:
-        staging.unlink(missing_ok=True)
+    except Exception as exc:
+        try:
+            _cleanup_paths([staging], operation="remove submission staging")
+        except WorkerCleanupIncomplete as cleanup_exc:
+            raise cleanup_exc from exc
         raise
 
 
@@ -196,13 +229,17 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
 
     created: list[Path] = []  # 本次调用已落盘的最终文件（失败时清理，避免半成品）
     try:
+        if not video.fps or video.fps <= 0:
+            raise MediaCommandError("video FPS must be positive for frame-authoritative rendering")
+        start = annotation.start_frame / video.fps
+        end = (annotation.end_frame + 1) / video.fps
         processor.render_clip(
             input_path=str(input_path),
-            start=annotation.start_time,
-            end=annotation.end_time,
+            start=start,
+            end=end,
             output_path=str(temp_clip),
         )
-        mid = (annotation.start_time + annotation.end_time) / 2.0  # 缩略图取片段中点
+        mid = (start + end) / 2.0  # 缩略图取 inclusive 帧区间的时间中点
         processor.render_thumbnail(
             input_path=str(input_path),
             at=mid,
@@ -219,20 +256,21 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
         clip.error = None
         clip.generated_at = _now()
         clip.updated_at = _now()
-        return created
-    except Exception:
-        for path in created:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    except Exception as exc:
+        try:
+            _cleanup_paths([*created, temp_clip, temp_thumb], operation="rollback rendered media")
+        except WorkerCleanupIncomplete as cleanup_exc:
+            raise cleanup_exc from exc
         raise
-    finally:
-        for temp in (temp_clip, temp_thumb):
-            try:
-                temp.unlink(missing_ok=True)
-            except OSError:
-                pass
+    try:
+        _cleanup_paths([temp_clip, temp_thumb], operation="remove rendered media temp")
+    except WorkerCleanupIncomplete as exc:
+        try:
+            _cleanup_paths(created, operation="rollback rendered media after temp cleanup failure")
+        except WorkerCleanupIncomplete as rollback_exc:
+            raise WorkerCleanupIncomplete(f"{exc}; {rollback_exc}") from exc
+        raise
+    return created
 
 
 def render_submission_clip_files(processor, settings, submission: Submission,
@@ -263,16 +301,21 @@ def render_submission_clip_files(processor, settings, submission: Submission,
         _fault("submission_files_renamed")
         clip.clip_path, clip.thumbnail_path = final_clip.name, final_thumb.name
         clip.status, clip.error, clip.generated_at, clip.updated_at = "ready", None, _now(), _now()
-        return created
-    except Exception:
-        for path in created:
-            try: path.unlink(missing_ok=True)
-            except OSError: pass
+    except Exception as exc:
+        try:
+            _cleanup_paths([*created, temp_clip, temp_thumb], operation="rollback Submission media")
+        except WorkerCleanupIncomplete as cleanup_exc:
+            raise cleanup_exc from exc
         raise
-    finally:
-        for path in (temp_clip, temp_thumb):
-            try: path.unlink(missing_ok=True)
-            except OSError: pass
+    try:
+        _cleanup_paths([temp_clip, temp_thumb], operation="remove Submission media temp")
+    except WorkerCleanupIncomplete as exc:
+        try:
+            _cleanup_paths(created, operation="rollback Submission media after temp cleanup failure")
+        except WorkerCleanupIncomplete as rollback_exc:
+            raise WorkerCleanupIncomplete(f"{exc}; {rollback_exc}") from exc
+        raise
+    return created
 
 
 def claim_and_render_clip(
@@ -349,11 +392,10 @@ def claim_and_render_clip(
         return path, created
     except Exception as exc:
         db.rollback()
-        for path in created:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            _cleanup_paths(created, operation="rollback claimed media")
+        except WorkerCleanupIncomplete as cleanup_exc:
+            raise cleanup_exc from exc
         if owns_claim and claim_token is not None:
             db.query(Clip).filter(
                 Clip.id == clip_id,
@@ -419,9 +461,10 @@ def claim_and_render_submission_clip(
         return path, created
     except Exception as exc:
         db.rollback()
-        for path in created:
-            try: path.unlink(missing_ok=True)
-            except OSError: pass
+        try:
+            _cleanup_paths(created, operation="rollback claimed Submission media")
+        except WorkerCleanupIncomplete as cleanup_exc:
+            raise cleanup_exc from exc
         if owns_claim and claim_token is not None:
             db.query(Clip).filter(Clip.id == clip_id, Clip.status == "processing",
                                   Clip.updated_at == claim_token).update(
@@ -627,6 +670,7 @@ class MediaWorker:
         if not self.synchronous:
             self._executor = ThreadPoolExecutor(max_workers=1)
         self._futures: set = set()
+        self.before_terminal_hook = None
 
     # ---------- 生命周期 ----------
 
@@ -673,6 +717,8 @@ class MediaWorker:
                 .all()
             )
             for job in rows:
+                if _is_cleanup_incomplete(job):
+                    continue
                 # A processing Clip has no durable owner token. Always release claims
                 # from this interrupted job, including when the job itself is exhausted.
                 reset_interrupted_job_clips(db, job)
@@ -694,18 +740,42 @@ class MediaWorker:
     def _run_job(self, job_id: int) -> None:
         try:
             self._run_job_impl(job_id)
+        except WorkerCleanupIncomplete as exc:
+            logger.error("Media job %s cleanup incomplete: %s", job_id, exc)
+            self._record_cleanup_incomplete(job_id, exc)
         except Exception:  # noqa: BLE001  worker 线程绝不外泄异常
             logger.exception("Media job %s crashed unexpectedly", job_id)
             try:
                 with self.session_factory() as db:
                     job = db.get(BackgroundJob, job_id)
                     if job is not None and job.status == "running":
+                        if self.before_terminal_hook:
+                            self.before_terminal_hook()
                         job.status = "failed"
                         job.error = "Media worker crashed unexpectedly (see server log)"
                         job.finished_at = _now()
                         db.commit()
             except Exception:  # noqa: BLE001
                 logger.exception("Failed to record crash for media job %s", job_id)
+
+    def _record_cleanup_incomplete(self, job_id: int, exc: BaseException) -> None:
+        try:
+            with self.session_factory() as db:
+                job = db.get(BackgroundJob, job_id)
+                if job is not None and job.status == "running":
+                    job.error = _cleanup_incomplete_error(exc)
+                    job.finished_at = None
+                    db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to record incomplete cleanup for media job %s", job_id)
+
+    def _commit_terminal(self, db: Session, job: BackgroundJob, status: str, *, error=None) -> None:
+        if self.before_terminal_hook:
+            self.before_terminal_hook()
+        job.status = status
+        job.error = error
+        job.finished_at = _now()
+        db.commit()
 
     def _run_job_impl(self, job_id: int) -> None:
         with self.session_factory() as db:
@@ -787,9 +857,7 @@ class MediaWorker:
         total = len(clips)
         if total == 0:
             job.progress = 100
-            job.status = "succeeded"
-            job.finished_at = _now()
-            db.commit()
+            self._commit_terminal(db, job, "succeeded")
             return
 
         produced: list[Path] = []  # 本次运行成功产出的最终文件（失效时清理）
@@ -810,6 +878,9 @@ class MediaWorker:
             try:
                 created = self._process_clip(db, video, clip)
                 produced.extend(created)
+            except WorkerCleanupIncomplete:
+                db.rollback()
+                raise
             except Exception as exc:  # noqa: BLE001  单片段失败 → 该片 failed，任务 failed
                 db.rollback()
                 failures.append(str(exc))
@@ -833,13 +904,11 @@ class MediaWorker:
         if failures:
             job = db.get(BackgroundJob, job.id)
             if job is not None:
-                job.status = "failed"
-                job.error = _truncate_error(
+                error = _truncate_error(
                     f"Clip generation failed: {len(failures)} clip(s) failed"
                     f" (first error: {failures[0]})"
                 )
-                job.finished_at = _now()
-                db.commit()
+                self._commit_terminal(db, job, "failed", error=error)
             return
 
         # ---- 完成后复查：失效则取消并清理本次产物 ----
@@ -849,10 +918,8 @@ class MediaWorker:
             self._cancel_invalidated(db, job, reason)
             return
 
-        job.status = "succeeded"
         job.progress = 100
-        job.finished_at = _now()
-        db.commit()
+        self._commit_terminal(db, job, "succeeded")
 
     def _process_submission_job(self, db: Session, job: BackgroundJob) -> None:
         payload = job.payload or {}
@@ -893,11 +960,17 @@ class MediaWorker:
                         db, self.processor, self.settings, submission.id, annotation.id, clip.id,
                         input_path=staging,
                     )
+                except WorkerCleanupIncomplete:
+                    db.rollback()
+                    raise
                 except Exception as exc:
                     db.rollback(); failures.append(str(exc)); break
                 job = db.get(BackgroundJob, job.id)
                 job.progress = int(index * 100 / len(pairs)) if pairs else 100
                 db.commit()
+        except WorkerCleanupIncomplete:
+            db.rollback()
+            raise
         except Exception as exc:
             db.rollback()
             first_pending = next((clip for _annotation, clip in pairs
@@ -909,17 +982,13 @@ class MediaWorker:
             failures.append(str(exc))
         finally:
             if staging is not None:
-                try:
-                    staging.unlink(missing_ok=True)
-                except OSError:
-                    logger.warning("Failed to remove submission staging file %s", staging)
+                _cleanup_paths([staging], operation="remove Submission staging")
         job = db.get(BackgroundJob, job.id)
-        job.finished_at = _now()
         if failures:
-            job.status, job.error = "failed", _truncate_error(failures[0])
+            self._commit_terminal(db, job, "failed", error=_truncate_error(failures[0]))
         else:
-            job.status, job.progress = "succeeded", 100
-        db.commit()
+            job.progress = 100
+            self._commit_terminal(db, job, "succeeded")
 
     def _process_clip(self, db: Session, video: Video, clip: Clip) -> list[Path]:
         """渲染单个 Clip（委托模块级 `render_clip_files`）：临时文件 → 原子替换。
@@ -932,15 +1001,8 @@ class MediaWorker:
         )[1]
 
     def _cleanup_produced(self, files: list[Path], settings) -> None:
-        """失效时清理本次运行产出的实体文件（仅限已知路径，删除失败记日志不阻断）。"""
-        for path in files:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Failed to remove produced media file %s", path)
+        """失效时严格清理本次运行产出的实体文件。"""
+        _cleanup_paths(files, operation="remove invalidated produced media")
 
     def _cancel_invalidated(self, db: Session, job: BackgroundJob, reason: str) -> None:
-        job.status = "cancelled"
-        job.error = f"Cancelled: {reason}"
-        job.finished_at = _now()
-        db.commit()
+        self._commit_terminal(db, job, "cancelled", error=f"Cancelled: {reason}")

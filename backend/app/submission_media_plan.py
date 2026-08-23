@@ -6,6 +6,8 @@ half-open: [start_frame/fps, (end_frame+1)/fps).
 from dataclasses import dataclass
 import math
 
+from .frame_intervals import canonical_frame_interval
+
 
 @dataclass(frozen=True)
 class SubmissionMediaPlan:
@@ -21,17 +23,11 @@ def build_submission_media_plan(*, start_time: float, end_time: float,
                                 start_frame: int, end_frame: int, fps: float,
                                 frame_count: int, width: int, height: int,
                                 crop_region: dict | None) -> SubmissionMediaPlan:
-    if not math.isfinite(fps) or fps <= 0 or start_frame < 0 or end_frame < start_frame:
-        raise ValueError("invalid frame range or fps")
-    if end_frame >= frame_count:
-        raise ValueError("frame range exceeds media")
-    start = start_frame / fps
-    end = (end_frame + 1) / fps
-    # Existing annotation clients round boundaries to either adjacent frame.
-    tolerance = 1.0 / fps + 1e-6
-    if (not math.isfinite(start_time) or not math.isfinite(end_time)
-            or abs(start_time - start) > tolerance or abs(end_time - end) > tolerance):
-        raise ValueError("time range is inconsistent with inclusive frame range")
+    # Time arguments remain accepted for API/caller compatibility, but frames are authoritative.
+    interval = canonical_frame_interval(
+        start_frame=start_frame, end_frame=end_frame, fps=fps, frame_count=frame_count
+    )
+    start, end = interval.start_time, interval.end_time
     crop = None
     out_width, out_height = width, height
     if crop_region is not None:

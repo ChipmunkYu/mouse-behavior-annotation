@@ -240,7 +240,7 @@ def test_merge_undo_rejects_changed_after_image_without_advancing_version(ctx, c
     merged = ctx.client.post(_identity(setup), json={
         "operation": "merge", "track_ids": [1, 2], "base_identity_revision": 0,
         "base_detection_import_revision": 1}, headers=headers).json()
-    patch = ({"start_time": 0.04, "start_frame": 1} if change == "interval" else
+    patch = ({"start_frame": 1} if change == "interval" else
              {"participant_roles": {first: [3], second: [1]}} if change == "roles" else
              {"category_id": categories[1]["id"],
               "participant_roles": {_keys(setup, 1)[0]: [1], _keys(setup, 1)[1]: []}})

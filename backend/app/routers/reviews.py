@@ -75,6 +75,7 @@ def submit_video(project_id: int, video_id: int, request: Request,
     source_identity = resolve_and_hash_source(request.app.state.settings, observed)
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,
@@ -110,7 +111,8 @@ def submit_video(project_id: int, video_id: int, request: Request,
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/withdraw", response_model=VideoOut)
-def withdraw_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
+def withdraw_video(project_id: int, video_id: int, request: Request,
+                   access: tuple = Depends(project_access),
                    db: Session = Depends(get_db)) -> Video:
     membership = access[1]
     observed = _get_video(db, project_id, video_id)
@@ -118,6 +120,7 @@ def withdraw_video(project_id: int, video_id: int, access: tuple = Depends(proje
     observed_import = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, allow_submitted=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,
@@ -171,6 +174,7 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
     job_id = None
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, allow_submitted=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_active_import_id=observed_import.id if observed_import else None,
         expected_detection_revision=observed.detection_import_revision,
         expected_edit_version=observed_import.edit_version if observed_import else None,
