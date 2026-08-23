@@ -1,6 +1,8 @@
 """验收：导出字段与类别名。"""
 from __future__ import annotations
 
+import pytest
+
 EXPECTED_FIELDS = {
     "annotation_id",
     "video_id",
@@ -54,8 +56,8 @@ def test_export_event_fields_and_behavior_name(ctx):
     assert ev["annotation_id"] == created.json()["id"]
     assert ev["video_id"] == f"video_{video['id']}"
     assert ev["clip_file"] is None
-    assert ev["start_time"] == 5.0
-    assert ev["end_time"] == 8.5
+    assert ev["start_time"] == pytest.approx(125 / 25)
+    assert ev["end_time"] == pytest.approx(213 / 25)
     assert ev["start_frame"] == 125
     assert ev["end_frame"] == 212
     assert ev["behavior"] == "奔跑"  # 类别名

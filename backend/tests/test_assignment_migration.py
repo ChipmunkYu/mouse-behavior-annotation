@@ -16,7 +16,7 @@ def test_0011_to_0012_roles_videos_and_round_trip(tmp_path):
         conn.execute(text("INSERT INTO project_memberships(project_id,user_id,role,status,created_at) VALUES (1,1,'owner','active',CURRENT_TIMESTAMP),(1,2,'reviewer','active',CURRENT_TIMESTAMP),(1,3,'annotator','active',CURRENT_TIMESTAMP)"))
         conn.execute(text("INSERT INTO videos(project_id,filename,status,uploaded_by,created_at,workflow_status,annotation_revision,detection_import_revision,identity_revision,media_revision) VALUES (1,'v','metadata',1,CURRENT_TIMESTAMP,'draft',1,0,0,1)"))
     run_migrations(url)
-    assert current_revision(url) == "0013"
+    assert current_revision(url) == "0014"
     with db_mod.engine.connect() as conn:
         rows = conn.execute(text("SELECT role,can_review FROM project_memberships ORDER BY id")).fetchall()
         assert rows == [("owner", 0), ("member", 1), ("member", 0)]
@@ -27,7 +27,7 @@ def test_0011_to_0012_roles_videos_and_round_trip(tmp_path):
         rows = conn.execute(text("SELECT role FROM project_memberships ORDER BY id")).scalars().all()
         assert rows == ["owner", "reviewer", "annotator"]
     run_migrations(url)
-    assert current_revision(url) == "0013"
+    assert current_revision(url) == "0014"
     with db_mod.engine.connect() as conn:
         rows = conn.execute(text("SELECT role,can_review FROM project_memberships ORDER BY id")).fetchall()
         assert rows == [("owner", 0), ("member", 1), ("member", 0)]

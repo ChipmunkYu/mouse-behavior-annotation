@@ -5,7 +5,7 @@
  */
 import { useMemo, type MouseEvent } from "react";
 import type { Category } from "../api/types";
-import { formatTimeShort } from "../utils/format";
+import { formatTime, formatTimeShort } from "../utils/format";
 
 export default function Timeline({
   duration,
@@ -14,6 +14,8 @@ export default function Timeline({
   categoryById,
   draftStartTime,
   draftEndTime,
+  draftStartFrame,
+  draftEndFrame,
   draftColor,
   onSeek,
 }: {
@@ -23,10 +25,14 @@ export default function Timeline({
   categoryById: Map<number, Category>;
   draftStartTime?: number | null;
   draftEndTime?: number | null;
+  draftStartFrame?: number | null;
+  draftEndFrame?: number | null;
   draftColor?: string | null;
   onSeek: (t: number) => void;
 }) {
   const ticks = useMemo(() => Array.from({ length: 11 }, (_, i) => (duration * i) / 10), [duration]);
+  const draftStartPercent = draftStartTime == null ? null : Math.min(100, Math.max(0, (draftStartTime / duration) * 100));
+  const draftStartsNearEnd = draftStartPercent != null && draftStartPercent >= 88;
 
   function handleSeek(e: MouseEvent<HTMLDivElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -45,7 +51,7 @@ export default function Timeline({
       aria-valuemin={0}
       aria-valuemax={Math.max(0, Math.round(duration))}
       aria-valuenow={Math.round(Math.min(currentTime, duration))}
-      aria-valuetext={`当前 ${formatTimeShort(currentTime)}；草稿开始 ${draftStartTime == null ? "未设置" : formatTimeShort(draftStartTime)}；结束 ${draftEndTime == null ? "未设置" : formatTimeShort(draftEndTime)}`}
+      aria-valuetext={`当前 ${formatTime(currentTime)}；草稿开始 ${draftStartTime == null ? "未设置" : `${formatTime(draftStartTime)}${draftStartFrame == null ? "" : `，帧 ${draftStartFrame}`}`}；结束 ${draftEndTime == null ? "未设置" : `${formatTime(draftEndTime)}${draftEndFrame == null ? "" : `，帧 ${draftEndFrame} inclusive`}`}`}
       onKeyDown={(e) => {
         if (e.key === "ArrowLeft") {
           e.preventDefault();
@@ -84,8 +90,8 @@ export default function Timeline({
         ) : null}
         {draftStartTime != null ? (
           <div
-            className="timeline-draft-start"
-            style={{ left: `${Math.min(100, Math.max(0, (draftStartTime / duration) * 100))}%`, color: draftColor ?? "var(--text-2)" }}
+            className={`timeline-draft-start${draftStartsNearEnd ? " near-end" : ""}`}
+            style={{ left: `${draftStartPercent}%`, color: draftColor ?? "var(--text-2)" }}
             aria-hidden="true"
           >
             <span>开始</span>

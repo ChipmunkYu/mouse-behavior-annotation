@@ -1,7 +1,7 @@
 """Compatibility suppression API backed by sparse DraftIdentityEdit state."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -73,12 +73,14 @@ def create_suppression(
     project_id: int,
     video_id: int,
     body: SuppressionCreateRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> dict:
     _require_editor(access[1])
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
@@ -89,19 +91,21 @@ def create_suppression(
 
 
 @router.post(
-    "/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert"
+    "/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert",
 )
 def revert_suppression(
     project_id: int,
     video_id: int,
     suppression_id: int,
     body: SuppressionRevertRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> dict:
     _require_editor(access[1])
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:

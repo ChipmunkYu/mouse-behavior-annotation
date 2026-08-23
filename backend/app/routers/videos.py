@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
+from collections.abc import Iterator
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -20,6 +21,14 @@ from ..database import get_db
 from ..deps import project_access
 from ..models import ProjectMembership, User, Video
 from ..permissions import is_manager, require_manager
+from ..video_delete_db import (
+    VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
+    VideoDeleteNotFoundError,
+)
+from ..video_delete_service import VideoDeleteServiceError
+from ..video_operation_gate import VideoOperationBusyError
+from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
+from ..video_operation_dependency import require_video_operation_gate
 from ..schemas import (
     AssignmentBatchRequest,
     AssignmentStatsItem,
@@ -47,6 +56,51 @@ ERR_DISK_SPACE = "Insufficient disk space to store video"
 ERR_DB_SAVE = "Failed to save video metadata"
 ERR_MEMBERSHIP_INACTIVE = "Project membership is not active"
 ERR_BATCH_CLAIM_CONFLICT = "One or more videos are no longer claimable"
+
+
+def _acquire_video_ids(request: Request, video_ids: list[int]) -> Iterator[None]:
+    try:
+        with request.app.state.video_operation_gate.acquire_many(video_ids):
+            yield
+    except VideoOperationBusyError as exc:
+        raise HTTPException(status_code=409, detail=VIDEO_OPERATION_BUSY_DETAIL) from exc
+
+
+def _claim_operation_gate(request: Request, body: VideoClaimsRequest) -> Iterator[None]:
+    yield from _acquire_video_ids(request, list(body.video_ids))
+
+
+def _assignment_operation_gate(request: Request, body: AssignmentBatchRequest) -> Iterator[None]:
+    yield from _acquire_video_ids(request, list(body.video_ids))
+
+
+@router.delete("/api/projects/{project_id}/videos/{video_id}", status_code=204)
+def hard_delete_video(
+    project_id: int,
+    video_id: int,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> None:
+    """Synchronously hard-delete one draft/rejected video under the app gate."""
+    actor_user_id = access[1].user_id
+    # Release project_access's SQLite read transaction before the service opens
+    # its independent BEGIN IMMEDIATE final-delete transaction.
+    db.rollback()
+    try:
+        request.app.state.video_delete_service.delete(
+            project_id=project_id, video_id=video_id, actor_user_id=actor_user_id,
+        )
+    except VideoDeleteForbiddenError as exc:
+        raise HTTPException(status_code=403, detail=exc.safe_message) from exc
+    except VideoDeleteNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.safe_message) from exc
+    except (VideoDeleteConflictError, VideoOperationBusyError) as exc:
+        detail = exc.safe_message if isinstance(exc, VideoDeleteConflictError) else VIDEO_OPERATION_BUSY_DETAIL
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except (VideoDeleteIntegrityError, VideoDeleteServiceError) as exc:
+        detail = exc.safe_message
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 def _validate_assignee(db: Session, project_id: int, membership_id: int | None) -> ProjectMembership | None:
@@ -311,6 +365,7 @@ async def upload_video(
 @router.post(
     "/api/projects/{project_id}/videos/claims",
     response_model=VideoClaimsResponse,
+    dependencies=[Depends(_claim_operation_gate)],
 )
 def claim_videos(
     project_id: int,
@@ -339,7 +394,8 @@ def claim_videos(
     )
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut)
+@router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut,
+             dependencies=[Depends(require_video_operation_gate)])
 def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
                 db: Session = Depends(get_db)) -> Video:
     try:
@@ -355,7 +411,8 @@ def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_
     return db.get(Video, video_id)
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/release", response_model=VideoOut)
+@router.post("/api/projects/{project_id}/videos/{video_id}/release", response_model=VideoOut,
+             dependencies=[Depends(require_video_operation_gate)])
 def release_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
                   db: Session = Depends(get_db)) -> Video:
     changed = db.query(Video).filter(
@@ -371,7 +428,8 @@ def release_video(project_id: int, video_id: int, access: tuple = Depends(projec
     return db.get(Video, video_id)
 
 
-@router.post("/api/projects/{project_id}/videos/assignments", response_model=list[VideoOut])
+@router.post("/api/projects/{project_id}/videos/assignments", response_model=list[VideoOut],
+             dependencies=[Depends(_assignment_operation_gate)])
 def batch_assign(project_id: int, body: AssignmentBatchRequest,
                  access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[Video]:
     require_manager(access[1])

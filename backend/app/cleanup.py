@@ -23,8 +23,11 @@ TERMINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
 _VIDEO_TEMP = re.compile(r"^[0-9a-fA-F]{32}\.part$")
 _CLIP_TEMP = re.compile(r"^\.clip_\d+_rev\d+\.[0-9a-fA-F]{32}\.mp4\.part$")
 _THUMB_TEMP = re.compile(r"^\.clip_\d+_rev\d+\.[0-9a-fA-F]{32}\.jpg\.part$")
-_EXPORT_STAGING = re.compile(r"^\.export_\d+_\d+\.staging$")
-_EXPORT_TEMP_ZIP = re.compile(r"^\.export_\d+_\d+\.tmp\.zip$")
+_EXPORT_STAGING = re.compile(r"^\.export(?:-\d+|_\d+_\d+)\.staging$")
+_EXPORT_TEMP_ZIP = re.compile(r"^\.export(?:-\d+|_\d+_\d+)\.tmp\.zip$")
+_SUBMISSION_STAGING = re.compile(
+    r"^\.submission(?:-media-job-\d+-|_media_job_\d+_)[0-9a-fA-F]{32}\.staging$"
+)
 _EXPORT_ZIP = re.compile(r"^export_project_\d+_\d+\.zip$")
 _MEDIA_NAME = re.compile(r"^clip_(?P<annotation_id>\d+)_rev(?P<revision>\d+)\.(?P<ext>mp4|jpg)$")
 
@@ -291,6 +294,7 @@ def run_retention_cleanup(
 
     for root, pattern, directories in (
         (settings.videos_dir, _VIDEO_TEMP, False),
+        (settings.videos_dir, _SUBMISSION_STAGING, False),
         (settings.detection_imports_dir, _VIDEO_TEMP, False),
         (settings.clips_dir, _CLIP_TEMP, False),
         (settings.thumbnails_dir, _THUMB_TEMP, False),

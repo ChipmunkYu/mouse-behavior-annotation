@@ -24,7 +24,7 @@ import time
 import pytest
 
 from app.media import FfmpegMediaProcessor, MediaCommandError, format_time
-from app.media_jobs import claim_and_render_submission_clip
+from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, claim_and_render_submission_clip
 from app.models import (Annotation, BackgroundJob, Clip, DetectionImport, ProjectMembership,
                         Submission, SubmissionAnnotation, User, Video)
 
@@ -321,7 +321,7 @@ def test_missing_executable_reports_clearly():
 def test_approval_auto_enqueues_and_generates_clips(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
-    project, _categories, video, _anns = _setup(ctx, headers, annotations=1)
+    project, _categories, video, anns = _setup(ctx, headers, annotations=1)
 
     _approve(ctx, project, video)
 
@@ -355,9 +355,11 @@ def test_approval_auto_enqueues_and_generates_clips(media_ctx):
     assert (thumbs_dir / clip.thumbnail_path).is_file()
     assert (clips_dir / clip.clip_path).resolve().is_relative_to(clips_dir.resolve())
     assert (thumbs_dir / clip.thumbnail_path).resolve().is_relative_to(thumbs_dir.resolve())
-    # 缩略图取片段中点（1.0-3.0 → at=2.0）
+    # 帧区间为闭区间：25-75 @ 25fps → [1.0, 3.04)，中点为 2.02。
     _input, at, _out = ctx.processor.thumb_calls[0]
-    assert at == 2.0
+    expected_start = anns[0]["start_frame"] / video["fps"]
+    expected_end = (anns[0]["end_frame"] + 1) / video["fps"]
+    assert at == pytest.approx((expected_start + expected_end) / 2)
 
 
 def test_rejected_review_does_not_enqueue(media_ctx):
@@ -621,15 +623,15 @@ def test_partial_failure_keeps_successful_and_retry_completes(media_ctx):
 def test_processor_receives_resolved_input_and_times(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
-    project, _categories, video, _anns = _setup(ctx, headers, annotations=1, start_times=[1.0])
+    project, _categories, video, anns = _setup(ctx, headers, annotations=1, start_times=[1.0])
     _approve(ctx, project, video)
 
     input_path, start, end, _out = ctx.processor.clip_calls[0]
     videos_dir = ctx.app.state.settings.videos_dir.resolve()
     assert Path(input_path).is_relative_to(videos_dir)  # 输入限制在 videos_dir 内
     assert Path(input_path) == (videos_dir / "src.mp4").resolve()
-    assert start == 1.0
-    assert end == 3.0
+    assert start == pytest.approx(anns[0]["start_frame"] / video["fps"])
+    assert end == pytest.approx((anns[0]["end_frame"] + 1) / video["fps"])
 
 
 # ---------- 文件原子性 / 路径安全 ----------
@@ -670,6 +672,153 @@ def test_failure_cleans_partial_outputs(media_ctx):
         assert "thumbnail failed" in (clip.error or "")
 
 
+def _queued_media_cleanup_job(ctx):
+    headers = auth_headers(ctx.client)
+    project, _categories, video, anns = _setup(ctx, headers, annotations=1)
+    with ctx.session_factory() as db:
+        current = db.get(Video, video["id"])
+        current.workflow_status = "approved"
+        clip = Clip(project_id=project["id"], annotation_id=anns[0]["id"],
+                    source_revision=current.media_revision, status="pending")
+        job = BackgroundJob(
+            project_id=project["id"], job_type="media", status="queued",
+            dedupe_key=f"media:video:{video['id']}:cleanup-test",
+            payload={"video_id": video["id"], "project_id": project["id"],
+                     "revision": current.media_revision},
+        )
+        db.add_all([clip, job]); db.commit()
+        return job.id, clip.id
+
+
+def test_temp_cleanup_failure_keeps_media_job_running_without_terminal_hook(media_ctx, monkeypatch):
+    ctx = media_ctx
+    job_id, _clip_id = _queued_media_cleanup_job(ctx)
+    worker = ctx.app.state.media_worker
+    terminal_calls = []
+    worker.before_terminal_hook = lambda: terminal_calls.append(True)
+    real_unlink = Path.unlink
+
+    def deny_temp_cleanup(path, *args, **kwargs):
+        if path.name.endswith(".part"):
+            raise OSError("injected temp cleanup denial")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_temp_cleanup)
+    try:
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            job = db.get(BackgroundJob, job_id)
+            assert job.status == "running" and job.finished_at is None
+            assert job.error.startswith(CLEANUP_INCOMPLETE_PREFIX)
+            assert "temp cleanup denial" in job.error
+        assert terminal_calls == []
+    finally:
+        worker.before_terminal_hook = None
+
+
+def test_final_rollback_cleanup_failure_keeps_media_job_running(media_ctx, monkeypatch):
+    ctx = media_ctx
+    job_id, _clip_id = _queued_media_cleanup_job(ctx)
+    real_replace = __import__("app.media_jobs", fromlist=["os"]).os.replace
+    real_unlink = Path.unlink
+
+    def fail_thumbnail_publish(source, target):
+        if str(target).endswith(".jpg"):
+            raise OSError("injected thumbnail publish failure")
+        return real_replace(source, target)
+
+    def deny_final_rollback(path, *args, **kwargs):
+        if path.name.endswith(".mp4") and not path.name.startswith("."):
+            raise OSError("injected final rollback denial")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr("app.media_jobs.os.replace", fail_thumbnail_publish)
+    monkeypatch.setattr(Path, "unlink", deny_final_rollback)
+    ctx.app.state.media_worker._run_job(job_id)
+    with ctx.session_factory() as db:
+        job = db.get(BackgroundJob, job_id)
+        assert job.status == "running" and job.finished_at is None
+        assert job.error.startswith(CLEANUP_INCOMPLETE_PREFIX)
+        assert "final rollback denial" in job.error
+    assert len(list(ctx.app.state.settings.clips_dir.glob("*.mp4"))) == 1
+
+
+def test_produced_cleanup_failure_blocks_invalidation_terminal_state(media_ctx, monkeypatch):
+    ctx = media_ctx
+    job_id, _clip_id = _queued_media_cleanup_job(ctx)
+    worker = ctx.app.state.media_worker
+    original_process_clip = worker._process_clip
+    real_unlink = Path.unlink
+    terminal_calls = []
+    worker.before_terminal_hook = lambda: terminal_calls.append(True)
+
+    def invalidate_after_render(db, video, clip):
+        produced = original_process_clip(db, video, clip)
+        db.get(Video, video.id).workflow_status = "draft"
+        db.commit()
+        return produced
+
+    def deny_produced_cleanup(path, *args, **kwargs):
+        if path.suffix in {".mp4", ".jpg"} and not path.name.startswith("."):
+            raise OSError("injected produced cleanup denial")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(worker, "_process_clip", invalidate_after_render)
+    monkeypatch.setattr(Path, "unlink", deny_produced_cleanup)
+    try:
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            job = db.get(BackgroundJob, job_id)
+            assert job.status == "running" and job.finished_at is None
+            assert job.error.startswith(CLEANUP_INCOMPLETE_PREFIX)
+            assert "produced cleanup denial" in job.error
+        assert terminal_calls == []
+    finally:
+        worker.before_terminal_hook = None
+
+
+def test_submission_staging_cleanup_failure_keeps_media_job_running(media_ctx, monkeypatch):
+    ctx = media_ctx
+    from tests.test_project_export import _approved
+
+    _approved(ctx)
+    worker = ctx.app.state.media_worker
+    with ctx.session_factory() as db:
+        job = db.query(BackgroundJob).filter(
+            BackgroundJob.job_type == "media",
+            BackgroundJob.payload["submission_id"].as_integer().is_not(None),
+        ).one()
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                             (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+            if stored:
+                (root / stored).unlink(missing_ok=True)
+        clip.status, clip.clip_path, clip.thumbnail_path = "pending", None, None
+        job.status, job.error, job.finished_at = "queued", None, None
+        db.commit(); job_id = job.id
+
+    real_unlink = Path.unlink
+    terminal_calls = []
+    worker.before_terminal_hook = lambda: terminal_calls.append(True)
+
+    def deny_staging_cleanup(path, *args, **kwargs):
+        if path.name.startswith(".submission-media-job-") and path.name.endswith(".staging"):
+            raise OSError("injected staging cleanup denial")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_staging_cleanup)
+    try:
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            job = db.get(BackgroundJob, job_id)
+            assert job.status == "running" and job.finished_at is None
+            assert job.error.startswith(CLEANUP_INCOMPLETE_PREFIX)
+            assert "staging cleanup denial" in job.error
+        assert terminal_calls == []
+    finally:
+        worker.before_terminal_hook = None
+
+
 def test_path_escape_rejected(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
@@ -701,7 +850,13 @@ def test_absolute_storage_path_within_videos_dir_ok(media_ctx):
     categories = ctx.configure_and_lock_minimal_scheme(project["id"], headers)
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "abs.mp4", "storage_path": str(src), "status": "uploaded"},
+        json={
+            "filename": "abs.mp4",
+            "storage_path": str(src),
+            "status": "uploaded",
+            "duration": 30.0,
+            "fps": 25.0,
+        },
         headers=headers,
     ).json()
     resp = ctx.client.post(
@@ -868,6 +1023,27 @@ def test_restart_exhausted_job_releases_processing_clip_for_retry(media_ctx):
         assert db.query(Clip).one().status == "ready"
 
 
+def test_restart_does_not_requeue_cleanup_incomplete_media_job(media_ctx):
+    ctx = media_ctx
+    headers = auth_headers(ctx.client)
+    project, _categories, video, _anns = _setup(ctx, headers, annotations=0)
+    with ctx.session_factory() as db:
+        job = BackgroundJob(
+            project_id=project["id"], job_type="media", status="running", attempts=1,
+            dedupe_key=f"media:video:{video['id']}:cleanup-incomplete",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": 1},
+            error=f"{CLEANUP_INCOMPLETE_PREFIX}injected final rollback denial",
+        )
+        db.add(job); db.commit(); job_id = job.id
+
+    ctx.app.state.media_worker.start()
+    with ctx.session_factory() as db:
+        job = db.get(BackgroundJob, job_id)
+        assert job.status == "running"
+        assert job.attempts == 1
+        assert job.error == f"{CLEANUP_INCOMPLETE_PREFIX}injected final rollback denial"
+
+
 # ---------- 修订隔离 / 失效竞态 ----------
 
 
@@ -900,10 +1076,10 @@ def test_stale_job_cancelled_on_invalidation_without_resurrecting_clips(media_ct
         db.commit()
         job_id = job.id
 
-    # 失效：PATCH 标注 → draft rev2，Clip 行删除
+    # 失效：以权威 end_frame 修改标注 → draft rev2，Clip 行删除
     resp = ctx.client.patch(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations/{anns[0]['id']}",
-        json={"end_time": 9.0},
+        json={"end_frame": 225},
         headers=headers,
     )
     assert resp.status_code == 200

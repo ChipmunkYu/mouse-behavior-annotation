@@ -19,6 +19,7 @@ from ..media_jobs import (clip_entities_ready, enqueue_media_job, enqueue_submis
 from ..models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
 from ..permissions import can_review, is_manager
 from ..schemas import JobOut, MediaStatusOut
+from ..video_operation_dependency import require_video_operation_gate
 
 router = APIRouter(tags=["media"])
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ def media_status(
 @router.post(
     "/api/projects/{project_id}/videos/{video_id}/media/generate",
     response_model=JobOut,
+    dependencies=[Depends(require_video_operation_gate)],
 )
 def generate_media(
     project_id: int,

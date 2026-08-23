@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import zipfile
 
 import pytest
@@ -11,7 +12,7 @@ from sqlalchemy import text
 from app.export_contract import (FILES, TracksSummary, safe_part, transform_detection,
                                  validate_clip_directory)
 from app.media import MediaCommandError
-from app.media_jobs import reset_interrupted_job_clips
+from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, reset_interrupted_job_clips
 from app.export_jobs import export_dedupe_key
 from app.models import (Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission,
                         SubmissionAnnotation)
@@ -442,6 +443,47 @@ def test_render_failure_cleans_staging_and_never_publishes_final(media_ctx):
     job = _export(ctx, project, headers)
     assert job["status"] == "failed" and job["result_path"] is None
     assert list(ctx.app.state.settings.exports_dir.iterdir()) == []
+
+
+def test_staging_cleanup_failure_keeps_published_export_running_and_not_requeued(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    worker = ctx.app.state.export_worker
+    original_sync = worker.synchronous
+    worker.synchronous = False
+    terminal_calls = []
+    worker.before_terminal_hook = lambda: terminal_calls.append(True)
+    try:
+        with ctx.session_factory() as db:
+            queued = __import__("app.export_jobs", fromlist=["enqueue_export_job"]).enqueue_export_job(
+                db, db.get(Project, project["id"]), [])
+            job_id = queued.id
+        real_rmtree = shutil.rmtree
+
+        def fail_job_staging(path, *args, **kwargs):
+            if str(path).endswith(f".export-{job_id}.staging"):
+                raise OSError("injected staging cleanup denial")
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr("app.export_jobs.shutil.rmtree", fail_job_staging)
+        worker._run_job(job_id)
+        with ctx.session_factory() as db:
+            job = db.get(BackgroundJob, job_id)
+            assert job.status == "running"
+            assert job.error.startswith(CLEANUP_INCOMPLETE_PREFIX)
+            assert "staging" in job.error and "denial" in job.error
+            assert job.result_path and (ctx.app.state.settings.exports_dir / job.result_path).is_file()
+            attempts = job.attempts
+        assert terminal_calls == []
+
+        worker._recover_interrupted()
+        with ctx.session_factory() as db:
+            recovered = db.get(BackgroundJob, job_id)
+            assert recovered.status == "running" and recovered.attempts == attempts
+            assert recovered.result_path == job.result_path
+    finally:
+        worker.before_terminal_hook = None
+        worker.synchronous = original_sync
 
 
 def test_colliding_directory_names_receive_stable_unique_suffix(media_ctx, monkeypatch):

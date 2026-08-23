@@ -70,8 +70,6 @@ def _annotate(ctx, headers, project, video, category_id, start_time=1.0):
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
             "category_id": category_id,
-            "start_time": start_time,
-            "end_time": start_time + 2.0,
             "start_frame": int(start_time * 25),
             "end_frame": int((start_time + 2.0) * 25),
         },
@@ -257,9 +255,10 @@ def test_patch_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"], f"p_{state}")
         _reach_state(ctx, headers, project, video, reviewer_headers, state)
 
-        resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
+        resp = _patch(ctx, headers, project, video, ann["id"], {"end_frame": 125})
         assert resp.status_code == 200, state
-        assert resp.json()["end_time"] == 5.0
+        assert resp.json()["end_frame"] == 125
+        assert resp.json()["end_time"] == 126 / 25
         st = _video_state(ctx, video["id"])
         assert st["workflow_status"] == "draft", state
         assert st["annotation_revision"] == 3, state
@@ -309,16 +308,16 @@ def test_each_content_change_increments_once_while_draft_and_noop_stays_stable(c
     assert _video_state(ctx, video["id"])["annotation_revision"] == 2
 
     # 首次 PATCH 触发失效：revision 2 → 3
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_frame": 125}).status_code == 200
     assert _video_state(ctx, video["id"])["annotation_revision"] == 3
     assert _video_state(ctx, video["id"])["workflow_status"] == "draft"
 
     # 已 draft 后每次实际内容修改仍推进 revision。
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 6.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_frame": 150}).status_code == 200
     assert _video_state(ctx, video["id"])["annotation_revision"] == 4
     # 空 PATCH 与同值 PATCH 均为 no-op。
     assert _patch(ctx, headers, project, video, ann["id"], {}).status_code == 200
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 6.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_frame": 150}).status_code == 200
     assert _video_state(ctx, video["id"])["annotation_revision"] == 4
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
@@ -374,7 +373,7 @@ def test_invalidation_deletes_clip_rows_and_files(ctx, login_headers, tmp_path):
     _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
     assert _count_clips(ctx, video["id"]) == 2
 
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_frame": 125}).status_code == 200
 
     # Clip 行删除、实体文件删除
     assert _count_clips(ctx, video["id"]) == 0
@@ -399,14 +398,14 @@ def test_invalidation_only_affects_video_own_clips(ctx, login_headers, tmp_path)
     )
     ann1 = _annotate(ctx, headers, project, video, categories[0]["id"])
     video2 = ctx.client.post(
-        f"/api/projects/{project['id']}/videos", json={"filename": "s2.mp4"}, headers=headers
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "s2.mp4", "duration": 120.0, "fps": 25.0, "status": "metadata"},
+        headers=headers,
     ).json()
     ann2 = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video2['id']}/annotations",
         json={
             "category_id": categories[1]["id"],
-            "start_time": 1.0,
-            "end_time": 3.0,
             "start_frame": 25,
             "end_frame": 75,
         },
@@ -419,7 +418,7 @@ def test_invalidation_only_affects_video_own_clips(ctx, login_headers, tmp_path)
     _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
     _reach_state(ctx, headers, project, video2, reviewer_headers, "rejected")
 
-    assert _patch(ctx, headers, project, video, ann1["id"], {"end_time": 9.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann1["id"], {"end_frame": 225}).status_code == 200
 
     assert _count_clips(ctx, video["id"]) == 0
     assert _count_clips(ctx, video2["id"]) == 1
@@ -441,7 +440,7 @@ def test_review_history_preserved_on_invalidation(ctx, login_headers):
     _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
     assert _count_reviews(ctx, video["id"]) == 0
 
-    assert _patch(ctx, headers, project, video, ann["id"], {"end_time": 7.0}).status_code == 200
+    assert _patch(ctx, headers, project, video, ann["id"], {"end_frame": 175}).status_code == 200
     # Review 历史保留
     assert _count_reviews(ctx, video["id"]) == 0
 
@@ -470,7 +469,7 @@ def test_out_of_bounds_paths_not_deleted_but_recorded(ctx, login_headers, tmp_pa
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
     _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
 
-    resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
+    resp = _patch(ctx, headers, project, video, ann["id"], {"end_frame": 125})
     assert resp.status_code == 200
 
     # 越界文件绝不删除
@@ -504,7 +503,7 @@ def test_file_delete_failure_recorded_without_blocking(ctx, login_headers, tmp_p
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
     _reach_state(ctx, headers, project, video, reviewer_headers, "rejected")
 
-    resp = _patch(ctx, headers, project, video, ann["id"], {"end_time": 5.0})
+    resp = _patch(ctx, headers, project, video, ann["id"], {"end_frame": 125})
     assert resp.status_code == 200  # 删除失败不阻断请求
     assert _count_clips(ctx, video["id"]) == 0  # DB 记录已删
     assert (tmp_path / "clips" / "dirclip.mp4").is_dir()  # 孤儿仍在磁盘（无害）
@@ -549,7 +548,7 @@ def test_review_capable_member_can_create_but_not_modify_others_annotations(ctx,
     )
     assert resp.status_code == 201
     # reviewer 修改 / 删除 → 403
-    assert _patch(ctx, reviewer_headers, project, video, ann["id"], {"end_time": 9.0}).status_code == 403
+    assert _patch(ctx, reviewer_headers, project, video, ann["id"], {"end_frame": 225}).status_code == 403
     assert _delete(ctx, reviewer_headers, project, video, ann["id"]).status_code == 403
 
 

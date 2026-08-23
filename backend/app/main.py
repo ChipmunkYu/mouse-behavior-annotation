@@ -15,6 +15,8 @@ from .cleanup import RetentionCleaner
 from .export_jobs import ExportWorker
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
+from .video_delete_service import VideoDeleteService
+from .video_operation_gate import VideoOperationGateCoordinator
 from .routers import annotations, auth, categories, category_scheme, clips, detection_imports, exports, health, identity_edits, media, projects, reviews, suppressions, videos
 
 
@@ -75,9 +77,17 @@ def create_app(
         settings=s,
         synchronous=s.media_synchronous,
     )
+    video_operation_gate = VideoOperationGateCoordinator()
+    video_delete_service = VideoDeleteService(
+        session_factory=db_mod.SessionLocal, settings=s, gate=video_operation_gate,
+    )
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        # 删除恢复必须先于 worker 恢复/调度，避免残留文件被重新消费或发布。
+        delete_recovery = video_delete_service.recover()
+        if any(not result.ok for result in delete_recovery):
+            raise RuntimeError("Video delete startup recovery requires administrator intervention")
         # 两类恢复先全部完成再调度，避免后恢复者重置另一 worker 的新 Clip claim。
         worker._recover_interrupted()
         export_worker._recover_interrupted()
@@ -97,6 +107,8 @@ def create_app(
     app.state.media_worker = worker
     app.state.export_worker = export_worker
     app.state.cleanup_worker = cleanup_worker
+    app.state.video_operation_gate = video_operation_gate
+    app.state.video_delete_service = video_delete_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origin_list,

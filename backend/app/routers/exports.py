@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -21,8 +22,29 @@ from ..export_jobs import (
 from ..models import BackgroundJob, BehaviorCategory
 from ..permissions import require_manager
 from ..schemas import ExportRequest, ExportStatusOut, JobOut, MissingClipOut
+from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
+from ..video_operation_gate import VideoOperationBusyError
 
 router = APIRouter(tags=["exports"])
+
+
+def _export_video_gate(
+    project_id: int, body: ExportRequest, request: Request,
+    db: Session = Depends(get_db),
+) -> Iterator[None]:
+    category_ids = list(dict.fromkeys(body.category_ids or []))
+    video_ids = sorted({submission.video_id for _annotation, submission, _clip
+                        in approved_rows(db, project_id, category_ids)})
+    if not video_ids:
+        yield
+        return
+    try:
+        with request.app.state.video_operation_gate.acquire_many(video_ids):
+            yield
+    except VideoOperationBusyError as exc:
+        raise HTTPException(status_code=409, detail=VIDEO_OPERATION_BUSY_DETAIL) from exc
+
+
 def _require_export_role(access: tuple) -> None:
     require_manager(access[1], "Only owner/admin can manage exports")
 
@@ -31,7 +53,8 @@ def _job_out(job: BackgroundJob) -> JobOut:
     return JobOut.model_validate(job)
 
 
-@router.post("/api/projects/{project_id}/export", response_model=JobOut, status_code=201)
+@router.post("/api/projects/{project_id}/export", response_model=JobOut, status_code=201,
+             dependencies=[Depends(_export_video_gate)])
 def create_export(
     project_id: int,
     body: ExportRequest,

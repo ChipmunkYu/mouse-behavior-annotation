@@ -9,6 +9,8 @@ demo 登录 → 项目列表 → 携带完整方案创建项目 → 复核/替�
 """
 from __future__ import annotations
 
+import pytest
+
 EXPECTED_FIELDS = {
     "annotation_id",
     "video_id",
@@ -114,14 +116,14 @@ def test_main_flow_end_to_end(ctx, login_headers):
     assert len(items) == 1
     assert items[0]["id"] == ann_id
 
-    # 10. PATCH → 200，end_time/end_frame 更新
+    # 10. PATCH → 200，end_frame 更新且 end_time 由帧边界派生
     resp = client.patch(
         f"{base}/{ann_id}",
-        json={"end_time": 5.0, "end_frame": 125},
+        json={"end_frame": 125},
         headers=headers,
     )
     assert resp.status_code == 200
-    assert resp.json()["end_time"] == 5.0
+    assert resp.json()["end_time"] == pytest.approx(126 / 25)
     assert resp.json()["end_frame"] == 125
 
     # 11. 导出 → 统一事件格式

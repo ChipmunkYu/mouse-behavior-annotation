@@ -12,6 +12,7 @@ from sqlalchemy import func, insert, select
 from sqlalchemy.orm import Session
 
 from .effective_detections import effective_detection_query
+from .frame_intervals import canonical_frame_interval
 from .models import (
     Annotation, BehaviorCategory, DetectionImport, DetectionSnapshot,
     DetectionSnapshotState, DetectionStateOverride, RawDetection, Submission,
@@ -233,13 +234,19 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
             reason = "Annotation does not belong to the video"
         elif ann.confidence not in {"certain", "uncertain", "occluded"}:
             reason = "Invalid confidence"
-        elif ann.start_time < 0 or ann.end_time <= ann.start_time or ann.start_frame < 0 or ann.end_frame < ann.start_frame:
-            reason = "Invalid time/frame range"
-        elif imp.frame_count is not None and ann.end_frame >= imp.frame_count:
-            reason = "Frame range exceeds detection metadata"
-        elif video.duration is not None and ann.end_time > video.duration + 1e-6:
+        else:
+            try:
+                interval = canonical_frame_interval(
+                    start_frame=ann.start_frame, end_frame=ann.end_frame,
+                    fps=imp.fps, frame_count=imp.frame_count,
+                )
+            except ValueError as exc:
+                reason = str(exc)
+            else:
+                ann.start_time, ann.end_time = interval.start_time, interval.end_time
+        if reason is None and video.duration is not None and ann.end_time > video.duration + 1e-6:
             reason = "Time range exceeds source media"
-        elif not _validate_crop(ann.crop_region, imp.width, imp.height):
+        elif reason is None and not _validate_crop(ann.crop_region, imp.width, imp.height):
             reason = "Invalid crop region"
         if reason is None:
             try:

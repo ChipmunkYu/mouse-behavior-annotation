@@ -31,8 +31,7 @@ def _role_project(ctx):
 
 
 def _body(category_id, roles=None):
-    result = {"category_id": category_id, "start_time": 0, "end_time": 2,
-              "start_frame": 0, "end_frame": 49}
+    result = {"category_id": category_id, "start_frame": 0, "end_frame": 4}
     if roles is not None:
         result["participant_roles"] = roles
     return result

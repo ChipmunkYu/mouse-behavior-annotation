@@ -120,6 +120,11 @@ export function listVideos(projectId: number | string, params: VideoListParams =
   return apiFetch<Video[]>(`/projects/${projectId}/videos${qs.size ? `?${qs}` : ""}`);
 }
 
+/** 同步硬删除单个视频；成功时后端返回 204，所有权限与状态门禁以后端为准。 */
+export function deleteVideo(projectId: number | string, videoId: number | string): Promise<void> {
+  return apiFetch<void>(`/projects/${projectId}/videos/${videoId}`, { method: "DELETE" });
+}
+
 export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {
   return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/claim`, { method: "POST" });
 }
