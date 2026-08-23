@@ -206,6 +206,7 @@ def test_partial_directory_purge_resumes_but_rejects_new_content(tmp_path, monke
         patch.setattr(os, "unlink", fail_second)
         with pytest.raises(PermissionError, match="injected"):
             io.purge(manifest)
+    assert failed, "os.unlink fault hook was not exercised"
     results = io.recover(lambda _video_id: False)
     assert len(results) == 1 and results[0].ok and results[0].action == "purged"
 
@@ -240,6 +241,16 @@ def test_directory_purge_fails_closed_when_descriptor_operations_are_unavailable
 
     quarantine = io.quarantine_dir / "closed-dir-purge" / "files" / "000000"
     assert (quarantine / "owned").read_bytes() == b"keep-in-quarantine"
+
+
+def test_descriptor_capability_is_frozen_across_fault_injection_monkeypatches(tmp_path, monkeypatch):
+    io = _io(tmp_path)
+    supported = io._descriptor_directory_operations_supported()
+
+    monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: None)
+    monkeypatch.setattr(os, "rename", lambda *args, **kwargs: None)
+
+    assert io._descriptor_directory_operations_supported() is supported
 
 
 def test_descriptor_purge_rejects_nested_symlink_swap_after_stat(tmp_path, monkeypatch):
@@ -374,6 +385,7 @@ def test_descriptor_restore_removes_root_symlink_swapped_during_rename(tmp_path,
     monkeypatch.setattr(os, "rename", swap_during_rename)
     with pytest.raises(VideoDeleteIOError, match="identity-mismatch"):
         io.restore(manifest)
+    assert swapped, "os.rename fault hook was not exercised"
 
     assert outside_file.read_bytes() == b"outside"
     assert not staging.exists() and not staging.is_symlink()

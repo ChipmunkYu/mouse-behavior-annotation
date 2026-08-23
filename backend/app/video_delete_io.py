@@ -23,6 +23,22 @@ MANIFEST_VERSION = 2
 _OPERATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _TABLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
+# Freeze platform capabilities while these names still refer to the original stdlib
+# functions. Tests deliberately replace os.unlink/os.rename to inject failures; those
+# replacements must not change whether descriptor-relative operations are available.
+_DESCRIPTOR_DIRECTORY_OPERATIONS_SUPPORTED = (
+    os.name == "posix"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and all(
+        function in os.supports_dir_fd
+        for function in (os.open, os.stat, os.unlink, os.rmdir, os.rename, os.mkdir)
+    )
+    and os.stat in os.supports_follow_symlinks
+    # Descriptor traversal currently calls listdir(fd); scandir is path-based only.
+    and os.listdir in os.supports_fd
+)
+
 
 class VideoDeleteIOError(RuntimeError):
     """A safe-to-report protocol failure (message never includes an absolute path)."""
@@ -476,13 +492,7 @@ class VideoDeleteIO:
     @staticmethod
     def _descriptor_directory_operations_supported() -> bool:
         """Whether Python exposes the primitives needed for no-follow dir-fd traversal."""
-        required_dir_fd = (os.open, os.stat, os.unlink, os.rmdir, os.rename, os.mkdir)
-        return (
-            hasattr(os, "O_DIRECTORY")
-            and hasattr(os, "O_NOFOLLOW")
-            and all(function in os.supports_dir_fd for function in required_dir_fd)
-            and os.listdir in os.supports_fd
-        )
+        return _DESCRIPTOR_DIRECTORY_OPERATIONS_SUPPORTED
 
     @staticmethod
     def _directory_open_flags() -> int:
