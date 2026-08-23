@@ -17,7 +17,8 @@ from .cleanup_io import (
     trusted_root,
     update_cleanup_log,
 )
-from .models import Annotation, BackgroundJob, Clip, Video
+from .import_batch_cleanup import BatchCleanupConflict, cleanup_import_batch
+from .models import Annotation, BackgroundJob, Clip, Video, VideoImportBatch
 
 TERMINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
 _VIDEO_TEMP = re.compile(r"^[0-9a-fA-F]{32}\.part$")
@@ -83,11 +84,11 @@ def _retry_cleanup_issues(
                 replacements.append(line)
                 report["issues_retained"] += 1
                 continue
-            if (
-                not isinstance(entry, dict)
-                or entry.get("kind") != "delete-failed"
-                or entry.get("cleanup_status") == "resolved"
-            ):
+            if not isinstance(entry, dict) or entry.get("cleanup_status") == "resolved":
+                replacements.append(line)
+                report["issues_retained"] += 1
+                continue
+            if entry.get("kind") != "delete-failed":
                 replacements.append(line)
                 report["issues_retained"] += 1
                 continue
@@ -223,9 +224,52 @@ def run_retention_cleanup(
         "issues_would_resolve": 0,
         "issues_retained": 0,
         "issues": [],
+        "import_batches_deleted": 0,
+        "import_batches_would_delete": 0,
     }
 
     _retry_cleanup_issues(db, settings, report, dry_run=dry_run)
+    stale_batches = db.query(VideoImportBatch.id, VideoImportBatch.project_id).filter(
+        VideoImportBatch.status.in_(("uploading", "failed")),
+        VideoImportBatch.updated_at < temp_cutoff,
+    ).all()
+    for batch_id, project_id in stale_batches:
+        try:
+            result = cleanup_import_batch(
+                db,
+                batch_id,
+                project_id,
+                settings,
+                dry_run=dry_run,
+                stale_before=temp_cutoff,
+                allow_active_upload_slots=False,
+            )
+            if dry_run:
+                report["import_batches_would_delete"] += 1
+                report["would_delete"] += result["files"]
+            else:
+                report["import_batches_deleted"] += 1
+                report["deleted"] += result["files"]
+                report["issues"].extend(result.get("issues", []))
+        except (BatchCleanupConflict, LookupError) as exc:
+            db.rollback()
+            issue = _issue(
+                "import-batch-cleanup-skipped", None,
+                exc.detail if isinstance(exc, BatchCleanupConflict) else str(exc),
+                batch_id=batch_id, project_id=project_id,
+            )
+            report["issues"].append(issue)
+            if not dry_run:
+                append_cleanup_issues(settings.cleanup_log, [issue])
+        except Exception as exc:
+            db.rollback()
+            issue = _issue(
+                "import-batch-cleanup-failed", None, str(exc),
+                batch_id=batch_id, project_id=project_id,
+            )
+            report["issues"].append(issue)
+            if not dry_run:
+                append_cleanup_issues(settings.cleanup_log, [issue])
     expired_exports = (
         db.query(BackgroundJob)
         .filter(

@@ -3,6 +3,8 @@ import { Link, Outlet, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { listProjects } from "../api";
 import type { Project } from "../api/types";
+import { UploadManagerProvider, useUploadManager } from "../upload/UploadManagerContext";
+import UploadTaskTray from "../upload/UploadTaskTray";
 
 /** 项目内二级导航（按项目角色显示合理入口）。 */
 interface NavItem {
@@ -22,10 +24,16 @@ const PROJECT_NAV: NavItem[] = [
 
 /** 登录后页面共用外壳：顶栏 + 项目导航 + 内容区。 */
 export default function AppLayout() {
+  return <UploadManagerProvider><AppLayoutContent /></UploadManagerProvider>;
+}
+
+function AppLayoutContent() {
   const { user, logout } = useAuth();
+  const { cancelAllForLogout } = useUploadManager();
   const location = useLocation();
   const { projectId } = useParams<{ projectId: string }>();
   const [project, setProject] = useState<Project | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const pid = projectId ? Number(projectId) : null;
 
@@ -49,6 +57,13 @@ export default function AppLayout() {
   }, [pid]);
 
   const navItems = pid != null && project != null ? PROJECT_NAV.filter((n) => n.visible(project)) : [];
+
+  async function handleLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    await cancelAllForLogout();
+    logout();
+  }
 
   function isActive(item: NavItem): boolean {
     const path = item.to(pid as number);
@@ -79,14 +94,15 @@ export default function AppLayout() {
           {routeLabel() ? <span className="topbar-route">{routeLabel()}</span> : null}
         </div>
         <div className="topbar-right">
+          <UploadTaskTray />
           {user ? (
             <span className="topbar-user">
               <span className="avatar" aria-hidden="true">
                 {user.username.slice(0, 1).toUpperCase()}
               </span>
               <span className="topbar-username">{user.username}</span>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={logout}>
-                退出登录
+              <button type="button" className="btn btn-ghost btn-sm" disabled={loggingOut} onClick={() => void handleLogout()}>
+                {loggingOut ? "正在退出…" : "退出登录"}
               </button>
             </span>
           ) : null}

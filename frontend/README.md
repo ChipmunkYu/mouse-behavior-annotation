@@ -10,11 +10,12 @@
 - **登录** `/login`：demo/demo123 开发账号提示、表单校验、错误态；登录后 token 与用户信息存入 localStorage。
 - **项目列表** `/projects`：展示当前用户成员项目、`owner/admin/member` 角色和审核能力，支持创建项目及输入邀请码加入项目。创建表单复用类别方案编辑器，本地草稿可从空列表开始，但至少一个类别的名称、分组、颜色、参与对象模式及对应数量/角色完整前不能提交；创建成功后进入未锁定的项目管理页复核，永久锁定仍需 owner 另行确认。
 - **视频库** `/projects/:projectId/videos`：
-  - **三文件导入批次**（主操作）：同一批次分别上传原始视频、`tracks.jsonl` 和 `metadata.json`，显示各槽位状态并支持独立重试；视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
+  - **全局上传任务管理器与上传任务栏**：上传面板只创建任务；任务由登录后全局布局持有，在同一 SPA 会话内关闭面板、切换页面或跨项目导航时继续运行。首个及后续新任务入队时，常驻上传任务栏都会自动展开；用户可手动收起，并通过顶栏带活跃/失败数量的明显入口重新展开。任务栏持续展示文件或批次名、项目、具体阶段、真实总进度、错误和取消清理状态；全局最多 2 个任务并发。排队/运行任务可直接取消，失败任务可直接重试或取消，成功任务可单项确认或一键确认；正常退出登录先中止请求并清理未完成批次。桌面固定右下，窄屏为底部全宽可滚动区域。刷新、关闭标签页、跨设备恢复及断点续传不在范围内。
+  - **三文件导入批次**（主操作）：每个任务独占服务端批次，固定按 `tracks → metadata → video` 上传后校验；总进度按三文件字节计算。取消即调用批次删除清理，401 时本地任务停止并由后端 24 小时未活动回收兜底。视频可先完成入库，结构化数据配对通过后启用 track 功能。已有视频支持补传/替换检测结果。
   - 保留单视频上传 `POST /api/projects/:projectId/videos/upload`（multipart field `file`，Bearer）。
     - 支持 mp4 / mov / avi / mkv / webm / m4v / wmv / mpeg / mpg；不设前端大小上限，实际受服务器磁盘空间约束。
     - XMLHttpRequest 真实上传进度（百分比 + 已传/总大小）、可取消（`xhr.abort`）；401 行为与全局 client 一致。
-    - 状态：待上传 → 上传中（进度条）→ 成功 / 失败 / 已取消；成功后自动刷新视频列表并可进入标注。
+    - 状态：排队 → 上传中（进度条）→ 成功 / 失败；取消后任务移除。成功会刷新对应项目视频列表，并在上传任务栏中保留至用户确认。
     - 失败友好提示：507 磁盘不足有专属文案，其余提取后端 `detail`（403/404/409/422 附带补充说明）。
     - 201 返回 Video；不兼容格式后端可能返回 `status = "needs_transcode"` —— 卡片明确标注「已上传，待转码，当前浏览器可能无法播放」，不提供进入标注，仅可查看元数据。
   - 搜索 + 视频工作流状态筛选；筛选字段严格为 `workflow_status`，不是媒体 `status` 或单条 `Annotation.review_status`。列表卡片显示时长 / 帧率 / 分辨率 / 媒体状态徽标与审核工作流状态（`workflow_status` + 修订号 + 提交/通过时间）。
@@ -25,6 +26,7 @@
   - 单视频上传和三文件导入完成时，owner/admin 可从精简负责人目录选择负责人；不选择则进入未分配状态。
   - **批次 4**：approved 卡片额外显示一行「片段生成概要」（就绪 x/y / 处理中 / 失败），仅挂载时拉取一次，不做每卡高频轮询；详情进入审核 / 标注页查看。
   - **审核入口**：owner/admin 或 `can_review=true` 的 member 显示「✓ 审核工作台」入口。
+  - **独立原始视频预览**：新 `main` 提供的视频卡片预览能力保持独立，不依赖全局上传任务或上传任务栏状态。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
   - 视频流播放（Bearer 认证，blob 拉取）；无文件时空态提示。
@@ -74,7 +76,7 @@
 - 导出页面 `src/pages/ExportPage.tsx`：统计摘要 + 类别多选范围 + 独立四文件目录预览 + 任务轮询（仅导出中轮询，组件卸载即清理）与下载（blob object URL 延迟回收）。
 - 片段库页面 `src/pages/ClipsPage.tsx`：预览区加载源视频复用 `fetchVideoStreamUrl`，缩略图经 `fetchClipThumbnailUrl`（Bearer blob，失败回退占位）；轮询仅在有「待生成」片段时进行，组件卸载即清理。
 - 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
-- 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案），页面不散落上传逻辑。
+- 文件上传走 `client.ts` 的 `uploadFile`（XMLHttpRequest，支持进度/取消/507 文案）；`src/upload/` 的全局管理器负责 2 任务并发调度、跨项目生命周期、上传任务栏、重试、确认、取消和退出清理，页面不持有请求生命周期。
 - 视频库框选状态机集中在 `src/hooks/useVideoMarqueeSelection.ts`，处理阈值、中心点命中、组合键集合、pointer capture、自动滚动、Esc/取消清理及设备降级；页面负责可选资格、筛选后选择清理和 aria-live 反馈。
 - 认证上下文在 `src/auth/`（AuthContext / ProtectedRoute / storage / 401 事件）。
 - 确认对话框：`src/components/ConfirmDialog.tsx` 的 `useConfirm()`（键盘可达，Esc / 遮罩取消，焦点归还）。
@@ -99,7 +101,7 @@ npm run build
 npm run preview
 ```
 
-当前 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成后续修复；Oracle 最终确认实现问题关闭。当前联合代码的 production `npm run build` 通过并处理 62 modules；后端全量为 `516 passed, 3 skipped, 1 warning`，且单次命令临时加入 clip venv `Scripts` 到 `PATH` 后，5 项真实 FFmpeg/ffprobe 集成测试均实际通过。既有类别角色人工矩阵是在合并前 category 基线上完成，覆盖创建与锁定、真实三文件导入、角色槽位与草稿、提交/Review、窄屏及键盘，但合并后未重新执行完整人工矩阵。当前分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；生产 FFmpeg/ffprobe 4.4.2 仍未验证。
+当前全局上传任务管理实现的 production `npm run build` 通过并处理 **66 modules**；后端相关测试为 **128 passed, 3 skipped, 1 warning**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题，不代表浏览器人工矩阵已经验收；跨路由、跨项目、取消/重试、退出、401 回收及可访问性仍待人工验证。
 
 ## 目录结构
 
@@ -116,7 +118,8 @@ frontend/
  ├── api/ # client.ts（fetch + XHR 上传封装）+ index.ts（接口）+ types.ts（类型）
  ├── auth/ # AuthContext / ProtectedRoute / storage / 401 事件
  ├── hooks/ # useVideoMarqueeSelection 视频库桌面框选状态机
- ├── components/ # AppLayout（顶栏 + 项目导航）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
+ ├── components/ # AppLayout（顶栏 + 项目导航 + 上传任务栏）/ ui.tsx（徽标、空态、卡片等）/ VideoUploadPanel / Timeline / ConfirmDialog / MediaStatusPanel
+ ├── upload/ # 全局上传任务模型、2 并发调度、执行状态机与 UploadTaskTray
  ├── pages/ # LoginPage / ProjectsPage / VideosPage / ProjectManagementPage / AnnotatePage / ReviewPage / ClipsPage / ExportPage
     ├── styles/global.css
     └── utils/format.ts # 时间/帧/文件大小格式化

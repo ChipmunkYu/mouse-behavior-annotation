@@ -368,11 +368,12 @@ export interface ExportEvent {
 
 // ---------- 检测结果导入与 track 修正 ----------
 export type ImportFileRole = "video" | "tracks" | "metadata";
+export type VideoImportBatchStatus = "uploading" | "processing" | "ready" | "video_only" | "failed" | "cancelling";
 
 export interface VideoImportBatch {
   id: number;
   project_id: number;
-  status: string;
+  status: VideoImportBatchStatus;
   video_upload_state: string;
   tracks_upload_state: string;
   metadata_upload_state: string;

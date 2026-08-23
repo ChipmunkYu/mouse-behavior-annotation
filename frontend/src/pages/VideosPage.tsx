@@ -11,6 +11,7 @@ import VideoPreviewDialog from "../components/VideoPreviewDialog";
 import { ApiError } from "../api/client";
 import { useVideoMarqueeSelection } from "../hooks/useVideoMarqueeSelection";
 import { formatDate, formatDuration } from "../utils/format";
+import { useProjectUploadVersion } from "../upload/UploadManagerContext";
 
 const VIEWS: { key: VideoView; label: string; hint: string }[] = [
   { key: "mine", label: "我的任务", hint: "由你负责的视频" },
@@ -72,6 +73,8 @@ export default function VideosPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDialog, confirm] = useConfirm();
+  const uploadSuccessVersion = useProjectUploadVersion(pid);
+  const uploadSuccessVersionRef = useRef(uploadSuccessVersion);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const canManage = project?.role === "owner" || project?.role === "admin";
   const canSelect = Boolean(project && (canManage || view === "unassigned"));
@@ -88,6 +91,11 @@ export default function VideosPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "加载视频失败"); setVideos([]); return [] as Video[]; }
   }, [pid, view, workflow, assigneeFilter]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (uploadSuccessVersion === uploadSuccessVersionRef.current) return;
+    uploadSuccessVersionRef.current = uploadSuccessVersion;
+    void load();
+  }, [uploadSuccessVersion, load]);
   useEffect(() => { if (view !== "all") setPreviewVideo(null); }, [view]);
 
   const displayed = useMemo(() => {
@@ -265,7 +273,7 @@ export default function VideosPage() {
     {confirmDialog}
     {previewVideo ? <VideoPreviewDialog video={previewVideo} onClose={() => setPreviewVideo(null)} /> : null}
     <div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}{project ? ` · ${ROLE_LABELS[project.role]}` : ""}</div><h1>视频库</h1></div><div className="page-header-actions">{project?.can_review ? <Link className="btn btn-sm" to={`/projects/${pid}/review`}>审核工作台</Link> : null}<button className="btn btn-primary" onClick={() => setUploadOpen((x) => !x)}>{uploadOpen ? "收起上传" : "↑ 上传视频"}</button></div></div>
-    {uploadOpen && project ? <VideoUploadPanel projectId={pid} canManage={canManage} assignees={assignees} onUploaded={() => void load()} onEnterAnnotation={(v) => navigate(`/projects/${pid}/annotate/${v.id}`)} onClose={() => setUploadOpen(false)} /> : null}
+    {uploadOpen && project ? <VideoUploadPanel projectId={pid} projectName={project.name} canManage={canManage} assignees={assignees} /> : null}
     {error ? <ErrorBox message={error} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
     <div className="assignment-summary"><span><b>{stats?.total ?? 0}</b> 个视频</span><span className={(stats?.unassigned ?? 0) ? "warn" : ""}><b>{stats?.unassigned ?? 0}</b> 个未分配</span>{canManage ? <Link to={`/projects/${pid}/manage`}>查看分配统计 →</Link> : null}</div>
     <div className="view-tabs" role="tablist" aria-label="视频视图">{VIEWS.map((item) => <button key={item.key} role="tab" aria-selected={view === item.key} className={view === item.key ? "active" : ""} title={item.hint} onClick={() => { setView(item.key); if (item.key === "unassigned") setWorkflow(""); clearSelection("切换视图后已清除选择"); if (item.key !== "all") setAssigneeFilter(""); }}>{item.label}{item.key === "unassigned" && (stats?.claimable ?? 0) > 0 ? <span title="可领取数">{stats?.claimable}</span> : null}</button>)}</div>

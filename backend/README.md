@@ -39,7 +39,8 @@ backend/
 │ ├── 0010_submission_integrity_digests.py # snapshot 完整性 digest
 │ ├── 0011_immutable_authority_file_identity.py # authority 不可变 trigger 与源文件 identity
 │ ├── 0012_assignment_members_invites.py # 三角色、审核能力、邀请码与视频负责人
-│ └── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
+│ ├── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
+│ └── 0014_import_batch_ownership_activity.py # 三文件导入批次创建者与活动时间
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -92,7 +93,7 @@ uvicorn app.main:app --reload --port 8000
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0013），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0014），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -121,9 +122,9 @@ baseline（0001）再升级到 head（0013），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案永久锁定、参与对象角色 JSON、快照、审计与数据库保护）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0012 已版本化库 → 按迁移链增量 `upgrade head` 到 0013；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority。
+- 0002～0013 已版本化库 → 按迁移链增量 `upgrade head` 到 0014；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -243,7 +244,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
 | `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
 | `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
-| `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件和孤儿导出 ZIP 的保留时间 |
+| `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件、孤儿导出 ZIP 及未活动 `uploading/failed` 三文件导入批次的保留时间 |
 | `JOB_RETENTION_DAYS` | `30` | 无结果路径的 terminal 后台任务日志保留天数 |
 
 ## API 一览
@@ -300,6 +301,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `PUT` | `/api/projects/{project_id}/video-import-batches/{batch_id}/files/{role}` | 独立上传 `video` / `tracks` / `metadata` |
 | `POST` | `/api/projects/{project_id}/video-import-batches/{batch_id}/complete` | 完成配对校验并创建视频/DetectionImport；owner/admin 可指定负责人 |
 | `GET` | `/api/projects/{project_id}/video-import-batches/{batch_id}` | 查询槽位、校验错误和导入状态 |
+| `DELETE` | `/api/projects/{project_id}/video-import-batches/{batch_id}` | 取消 `uploading/failed` 批次并安全清理未消费文件、可删除的批次创建视频与批次记录 → 204 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-imports` | 为已有视频补传或确认替换 tracks/metadata |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-imports/current` | 当前导入、统计和修订 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections` | 按帧区间读取有效检测及 import/identity revision |
@@ -314,6 +316,10 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | legacy 兼容的修正后 track JSONL/manifest 接口；不属于正式项目 ZIP |
 
 `metadata.json` 接受规范 `frame_count`，并兼容真实样本的 `processed_frames` / `declared_frame_count`；模型、校验和、tracker、推理参数和骨架同时接受实际字段 `model`、`model_sha256`、`tracker`、`parameters`、`skeleton_edges_0based`。`source_relative` 按 basename 与视频文件名匹配。新视频成功导入时同步 FPS、宽、高和 `duration=frame_count/fps`；已有视频替换时校验 source basename、FPS、宽、高和当前导入 `frame_count`。预览及失败均清理候选文件，只有 `confirm=true` 成功才保留。原始 YOLO 文件与 RawDetection 保持不可变。
+
+迁移 0014 后，新批次记录创建者 `created_by`，并在创建、槽位上传及完成/失败状态变化时更新 `updated_at`。批次创建者可查询、上传、完成和删除自己的批次，项目所有者/管理员可管理项目内任意批次；其他普通成员访问别人的批次返回 403。历史批次的 `created_by` 可空，此时仅项目所有者/管理员可管理。该权限不改变 active membership 门禁。
+
+批次删除与生命周期回收均以安全清理为目标：只接受 `uploading/failed`，校验路径位于受控目录、文件未被其他批次或正式数据引用，并仅删除仍保持初始状态且无用户工作的批次创建视频。并发状态变化、已消费数据或不安全路径返回/记录冲突而不强删。该机制不提供断点续传，也不宣称单视频或整个上传流程严格 exactly-once。
 
 Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。当前 `Submission` authority 处于 `submitted` 时锁定编辑并要求先 withdraw；`approved/rejected` 的 `Video` 兼容投影在新编辑后回到 draft，但不会修改已冻结的 Submission/DetectionSnapshot。撤销严格限栈顶，cursor 不回退、display ID 不复用。
 
@@ -525,6 +531,9 @@ ZIP 完整性检查通过后，才在发布前短事务中复核冻结引用与 
 原视频永不自动删除；有效 DB 引用的 Clip/缩略图长期保留；导出 ZIP 仅在对应 export job
 到期（`expires_at <= now`）后删除。程序已知的 `.part`、export staging/tmp 及无有效未过期
 export job 引用的程序命名孤儿 ZIP 保留 24h，无结果路径的 terminal job 保留 30d。
+`updated_at` 超过 `TEMP_RETENTION_HOURS`（默认 24h）未变化的 `uploading/failed` 三文件导入批次也进入安全回收，作为浏览器收到 401、标签页关闭或前端无法完成认证删除时的兜底；正在上传的槽位、已完成批次、已消费文件或出现引用/状态冲突的批次不会被强制删除。
+
+应用进程在文件系统与数据库提交窗口发生极端崩溃时，仍可能留下需人工判断的记录或文件；运维应检查 `cleanup-issues.log`、数据库引用和对应存储目录后处理。本实现不以高并发、多应用进程恢复或断点续传为目标。
 `DATA_DIR` 是可由管理员配置并解析的可信 anchor，但 `videos/clips/thumbnails/exports` 子根及其
 anchor 后的任何组件只要是 symlink，该 lane 就整体拒绝；删除前还会复核实体类型和 lstat 身份。
 
@@ -569,6 +578,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 - `Project.category_scheme_*`：项目级版本与永久锁定 authority；完整方案 GET/PUT/lock/audit 均为 active owner-only，锁定后类别和角色定义由数据库 trigger 禁止旁路修改。
 - `BehaviorCategory.participant_mode/role_definitions`：`unordered|role_based` 与角色 JSON；role key 由服务端生成，role-based 总对象范围由各角色 min/max 派生。
 - `DetectionImport` / `RawDetection`：保存不可变导入与逐帧原始检测；当前修正状态由 sparse override 表达。
+- `VideoImportBatch`：三文件导入批次；0014 增加可空创建者 `created_by` 和非空活动时间 `updated_at`，用于创建者权限隔离与默认 24 小时未活动回收。
 - `DetectionStateOverride`：当前 draft 相对 RawDetection baseline 的稀疏 display/suppressed 状态。
 - `DraftIdentityEdit` / `DraftDetectionChange`：当前 draft 的紧凑 LIFO undo 栈与受影响 detection before/after；不是永久审计。
 - 旧 `CorrectedTrack` / CDA / `IdentityEdit` / suppression 表仅保留迁移兼容，当前运行时不再写入。
@@ -645,7 +655,7 @@ cd backend
 pytest -q
 ```
 
-当前联合分支 `feature/category-role-schema@933b805` 已通过 `6e2825d` 合入 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复，并由 `6afc126`、`02fe454`、`933b805` 完成导出快照、严格整数契约和测试有效性修复；Oracle 最终确认实现问题关闭。在当前 backend 目录，仅对单次命令临时将 clip venv `Scripts` 加入 `PATH` 后，后端全量为 `516 passed, 3 skipped, 1 warning`；其中 `tests/test_media_ffmpeg_integration.py` 的 5 项真实 FFmpeg/ffprobe 测试均实际执行并通过。该 `PATH` 不是系统配置，生产 FFmpeg/ffprobe 4.4.2 仍未验证。前端 production build 同步通过（62 modules）。既有类别角色人工浏览器矩阵是在合并前 category 基线上完成，不能解释为合并后已重新执行完整人工矩阵。
+当前全局上传任务管理实现的后端相关测试为 **128 passed, 3 skipped, 1 warning**，前端 production build 通过并处理 **66 modules**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题；该结论不等于跨路由、跨项目、取消/重试、退出、401 回收或可访问性的浏览器人工矩阵已经验收。
 
 已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
 
@@ -673,8 +683,8 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
 分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
-以及迁移验收（全新库建至 head 0013 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径（0002、0003、0004、0006、0007、0009、0010、0011、0012）按 0012→0013 顺序升级至 head 0013 /
+以及迁移验收（全新库建至 head 0014 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径按迁移链升级至 head 0014，并覆盖 0013→0014 的创建者/活动时间回填与 downgrade/upgrade /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，
@@ -686,7 +696,8 @@ dedupe_key 唯一约束防重复任务）。
 - 未实现用户注册接口（通过 `data/` 内联管理或后续 P2 补充）。
 - 视频上传（批次 2）已支持真实文件流式上传（`POST .../videos/upload`）；
   P1 的 JSON Mock 接口（`POST .../videos`）保留不变。**未实现**：ffprobe 元数据探测、
-  进度回调。
+  后端进度回调、断点续传和严格 exactly-once；浏览器仅通过 XHR 观察本次请求进度。
+- 三文件导入批次支持创建者隔离、显式 DELETE 清理和按 `updated_at` 的 24 小时未活动回收；定位为不超过 6 人、常见 1–2 名上传者的小规模单应用进程场景，不声称高并发能力。极端进程崩溃边界仍需运维检查和处理。
 - 视频流安全边界：`GET .../stream` 只服务解析后位于配置视频目录（`DATA_DIR/videos`）**内部**的文件；绝对路径或含 `../` 的路径逃出该目录一律 404，避免任意读取项目外敏感文件。
 - 批次 4 已实现精确片段/缩略图后台生成（仅 approved，单 worker 串行、可恢复/重试、修订隔离）；
   媒体执行器依赖本机 ffmpeg/ffprobe（或经 `FFMPEG_PATH`/`FFPROBE_PATH` 注入），

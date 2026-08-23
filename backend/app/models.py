@@ -436,7 +436,7 @@ class VideoImportBatch(Base):
     """三文件（原始视频 / tracks.jsonl / metadata.json）独立上传批次。
 
     槽位状态 pending / uploading / uploaded / validated / failed；
-    批次状态 uploading / validating / ready / failed。
+    批次状态 uploading / processing / ready / video_only / failed；DELETE 清理期间短暂为 cancelling。
     """
 
     __tablename__ = "video_import_batches"
@@ -444,6 +444,10 @@ class VideoImportBatch(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Legacy rows are nullable; every batch created by the API records its creator.
+    created_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     status: Mapped[str] = mapped_column(String(32), default="uploading", nullable=False)
     validation_errors: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -459,6 +463,9 @@ class VideoImportBatch(Base):
         ForeignKey("videos.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
     project: Mapped["Project"] = relationship(back_populates="import_batches")
     created_video: Mapped[Optional["Video"]] = relationship(foreign_keys=[created_video_id])

@@ -10,11 +10,12 @@ import json
 import math
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,6 +25,11 @@ from ..draft_detection_edits import revalidate_annotations
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..deps import project_access
 from ..effective_detections import effective_detection_query, effective_track_summary_query
+from ..import_batch_cleanup import (
+    BatchCleanupConflict,
+    cleanup_import_batch,
+    cleanup_replaced_batch_file,
+)
 from ..models import (
     Annotation,
     BehaviorCategory,
@@ -148,6 +154,15 @@ def _require_batch(db: Session, batch_id: int, project_id: int) -> VideoImportBa
     batch = db.get(VideoImportBatch, batch_id)
     if batch is None or batch.project_id != project_id:
         raise HTTPException(status_code=404, detail="Import batch not found")
+    return batch
+
+
+def _require_batch_access(
+    db: Session, batch_id: int, project_id: int, membership: ProjectMembership
+) -> VideoImportBatch:
+    batch = _require_batch(db, batch_id, project_id)
+    if not is_manager(membership) and batch.created_by != membership.user_id:
+        raise HTTPException(status_code=403, detail="Import batch belongs to another user")
     return batch
 
 
@@ -690,11 +705,42 @@ def create_import_batch(
     if membership.status != "active":
         raise HTTPException(status_code=403, detail="Project membership is not active")
 
-    batch = VideoImportBatch(project_id=project_id)
+    now = datetime.utcnow()
+    batch = VideoImportBatch(
+        project_id=project_id, created_by=membership.user_id,
+        updated_at=now,
+    )
     db.add(batch)
     db.commit()
     db.refresh(batch)
     return batch
+
+
+@router.delete(
+    "/api/projects/{project_id}/video-import-batches/{batch_id}",
+    status_code=204,
+)
+def cancel_import_batch(
+    project_id: int,
+    batch_id: int,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> Response:
+    _project, membership = access
+    if membership.status != "active":
+        raise HTTPException(status_code=403, detail="Project membership is not active")
+    _require_batch_access(db, batch_id, project_id, membership)
+    try:
+        cleanup_import_batch(
+            db, batch_id, project_id, request.app.state.settings,
+            allow_active_upload_slots=True,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Import batch not found") from None
+    except BatchCleanupConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from None
+    return Response(status_code=204)
 
 
 @router.put(
@@ -717,7 +763,9 @@ async def upload_batch_file(
     if membership.status != "active":
         raise HTTPException(status_code=403, detail="Project membership is not active")
 
-    batch = _require_batch(db, batch_id, project_id)
+    batch = _require_batch_access(db, batch_id, project_id, membership)
+    if batch.status != "uploading":
+        raise HTTPException(status_code=409, detail="Import batch is not accepting uploads")
 
     raw_name = file.filename or ""
     if not raw_name:
@@ -754,46 +802,91 @@ async def upload_batch_file(
 
     _check_non_empty(file)
 
+    state_column = getattr(VideoImportBatch, f"{role}_upload_state")
+    path_column = getattr(VideoImportBatch, f"{role}_path")
+    old_state = getattr(batch, f"{role}_upload_state")
+    old_path = getattr(batch, f"{role}_path")
+    activity = datetime.utcnow()
+    claimed = db.query(VideoImportBatch).filter(
+        VideoImportBatch.id == batch_id,
+        VideoImportBatch.project_id == project_id,
+        VideoImportBatch.status == "uploading",
+        state_column != "uploading",
+    ).update({
+        state_column: "uploading",
+        VideoImportBatch.updated_at: activity,
+    }, synchronize_session=False)
+    if claimed != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Import batch upload slot is busy")
+    db.commit()
+
+    def release_slot() -> None:
+        try:
+            db.rollback()
+            now = datetime.utcnow()
+            db.query(VideoImportBatch).filter(
+                VideoImportBatch.id == batch_id,
+                VideoImportBatch.project_id == project_id,
+                VideoImportBatch.status == "uploading",
+                state_column == "uploading",
+            ).update({
+                state_column: old_state,
+                VideoImportBatch.updated_at: now,
+            }, synchronize_session=False)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    final_path: Path | None = None
     try:
         final_path, written = await _atomic_save_async(
             file, dir_path, suffix, settings.upload_chunk_size,
             settings.upload_disk_reserve_bytes,
         )
-    except HTTPException:
+        if written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        if role in ("tracks", "metadata"):
+            actual_size = final_path.stat().st_size
+            if actual_size > settings.detection_import_max_file_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"{role} file too large after save: {actual_size} bytes "
+                    f"(max {settings.detection_import_max_file_bytes} bytes)",
+                )
+
+        activity = datetime.utcnow()
+        values = {
+            path_column: final_path.name, state_column: "uploaded",
+            VideoImportBatch.updated_at: activity,
+        }
+        if role == "video":
+            values[VideoImportBatch.video_filename] = display_name
+        published = db.query(VideoImportBatch).filter(
+            VideoImportBatch.id == batch_id,
+            VideoImportBatch.project_id == project_id,
+            VideoImportBatch.status == "uploading",
+            state_column == "uploading",
+        ).update(values, synchronize_session=False)
+        if published != 1:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Import batch state changed concurrently")
+        db.commit()
+    except BaseException as exc:
+        if final_path is not None:
+            _remove_if_exists(final_path)
+        release_slot()
+        if isinstance(exc, HTTPException):
+            raise
+        if isinstance(exc, Exception):
+            raise HTTPException(status_code=500, detail="Failed to save uploaded file") from exc
         raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file")
     finally:
         await file.close()
 
-    if written == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    # Fix 5: 落盘后二次检查文件大小
-    if role in ("tracks", "metadata"):
-        actual_size = final_path.stat().st_size
-        if actual_size > settings.detection_import_max_file_bytes:
-            _remove_if_exists(final_path)
-            raise HTTPException(
-                status_code=413,
-                detail=f"{role} file too large after save: {actual_size} bytes "
-                f"(max {settings.detection_import_max_file_bytes} bytes)",
-            )
-
-    rel_path = final_path.name
-
-    if role == "video":
-        batch.video_path = rel_path
-        batch.video_filename = display_name
-        batch.video_upload_state = "uploaded"
-    elif role == "tracks":
-        batch.tracks_path = rel_path
-        batch.tracks_upload_state = "uploaded"
-    else:
-        batch.metadata_path = rel_path
-        batch.metadata_upload_state = "uploaded"
-
-    db.commit()
+    batch = _require_batch(db, batch_id, project_id)
+    cleanup_replaced_batch_file(db, batch, role, old_path, settings)
     db.refresh(batch)
     return batch
 
@@ -869,7 +962,14 @@ def complete_import_batch(
         if assignee is None or assignee.project_id != project_id or assignee.status != "active":
             raise HTTPException(status_code=400, detail="Assignee must be an active member of this project")
 
-    batch = _require_batch(db, batch_id, project_id)
+    batch = _require_batch_access(db, batch_id, project_id, membership)
+
+    if "uploading" in (
+        batch.video_upload_state,
+        batch.tracks_upload_state,
+        batch.metadata_upload_state,
+    ):
+        raise HTTPException(status_code=409, detail="Import batch has a file upload in progress")
 
     # Fix 1: 幂等 — 已成功的批次直接返回已有结果
     if batch.status == "ready" and batch.created_video_id is not None:
@@ -901,9 +1001,27 @@ def complete_import_batch(
         raise HTTPException(status_code=400, detail="Video file not found on disk")
 
     # Fix 1: 先标记 processing 防止并发
-    batch.status = "processing"
-    batch.validation_errors = None
+    activity = datetime.utcnow()
+    claimed = db.query(VideoImportBatch).filter(
+        VideoImportBatch.id == batch_id,
+        VideoImportBatch.project_id == project_id,
+        VideoImportBatch.status == "uploading",
+        VideoImportBatch.video_upload_state != "uploading",
+        VideoImportBatch.tracks_upload_state != "uploading",
+        VideoImportBatch.metadata_upload_state != "uploading",
+    ).update(
+        {
+            VideoImportBatch.status: "processing",
+            VideoImportBatch.validation_errors: None,
+            VideoImportBatch.updated_at: activity,
+        },
+        synchronize_session=False,
+    )
+    if claimed != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Import batch state changed concurrently")
     db.commit()
+    batch = _require_batch(db, batch_id, project_id)
 
     # Fix 1: 使用已有 video_id，避免重复创建视频
     if batch.created_video_id is not None:
@@ -952,6 +1070,7 @@ def complete_import_batch(
             batch.status = "uploading"
             batch.created_video_id = None
             batch.validation_errors = {"assignee_conflict": ASSIGNEE_CONFLICT_DETAIL}
+            batch.updated_at = datetime.utcnow()
             db.commit()
             raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
     else:
@@ -963,6 +1082,7 @@ def complete_import_batch(
     if not tracks_ready or not metadata_ready:
         # Fix 1: 仅有视频无检测数据 → video_only 状态
         batch.status = "video_only"
+        batch.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(batch)
         return _build_video_only_response(batch)
@@ -985,6 +1105,7 @@ def complete_import_batch(
         else:
             batch.validation_errors = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
         batch.status = "failed"
+        batch.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(batch)
         validation_errors = (
@@ -1032,12 +1153,14 @@ def complete_import_batch(
         video_ref.detection_import_revision = 1
         batch_ref = _require_batch(db, batch_id, project_id)
         batch_ref.status = "ready"
+        batch_ref.updated_at = datetime.utcnow()
         db.commit()
     except HTTPException:
         db.rollback()
         batch_ref = _require_batch(db, batch_id, project_id)
         batch_ref.status = "failed"
         batch_ref.validation_errors = {"import_failed": True}
+        batch_ref.updated_at = datetime.utcnow()
         db.commit()
         raise
     except Exception:
@@ -1045,6 +1168,7 @@ def complete_import_batch(
         batch_ref = _require_batch(db, batch_id, project_id)
         batch_ref.status = "failed"
         batch_ref.validation_errors = {"import_failed": True}
+        batch_ref.updated_at = datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=500, detail="Failed to import detection data")
 
@@ -1099,7 +1223,9 @@ def get_import_batch(
     db: Session = Depends(get_db),
 ):
     _project, membership = access
-    batch = _require_batch(db, batch_id, project_id)
+    if membership.status != "active":
+        raise HTTPException(status_code=403, detail="Project membership is not active")
+    batch = _require_batch_access(db, batch_id, project_id, membership)
     return batch
 
 

@@ -165,8 +165,8 @@ export function uploadVideo(
 }
 
 // ---------- YOLO 三文件导入 ----------
-export function createImportBatch(projectId: number | string): Promise<VideoImportBatch> {
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches`, { method: "POST" });
+export function createImportBatch(projectId: number | string, signal?: AbortSignal): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches`, { method: "POST", signal });
 }
 
 export function uploadBatchFile(
@@ -181,13 +181,18 @@ export function uploadBatchFile(
   });
 }
 
-export function completeImportBatch(projectId: number | string, batchId: number, assigneeMembershipId?: number | null): Promise<VideoImportBatch> {
+export function completeImportBatch(projectId: number | string, batchId: number, assigneeMembershipId?: number | null, signal?: AbortSignal): Promise<VideoImportBatch> {
   const qs = assigneeMembershipId != null ? `?assignee_membership_id=${assigneeMembershipId}` : "";
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete${qs}`, { method: "POST" });
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete${qs}`, { method: "POST", signal });
 }
 
-export function getImportBatch(projectId: number | string, batchId: number): Promise<VideoImportBatch> {
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}`);
+/** 取消未完成批次并删除服务端已接收的批次文件。 */
+export function cancelImportBatch(projectId: number | string, batchId: number, signal?: AbortSignal): Promise<void> {
+  return apiFetch<void>(`/projects/${projectId}/video-import-batches/${batchId}`, { method: "DELETE", signal });
+}
+
+export function getImportBatch(projectId: number | string, batchId: number, signal?: AbortSignal): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}`, { signal });
 }
 
 export function replaceDetectionImport(

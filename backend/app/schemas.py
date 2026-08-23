@@ -483,6 +483,7 @@ class VideoImportBatchOut(BaseModel):
 
     id: int
     project_id: int
+    created_by: Optional[int] = None
     status: str
     validation_errors: Optional[Any] = None
     video_upload_state: str
@@ -494,6 +495,7 @@ class VideoImportBatchOut(BaseModel):
     metadata_path: Optional[str] = None
     created_video_id: Optional[int] = None
     created_at: datetime
+    updated_at: datetime
 
 
 class DetectionImportOut(BaseModel):
@@ -599,6 +601,7 @@ class BatchStatusOut(BaseModel):
     """批次状态（含文件上传状态与已创建视频 ID）。"""
     id: int
     project_id: int
+    created_by: Optional[int] = None
     status: str
     validation_errors: Optional[Any] = None
     video_upload_state: str
@@ -610,6 +613,7 @@ class BatchStatusOut(BaseModel):
     metadata_path: Optional[str] = None
     created_video_id: Optional[int] = None
     created_at: datetime
+    updated_at: datetime
 
 
 class DetectionImportCurrentOut(BaseModel):
