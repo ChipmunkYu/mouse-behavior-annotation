@@ -5,6 +5,7 @@ import type { CategorySchemeCategoryInput, Project } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import CategorySchemeEditor, { toCategorySchemeRequestCategories, validateCategoryScheme } from "../components/CategorySchemeEditor";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
+import { createDefaultCategoryScheme } from "../data/defaultCategoryScheme";
 import { formatDate } from "../utils/format";
 
 export default function ProjectsPage() {
@@ -16,7 +17,7 @@ export default function ProjectsPage() {
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [categories, setCategories] = useState<CategorySchemeCategoryInput[]>([]);
+  const [categories, setCategories] = useState<CategorySchemeCategoryInput[]>(createDefaultCategoryScheme);
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
@@ -61,7 +62,7 @@ export default function ProjectsPage() {
       setShowForm(false);
       setName("");
       setDescription("");
-      setCategories([]);
+      setCategories(createDefaultCategoryScheme());
       navigate(`/projects/${created.id}/manage`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "创建项目失败");
@@ -98,7 +99,7 @@ export default function ProjectsPage() {
           <h1>我的项目</h1>
           <div className="sub">创建或加入项目后，在此进入对应视频库进行标注</div>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setShowForm((v) => !v)}>
+        <button type="button" className="btn btn-primary" onClick={() => setShowForm((value) => !value)}>
           {showForm ? "收起" : "+ 创建项目"}
         </button>
       </div>
@@ -127,8 +128,8 @@ export default function ProjectsPage() {
                 <input id="project-desc" className="input" value={description} placeholder="简要说明项目目标或数据范围" onChange={(e) => setDescription(e.target.value)} />
               </div>
             </div>
-            <div className="create-project-heading scheme-step-heading"><div><span className="scheme-order">2</span><div><b>行为类别方案</b><small>至少主动添加一个完整类别；创建项目与方案一次提交</small></div></div></div>
-            <CategorySchemeEditor value={categories} onChange={(next) => { setCategories(next); setFormError(null); }} requireColor emptyHint="点击“新增类别”开始配置；不会先创建空项目。" />
+            <div className="create-project-heading scheme-step-heading"><div><span className="scheme-order">2</span><div><b>行为类别方案</b><small>已预填 RFID-CV 规范 12 类，可编辑；创建项目与方案一次提交</small></div></div></div>
+            <CategorySchemeEditor value={categories} onChange={(next) => { setCategories(next); setFormError(null); }} requireColor emptyHint="方案不能为空；请新增类别后继续。" />
             {formError ? <div className="error-box" role="alert">{formError}</div> : null}
             <div className="create-project-actions">
               <div className="create-submit-hint">{createValidation.valid ? "方案完整。创建后请在项目管理中复核并决定是否永久锁定。" : createValidation.issues[0]}</div>
