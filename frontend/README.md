@@ -107,7 +107,7 @@ npm run preview
 npm test -- --run
 ```
 
-HTTP Range 本地候选最终独立复验：frontend 从 `npm ci` 干净安装后 **5 files / 51 tests passed**，production build 处理 **73 modules**；backend selection 为 **108 passed, 10 skipped**，`pip check` 无 broken requirements，compileall 通过；audit 为 **3 moderate / 2 high / 0 critical**。当前仅为**本地候选验收通过，未提交、未部署**；四入口、登录/注销/账号切换、Range/HEAD、单次续票与 legacy rollback 的真实浏览器验证仍属于 P3/部署前门禁。
+HTTP Range 本地候选最终独立复验：frontend 从 `npm ci` 干净安装后 **5 files / 51 tests passed**，production build 处理 **73 modules**；backend selection 为 **108 passed, 10 skipped**，`pip check` 无 broken requirements，compileall 通过；audit 为 **3 moderate / 2 high / 0 critical**。功能提交为 `a167225`；当前仅为**本地候选验收通过并已本地提交，尚未推送或部署**，四入口、登录/注销/账号切换、Range/HEAD、单次续票与 legacy rollback 的真实浏览器验证仍属于 P3/部署前门禁。
 
 ## 目录结构
 
