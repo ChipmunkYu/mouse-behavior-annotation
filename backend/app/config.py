@@ -1,12 +1,16 @@
 """应用配置：全部可被环境变量 / backend/.env 覆盖。"""
 from __future__ import annotations
 
+import base64
+import binascii
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
+DEV_MEDIA_MASTER_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
 class Settings(BaseSettings):
@@ -23,6 +27,20 @@ class Settings(BaseSettings):
     # 仅开发用途；生产环境必须通过环境变量覆盖
     secret_key: str = "dev-only-insecure-secret-change-me"
     access_token_expire_minutes: int = 60 * 24 * 7
+    # 原生视频流媒体票据。安全发布默认关闭，legacy Bearer 默认保留用于回滚。
+    media_ticket_enabled: bool = False
+    media_legacy_bearer_enabled: bool = True
+    media_ticket_ttl_seconds: int = Field(default=7200, ge=1, le=7200)
+    # 无 padding 的 canonical base64url；生产值必须解码为至少 32 bytes。
+    media_master_secret: str = DEV_MEDIA_MASTER_SECRET
+    # 跨层安全标识不是部署配置：Literal 令环境变量也只能提供这些精确值。
+    media_ticket_cookie_name: Literal["mouse_media_ticket"] = "mouse_media_ticket"
+    media_binding_cookie_name: Literal["mouse_media_binding"] = "mouse_media_binding"
+    media_binding_cookie_path: Literal["/api/videos/"] = "/api/videos/"
+    media_ticket_audience: Literal["video-stream"] = "video-stream"
+    media_binding_audience: Literal["video-stream-binding"] = "video-stream-binding"
+    media_ticket_type: Literal["media-ticket"] = "media-ticket"
+    media_binding_type: Literal["media-binding"] = "media-binding"
     # demo 账号（仅开发）
     demo_username: str = "demo"
     demo_password: str = "demo123"
@@ -100,6 +118,21 @@ class Settings(BaseSettings):
             errors.append("DEMO_PASSWORD must not contain a template placeholder")
         if len(password) < 12:
             errors.append("DEMO_PASSWORD must be at least 12 characters")
+        media_secret = self.media_master_secret.strip()
+        if media_secret == DEV_MEDIA_MASTER_SECRET or is_placeholder(media_secret):
+            errors.append("MEDIA_MASTER_SECRET must not use a default or placeholder")
+        try:
+            padding = "=" * (-len(media_secret) % 4)
+            decoded_media_secret = base64.b64decode(
+                media_secret + padding, altchars=b"-_", validate=True
+            )
+            canonical = base64.urlsafe_b64encode(decoded_media_secret).rstrip(b"=").decode("ascii")
+            if canonical != media_secret:
+                raise ValueError("not canonical")
+            if len(decoded_media_secret) < 32:
+                errors.append("MEDIA_MASTER_SECRET must decode to at least 32 bytes")
+        except (ValueError, UnicodeEncodeError, binascii.Error):
+            errors.append("MEDIA_MASTER_SECRET must be canonical unpadded base64url")
         if errors:
             raise ValueError("invalid production credentials: " + "; ".join(errors))
         return self

@@ -4,7 +4,7 @@
 
 > 当前技术文档术语遵循[项目术语表](../项目术语表.md)；现行架构见[检测状态、提交审核与独立行为视频片段导出设计](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md)。代码/API 标识符保持不变。
 
-- 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
+- 技术栈：Python 3.10+、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
 - 批次 3：提交与审核闭环（submit / review queue / review 裁决 / 审核历史），
@@ -61,7 +61,9 @@ backend/
 │ └── seed_demo.py # 幂等演示数据脚本（第一阶段本地演示）
 ├── tests/ # pytest 聚焦测试
 ├── data/ # 运行时数据（数据库/视频/导出，已 gitignore）
-├── requirements.txt
+├── requirements.txt # 生产 runtime 精确直接依赖（不含 pytest）
+├── requirements-dev.txt # 在 runtime 上增加 pytest/httpx2
+├── constraints-py310-windows.txt # Python 3.10 Windows 候选 freeze；Linux lock 仍是部署门禁
 ├── .env.example
 └── README.md
 ```
@@ -77,7 +79,8 @@ python -m venv .venv
 # source .venv/bin/activate # Linux/macOS
 
 # 2. 安装依赖
-pip install -r requirements.txt
+pip install -r requirements-dev.txt # 本地开发/测试
+# 生产仅执行：pip install -r requirements.txt
 
 # 3. 复制并（按需）修改配置
 copy .env.example .env
@@ -87,6 +90,29 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 健康检查：`GET /api/health`。接口文档（Swagger）：`http://127.0.0.1:8000/docs`。
+
+## 原生视频流媒体票据（P1 本地候选）
+
+`MEDIA_TICKET_ENABLED` 安全默认 `false`，`MEDIA_LEGACY_BEARER_ENABLED` 默认 `true` 以支持回滚。
+启用后，登录设置 host-only 的 Secure/HttpOnly/Strict binding Cookie；Bearer 调用
+`POST /api/videos/{id}/stream-ticket` 后获得干净相对 URL，浏览器凭两个媒体 Cookie 对
+`GET`/`HEAD /api/videos/{id}/stream` 发起可重复 Range 请求。任一媒体 Cookie 出现后都会强制
+双 Cookie 校验，不会降级 Bearer。`POST /api/auth/logout` 无需有效 Bearer，幂等接受 binding
+清理请求。票据上限固定 7200 秒，并受 Bearer `exp` 截断。
+
+`MEDIA_MASTER_SECRET` 必须是 canonical、无 padding 的 base64url；生产配置解码后至少 32 bytes，
+并拒绝仓库默认值和占位值。可按 `.env.production.example` 中的 CSPRNG 命令生成；这里不对真实
+secret 的熵作测量声明。媒体 Cookie 仅适用于同源 HTTPS，应用不得记录 Cookie 或凭据值。
+
+媒体标识是不可配置的安全契约：ticket/binding Cookie 固定为 `mouse_media_ticket` /
+`mouse_media_binding`，binding Path 固定为 `/api/videos/`，两类 JWT 的 aud 固定为
+`video-stream` / `video-stream-binding`、typ 固定为 `media-ticket` / `media-binding`；各对值
+保持互异。部署仅可配置 feature flags、TTL 与 secret。
+
+stream 不进入公共 `video_operation_gate`。本地候选边界是：新请求若隔离先完成，授权 helper
+返回 404；Starlette 1.5.1 在 stat 后、open 前隔离时可能已经发出响应头，随后 body 因 open
+失败而中断，不能宣称必在响应头前失败；文件描述符已经打开后，同文件系统隔离对在途响应的
+影响由 OS 语义决定。本地测试记录实际行为，仍须在 Linux 部署门禁复验已打开 FD 可继续读取。
 
 ## 数据库迁移（Alembic）
 

@@ -14,14 +14,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   fetchClipThumbnailUrl,
-  fetchVideoStreamUrl,
   listCategories,
   listClipCategories,
   listClips,
   listProjects,
   listVideos,
 } from "../api";
-import { ApiError } from "../api/client";
 import type {
   Category,
   ClipCategoryCount,
@@ -34,11 +32,10 @@ import { DEFAULT_PAGE_SIZE } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
 import { formatDate, formatDuration, formatTime, formatTimeShort } from "../utils/format";
 import { ParticipantSummary } from "../components/ParticipantSummary";
+import { useMediaSource } from "../media";
 
 /** 待生成片段存在时自动刷新列表的间隔（仅当前页有 clip_path 为空的片段时轮询）。 */
 const POLL_INTERVAL_MS = 5000;
-
-type StreamState = "idle" | "loading" | "ok" | "error";
 
 /** 片段生成状态 chip：clip_path 非空视为已生成（Planned ClipItem 不含 status 字段）。 */
 function ClipStatusChip({ clipPath }: { clipPath: string | null }) {
@@ -206,6 +203,7 @@ export default function ClipsPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   // 预览播放范围限制读取最新选中项（内联事件处理器每次渲染重建，此处仅用于 step/toggle 辅助）
   const selectedRef = useRef<ClipItem | null>(null);
+  const previousSelectionRef = useRef<{ annotationId: number; videoId: number } | null>(null);
 
   const [project, setProject] = useState<Project | null>(null);
   const [videos, setVideos] = useState<Video[] | null>(null);
@@ -229,14 +227,24 @@ export default function ClipsPage() {
 
   // 预览区（一次只播放一个）
   const [selected, setSelected] = useState<ClipItem | null>(null);
-  const [streamState, setStreamState] = useState<StreamState>("idle");
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
   const [rangeMsg, setRangeMsg] = useState<string | null>(null);
+
+  selectedRef.current = selected;
+  const handleMediaReady = useCallback((reason: "initial" | "retry-restored", element: HTMLVideoElement) => {
+    setDuration(element.duration);
+    if (reason !== "initial") return;
+    const target = Math.min(selectedRef.current?.start_time ?? 0, element.duration || 0);
+    element.currentTime = target;
+    setCurrentTime(target);
+    void element.play().catch(() => {
+      /* 自动播放被浏览器拦截时保持暂停，等待用户点击 */
+    });
+  }, []);
+  const media = useMediaSource({ videoId: selected?.video_id ?? null, surface: "clips", videoRef, onReady: handleMediaReady });
 
   const categoryById = useMemo(
     () => new Map(categories.map((c) => [c.id, c] as const)),
@@ -349,13 +357,16 @@ export default function ClipsPage() {
     };
   }, [hasPending, loadClips, categoryFilter, videoFilter, debouncedQuery, page, pageSize]);
 
-  /* ---------- 预览：加载选中片段的源视频 blob（一次一个，离开即撤销 URL） ---------- */
+  /* ---------- 预览：切换片段时重置页面显示状态；媒体生命周期由公共 controller 管理 ---------- */
   useEffect(() => {
-    selectedRef.current = selected;
+    const previous = previousSelectionRef.current;
+    const next = selected
+      ? { annotationId: selected.annotation_id, videoId: selected.video_id }
+      : null;
+    if (previous?.annotationId === next?.annotationId && previous?.videoId === next?.videoId) return;
+    previousSelectionRef.current = next;
+
     if (!selected) {
-      setStreamState("idle");
-      setStreamUrl(null);
-      setPreviewError(null);
       setDuration(0);
       setCurrentTime(0);
       setPlaying(false);
@@ -363,42 +374,15 @@ export default function ClipsPage() {
       setRangeMsg(null);
       return;
     }
-    let cancelled = false;
-    let url: string | null = null;
-    setStreamState("loading");
-    setStreamUrl(null);
-    setPreviewError(null);
     setDuration(0);
     setCurrentTime(0);
     setPlaying(false);
     setMuted(true);
     setRangeMsg(null);
-
-    fetchVideoStreamUrl(selected.video_id)
-      .then((u) => {
-        if (cancelled) {
-          URL.revokeObjectURL(u);
-          return;
-        }
-        url = u;
-        setStreamUrl(u);
-        setStreamState("ok");
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setStreamState("error");
-        if (err instanceof ApiError && err.status === 404) {
-          setPreviewError("该视频没有可用的源文件，无法预览（可尝试在视频库补全元数据）");
-        } else {
-          setPreviewError(err instanceof Error ? err.message : "视频流加载失败");
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [selected]);
+    if (previous && previous.annotationId !== selected.annotation_id && previous.videoId === selected.video_id) {
+      media.reload();
+    }
+  }, [selected, media.reload]);
 
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
@@ -507,26 +491,15 @@ export default function ClipsPage() {
 
           <div className="preview-body">
             <div className="preview-video-box">
-              {streamState === "loading" ? (
-                <Loading text="视频流加载中…" />
-              ) : streamState === "ok" && streamUrl ? (
-                <video
+              <video
                   ref={videoRef}
-                  src={streamUrl}
+                  className={media.status === "ready" ? "" : "media-player-pending"}
                   muted={muted}
+                  controls
                   playsInline
+                  preload="metadata"
                   title="点击播放 / 暂停"
                   onClick={togglePlay}
-                  onLoadedMetadata={(e) => {
-                    const v = e.currentTarget;
-                    setDuration(v.duration);
-                    const target = Math.min(selectedRef.current?.start_time ?? 0, v.duration || 0);
-                    v.currentTime = target;
-                    setCurrentTime(target);
-                    void v.play().catch(() => {
-                      /* 自动播放被浏览器拦截时保持暂停，等待用户点击 */
-                    });
-                  }}
                   onTimeUpdate={(e) => {
                     const v = e.currentTarget;
                     const s = selectedRef.current;
@@ -544,23 +517,18 @@ export default function ClipsPage() {
                   }}
                   onPause={() => setPlaying(false)}
                 />
-              ) : (
-                <EmptyState
-                  compact
-                  title="视频流加载失败"
-                  hint={previewError ?? "请确认后端已启动且视频文件存在"}
-                />
-              )}
+              {media.status === "loading" || media.status === "idle" ? <div className="media-status-overlay"><Loading text="视频流加载中…" /></div> : null}
+              {media.status === "error" ? <div className="media-status-overlay"><EmptyState compact title="视频流加载失败" hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>重试播放</button></div> : null}
             </div>
 
             <div className="preview-controls">
-              <button type="button" className="btn btn-sm" onClick={togglePlay} disabled={streamState !== "ok"}>
+              <button type="button" className="btn btn-sm" onClick={togglePlay} disabled={media.status !== "ready"}>
                 {playing ? "⏸ 暂停" : "▶ 播放"}
               </button>
-              <button type="button" className="btn btn-sm" onClick={jumpToStart} disabled={streamState !== "ok"}>
+              <button type="button" className="btn btn-sm" onClick={jumpToStart} disabled={media.status !== "ready"}>
                 ⟲ 回到起点
               </button>
-              <button type="button" className="btn btn-sm" onClick={toggleMute} disabled={streamState !== "ok"}>
+              <button type="button" className="btn btn-sm" onClick={toggleMute} disabled={media.status !== "ready"}>
                 {muted ? "🔇 静音" : "🔊 出声"}
               </button>
               <span className="time-display">

@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -44,30 +45,48 @@ def verify_password(password: str, stored: str) -> bool:
 
 def create_access_token(user_id: int, settings: Settings | None = None) -> str:
     s = settings or get_settings()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=s.access_token_expire_minutes)
-    payload = {"sub": str(user_id), "exp": expire}
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=s.access_token_expire_minutes)
+    payload = {"sub": str(user_id), "iat": now, "exp": expire, "jti": secrets.token_urlsafe(24)}
     return jwt.encode(payload, s.secret_key, algorithm=ALGORITHM)
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    db: Session = Depends(get_db),
-) -> User:
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    s = get_settings()
+@dataclass(frozen=True)
+class AuthContext:
+    user: User
+    raw_token: str
+    claims: dict
+
+
+def authenticate_token(raw_token: str, db: Session, settings: Settings) -> AuthContext:
     try:
-        payload = jwt.decode(credentials.credentials, s.secret_key, algorithms=[ALGORITHM])
+        payload = jwt.decode(raw_token, settings.secret_key, algorithms=[ALGORITHM])
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     user_id_raw = payload.get("sub")
-    if user_id_raw is None:
+    if user_id_raw is None or payload.get("exp") is None:
         raise HTTPException(status_code=401, detail="Invalid token payload")
     try:
         user_id = int(user_id_raw)
+        int(payload["exp"])
     except (TypeError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token payload")
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
-    return user
+    return AuthContext(user=user, raw_token=raw_token, claims=payload)
+
+
+def get_auth_context(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> AuthContext:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return authenticate_token(credentials.credentials, db, request.app.state.settings)
+
+
+def get_current_user(context: AuthContext = Depends(get_auth_context)) -> User:
+    """保持普通路由既有的 User 依赖契约。"""
+    return context.user

@@ -16,6 +16,12 @@ export interface LoginResponse {
   user: User;
 }
 
+/** 短期、同源媒体地址。调用方不得持久化或记录 url。 */
+export interface StreamTicket {
+  url: string;
+  expires_at: string;
+}
+
 // ---------- 项目 ----------
 export interface Project {
   id: number;

@@ -32,6 +32,11 @@ class LoginResponse(BaseModel):
     user: UserOut
 
 
+class StreamTicketResponse(BaseModel):
+    url: str
+    expires_at: datetime
+
+
 # ---------- 项目 ----------
 class ProjectOut(BaseModel):
     id: int

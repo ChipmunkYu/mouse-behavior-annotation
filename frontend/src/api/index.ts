@@ -2,6 +2,7 @@
  * 后端接口封装（路由与 backend/app/routers/* 一一对应）。
  */
 import { apiFetch, apiRaw, ApiError, handleUnauthorized, uploadFile, type UploadProgress } from "./client";
+import { assertValidVideoStreamUrl } from "./streamUrl";
 import type {
   Annotation,
   AnnotationCreateInput,
@@ -50,6 +51,7 @@ import type {
   VideoListParams,
   AssigneeDirectoryItem,
   CategoryScheme, CategorySchemePut, CategorySchemeLock, CategorySchemeAudit,
+  StreamTicket,
 } from "./types";
 
 // ---------- 认证 ----------
@@ -272,8 +274,8 @@ export function getCorrectedTracksExport(projectId: number | string, videoId: nu
  * 视频流需要 Bearer 认证，<video> 无法直接携带请求头，
  * 因此用带 token 的请求拉取 blob 并生成 object URL。
  */
-export async function fetchVideoStreamUrl(videoId: number | string): Promise<string> {
-  const res = await apiRaw(`/videos/${videoId}/stream`);
+export async function fetchVideoStreamUrl(videoId: number | string, signal?: AbortSignal): Promise<string> {
+  const res = await apiRaw(`/videos/${videoId}/stream`, { credentials: "omit", signal });
   if (res.status === 401) {
     // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面仍停留在标注页
     handleUnauthorized();
@@ -287,6 +289,33 @@ export async function fetchVideoStreamUrl(videoId: number | string): Promise<str
     throw new ApiError(404, "视频文件为空");
   }
   return URL.createObjectURL(blob);
+}
+
+/** 获取供原生 <video> 使用的短期同源地址；响应仅暴露白名单字段。 */
+export async function fetchVideoStreamTicket(
+  videoId: number | string,
+  signal?: AbortSignal
+): Promise<StreamTicket> {
+  try {
+    // Reject non-canonical IDs before they can be interpolated into a request path.
+    assertValidVideoStreamUrl(videoId, `/api/videos/${videoId}/stream`);
+    const data = await apiFetch<unknown>(`/videos/${videoId}/stream-ticket`, {
+      method: "POST",
+      credentials: "same-origin",
+      signal,
+    });
+    if (!data || typeof data !== "object") throw new ApiError(502, "媒体地址响应无效，请重试");
+    const { url, expires_at } = data as Record<string, unknown>;
+    if (typeof url !== "string" || typeof expires_at !== "string") {
+      throw new ApiError(502, "媒体地址响应无效，请重试");
+    }
+    assertValidVideoStreamUrl(videoId, url);
+    return { url, expires_at };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    const status = error instanceof ApiError ? error.status : 0;
+    throw new ApiError(status, "无法准备视频播放，请稍后重试");
+  }
 }
 
 // ---------- 标注 ----------
@@ -455,7 +484,7 @@ export async function fetchClipThumbnailUrl(thumbnailPath: string): Promise<stri
   }
 }
 
-export type { User };
+export type { User, StreamTicket };
 
 // ---------- 导出（批次 6） ----------
 

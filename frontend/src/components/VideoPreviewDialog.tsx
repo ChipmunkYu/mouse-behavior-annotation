@@ -1,22 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { fetchVideoStreamUrl } from "../api";
+import { useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Video } from "../api/types";
+import { useMediaSource } from "../media";
 
 interface VideoPreviewDialogProps {
   video: Pick<Video, "id" | "filename">;
   onClose: () => void;
 }
 
-type PreviewState = "loading" | "ready" | "error";
-
 export default function VideoPreviewDialog({ video, onClose }: VideoPreviewDialogProps) {
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [state, setState] = useState<PreviewState>("loading");
-  const [error, setError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
   const focusRestoreFrameRef = useRef<number | null>(null);
+  const media = useMediaSource({ videoId: video.id, surface: "preview", videoRef });
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -42,36 +39,6 @@ export default function VideoPreviewDialog({ video, onClose }: VideoPreviewDialo
       });
     };
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let objectUrl: string | null = null;
-
-    setStreamUrl(null);
-    setState("loading");
-    setError(null);
-
-    fetchVideoStreamUrl(video.id)
-      .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        objectUrl = url;
-        setStreamUrl(url);
-        setState("ready");
-      })
-      .catch((reason: unknown) => {
-        if (cancelled) return;
-        setState("error");
-        setError(reason instanceof Error ? reason.message : "视频加载失败，请稍后重试。");
-      });
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [video.id]);
 
   const keepFocusInside = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Tab") return;
@@ -100,7 +67,7 @@ export default function VideoPreviewDialog({ video, onClose }: VideoPreviewDialo
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      aria-describedby={state !== "ready" ? statusId : undefined}
+      aria-describedby={media.status !== "ready" ? statusId : undefined}
       onClick={(event) => event.stopPropagation()}
       onKeyDown={keepFocusInside}
     >
@@ -113,21 +80,15 @@ export default function VideoPreviewDialog({ video, onClose }: VideoPreviewDialo
       </header>
 
       <div className="video-preview-stage">
-        {state === "loading" ? <div id={statusId} className="video-preview-message" role="status"><span className="spinner" aria-hidden="true"/>正在加载视频…</div> : null}
-        {error ? <div id={statusId} className="video-preview-message video-preview-error" role="alert">{error}</div> : null}
-        {streamUrl ? <video
-          key={streamUrl}
-          className="video-preview-player"
-          src={streamUrl}
+        <video
+          ref={videoRef}
+          className={`video-preview-player${media.status === "ready" ? "" : " media-player-pending"}`}
           controls
           playsInline
           preload="metadata"
-          onError={() => {
-            setStreamUrl(null);
-            setState("error");
-            setError("当前视频无法在浏览器中播放，请检查文件格式。");
-          }}
-        /> : null}
+        />
+        {media.status === "loading" || media.status === "idle" ? <div id={statusId} className="video-preview-message media-status-overlay" role="status"><span className="spinner" aria-hidden="true"/>正在加载视频…</div> : null}
+        {media.status === "error" ? <div id={statusId} className="video-preview-message video-preview-error media-status-overlay" role="alert"><span>{media.message}</span><button type="button" className="btn btn-sm" onClick={media.reload}>重试播放</button></div> : null}
       </div>
       <footer className="video-preview-footer"><span>仅预览原始视频，不会领取任务或进入标注。</span><button type="button" className="btn" onClick={onClose}>关闭预览</button></footer>
     </div>

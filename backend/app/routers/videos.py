@@ -1,25 +1,32 @@
 """视频接口：项目内视频列表 / JSON 创建视频元数据 / 真实视频流式上传 / 视频流。"""
 from __future__ import annotations
 
+import hmac
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
+from time import time
 from uuid import uuid4
 
 from collections.abc import Iterator
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+import jwt
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import AuthContext, authenticate_token, get_auth_context, get_current_user
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..database import get_db
 from ..deps import project_access
 from ..models import ProjectMembership, User, Video
+from ..media_auth import (
+    MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
+)
 from ..permissions import is_manager, require_manager
 from ..video_delete_db import (
     VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
@@ -37,6 +44,7 @@ from ..schemas import (
     VideoClaimsResponse,
     VideoCreate,
     VideoOut,
+    StreamTicketResponse,
 )
 
 router = APIRouter(tags=["videos"])
@@ -493,13 +501,13 @@ def assignment_stats(project_id: int, access: tuple = Depends(project_access),
     )
 
 
-@router.get("/api/videos/{video_id}/stream")
-def stream_video(
-    video_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> FileResponse:
+def _authorized_video_path(
+    *, video_id: int, user_id: int, request: Request, db: Session
+) -> tuple[Video, Path]:
+    """签票与每次取流共用的实时用户、成员、路径和普通非空文件检查。"""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User no longer exists")
     video = db.get(Video, video_id)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -507,7 +515,7 @@ def stream_video(
     # 需为视频所属项目的成员
     membership = (
         db.query(ProjectMembership)
-        .filter(ProjectMembership.project_id == video.project_id, ProjectMembership.user_id == user.id)
+        .filter(ProjectMembership.project_id == video.project_id, ProjectMembership.user_id == user_id)
         .first()
     )
     if membership is None:
@@ -530,5 +538,156 @@ def stream_video(
 
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found on disk")
+    try:
+        if path.stat().st_size <= 0:
+            raise HTTPException(status_code=404, detail="Video file is empty")
+    except OSError:
+        raise HTTPException(status_code=404, detail="Video file not found on disk") from None
+    return video, path
 
-    return FileResponse(path=path, filename=video.filename, content_disposition_type="inline")
+
+def _set_media_cookie(response: Response, name: str, value: str, *, path: str, max_age: int) -> None:
+    response.set_cookie(
+        name, value, max_age=max_age, path=path,
+        secure=True, httponly=True, samesite="strict",
+    )
+
+
+@router.post("/api/videos/{video_id}/stream-ticket", response_model=StreamTicketResponse)
+def create_stream_ticket(
+    video_id: int,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+) -> StreamTicketResponse:
+    settings = request.app.state.settings
+    if not settings.media_ticket_enabled:
+        raise HTTPException(status_code=404, detail="Media tickets are disabled")
+    keys = MediaKeys.from_settings(settings)
+    binding_values = raw_cookie_values(request.scope, {settings.media_binding_cookie_name})[
+        settings.media_binding_cookie_name
+    ]
+    # 零个 binding 仅用于滚动升级旧会话；一旦出现，必须唯一且属于当前原始 Bearer。
+    # 失败发生在任何 Set-Cookie 之前，不能借续票覆盖现有 binding。
+    if len(binding_values) > 1:
+        raise HTTPException(status_code=401, detail="Invalid media credentials")
+    expected_binding = bearer_binding(auth.raw_token, keys.raw_bearer)
+    if binding_values:
+        try:
+            existing = decode_media_jwt(
+                binding_values[0], key=keys.binding_jwt,
+                audience=settings.media_binding_audience,
+                expected_type=settings.media_binding_type,
+                required=("sub", "binding", "aud", "typ", "iat", "exp"),
+            )
+            if (
+                not isinstance(existing["sub"], str)
+                or existing["sub"] != str(auth.user.id)
+                or not isinstance(existing["binding"], str)
+                or not hmac.compare_digest(existing["binding"], expected_binding)
+            ):
+                raise jwt.InvalidTokenError("binding does not match bearer")
+        except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid media credentials") from None
+    _authorized_video_path(video_id=video_id, user_id=auth.user.id, request=request, db=db)
+    now = int(time())
+    bearer_exp = int(auth.claims["exp"])
+    exp = min(now + settings.media_ticket_ttl_seconds, bearer_exp)
+    if exp <= now:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    binding = expected_binding
+    sub = str(auth.user.id)
+    ticket = encode_media_jwt({
+        "sub": sub, "video_id": video_id, "binding": binding,
+        "aud": settings.media_ticket_audience, "typ": settings.media_ticket_type,
+        "iat": now, "exp": exp,
+    }, keys.ticket)
+    binding_token = encode_media_jwt({
+        "sub": sub, "binding": binding, "aud": settings.media_binding_audience,
+        "typ": settings.media_binding_type, "iat": now, "exp": bearer_exp,
+    }, keys.binding_jwt)
+    stream_path = f"/api/videos/{video_id}/stream"
+    _set_media_cookie(
+        response, settings.media_ticket_cookie_name, ticket,
+        path=stream_path, max_age=max(0, exp - now),
+    )
+    _set_media_cookie(
+        response, settings.media_binding_cookie_name, binding_token,
+        path=settings.media_binding_cookie_path, max_age=max(0, bearer_exp - now),
+    )
+    return StreamTicketResponse(
+        url=stream_path,
+        expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+    )
+
+
+def _legacy_auth_context(request: Request, db: Session) -> AuthContext:
+    value = request.headers.get("authorization")
+    if not value or not value.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = value[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return authenticate_token(token, db, request.app.state.settings)
+
+
+def _stream_user_id(video_id: int, request: Request, db: Session) -> int:
+    settings = request.app.state.settings
+    names = {settings.media_ticket_cookie_name, settings.media_binding_cookie_name}
+    values = raw_cookie_values(request.scope, names)
+    cookie_present = any(values[name] for name in names)
+    if not cookie_present:
+        if not settings.media_legacy_bearer_enabled:
+            raise HTTPException(status_code=401, detail="Media authentication required")
+        return _legacy_auth_context(request, db).user.id
+
+    # 任一媒体名出现即锁定 Cookie 分支；功能关闭或重复/缺一均不得回退 Bearer。
+    if not settings.media_ticket_enabled or any(len(values[name]) != 1 for name in names):
+        raise HTTPException(status_code=401, detail="Invalid media credentials")
+    keys = MediaKeys.from_settings(settings)
+    try:
+        ticket = decode_media_jwt(
+            values[settings.media_ticket_cookie_name][0], key=keys.ticket,
+            audience=settings.media_ticket_audience, expected_type=settings.media_ticket_type,
+            required=("sub", "video_id", "binding", "aud", "typ", "iat", "exp"),
+        )
+        binding = decode_media_jwt(
+            values[settings.media_binding_cookie_name][0], key=keys.binding_jwt,
+            audience=settings.media_binding_audience, expected_type=settings.media_binding_type,
+            required=("sub", "binding", "aud", "typ", "iat", "exp"),
+        )
+        if (
+            type(ticket["video_id"]) is not int
+            or ticket["video_id"] != video_id
+            or not isinstance(ticket["sub"], str)
+            or not isinstance(binding["sub"], str)
+            or not isinstance(ticket["binding"], str)
+            or not isinstance(binding["binding"], str)
+            or ticket["sub"] != binding["sub"]
+            or ticket["binding"] != binding["binding"]
+        ):
+            raise jwt.InvalidTokenError("media claims do not match")
+        return int(ticket["sub"])
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid media credentials") from None
+
+
+@router.get("/api/videos/{video_id}/stream")
+@router.head("/api/videos/{video_id}/stream")
+def stream_video(
+    video_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    user_id = _stream_user_id(video_id, request, db)
+    video, path = _authorized_video_path(
+        video_id=video_id, user_id=user_id, request=request, db=db,
+    )
+
+    return FileResponse(
+        path=path,
+        filename=video.filename,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-store"},
+    )
