@@ -12,6 +12,8 @@
 
 仓库外的“网站服务器文件清单”是服务器实时事实的唯一维护位置；仓库内部署和规格文档不能替代实时核验。
 
+当前服务器 release 与 release HEAD 均为 `9360603`；后续 docs-only 提交不构成新的服务器 release。
+
 ## 当前文档
 
 - [需求文档](../需求文档.md)
@@ -27,8 +29,8 @@
 
 ## 计划与独立分支实现（混合状态）
 
-- [视频同步硬删除需求规格](计划/视频同步硬删除需求规格.md)：DELETE API、active owner/admin 与 draft/rejected 限制、活动/未知任务 409 零副作用门禁、单进程 gate、终态 worker 不变量、版本化 manifest/quarantine/startup recovery 及视频库入口已实现并完成本地验证；POSIX 使用 descriptor-relative 目录 purge/restore，缺少能力的平台对目录操作 fail closed。生产仍要求单 Uvicorn worker；尚未部署。
-- [标注流程与帧边界需求规格](计划/标注流程与帧边界需求规格.md)：任意顺序草稿与显式保存、参与 ID 分别相交、行为任意重叠、禁止单帧、帧权威/派生只读时间及既定草稿交互均已实现，帧权威迁移为 `0015_frame_authority.py`，并完成本地验证；尚未部署。
+- [视频同步硬删除需求规格](计划/视频同步硬删除需求规格.md)：DELETE API、active owner/admin 与 draft/rejected 限制、活动/未知任务 409 零副作用门禁、单进程 gate、终态 worker 不变量、版本化 manifest/quarantine/startup recovery 及视频库入口已实现；POSIX descriptor-relative 能力已在生产 Linux 候选实机验证。已随 `9360603` 部署，生产保持单 Uvicorn worker。
+- [标注流程与帧边界需求规格](计划/标注流程与帧边界需求规格.md)：任意顺序草稿与显式保存、参与 ID 分别相交、行为任意重叠、禁止单帧、帧权威/派生只读时间及既定草稿交互均已实现，帧权威迁移为 `0015_frame_authority.py`；已随 `9360603` 部署，生产数据库 schema 为 `0015`。
 - [行为类别方案与参与对象角色化扩展设计](计划/行为类别自定义管理设计.md)：当前 `feature/category-role-schema@933b805` 已集成 `origin/main@b40fff3` 的完整分工 PR #2 与媒体修复；后端联合全量 `516 passed, 3 skipped, 1 warning`，5 项真实 FFmpeg/ffprobe 集成测试实际通过，前端 production build 通过（62 modules），Oracle 最终确认实现问题关闭。既有本功能人工浏览器矩阵仅对应合并前 category 基线，合并后未重跑完整矩阵。尚未 push、创建 PR2、进入 `main` 或部署，生产 FFmpeg/ffprobe 4.4.2 仍未验证。
 - [前端键盘快捷键优化方案](计划/前端全键盘快捷键优化方案.md)：同时记录已实现能力和下一轮未实现计划；计划细节以该文档为唯一 owner。
 - [播放与带宽优化计划](计划/播放与带宽优化计划.md)：五类生产播放和带宽优化方向，均未实施。

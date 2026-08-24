@@ -658,11 +658,11 @@ pytest -q
 
 当前全局上传任务管理实现的后端相关测试为 **128 passed, 3 skipped, 1 warning**，前端 production build 通过并处理 **66 modules**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题；该结论不等于跨路由、跨项目、取消/重试、退出、401 回收或可访问性的浏览器人工矩阵已经验收。
 
-已进入 `main` 的媒体修复以后端全量历史结果 `399 passed, 8 skipped` 为基线。2026-08-17 在 Python 3.11.9 隔离环境中，确认 `.venv\Scripts` 可找到 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）以及 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包。`pytest tests/test_media_ffmpeg_integration.py -q` 结果为 `5 passed, 1 warning in 2.41s`，`pytest tests/test_media.py tests/test_project_export.py tests/test_media_ffmpeg_integration.py -q` 结果为 `66 passed, 1 warning in 51.90s`，均无 skip；warning 是既有 Starlette/httpx deprecation warning，并非测试失败。真实验证覆盖 25/30/60 FPS、H.264、yuv420p、300x200 crop、各 10 帧、约 `10/fps` 时长和 JPEG 300x200，并证明成功后无 `.part`/`.staging`、缩略图注入失败不发布最终文件，以及完整 MediaWorker 将 Job/Clip 更新为 `succeeded`/`ready`。生产服务器 FFmpeg/ffprobe 4.4.2 对当前修复的兼容性仍未验证，媒体修复仍未部署，以上结果不构成生产候选验收。
+2026-08-24，生产功能提交 `93606031d1977fdd39e76bdbf678996a30b19e17` 的 Linux/Python 3.10 候选通过 descriptor capability 关键 3 tests、候选聚焦回归 `277 passed`、真实 FFmpeg/ffprobe 4.4.2 集成测试 `5 passed`、`pip check` 与前端 production build（66 modules），并已部署为 `current=9360603`、SQLite schema `0015`。后续 docs-only 提交不改变运行时 release。首个 `310e2f3` 候选虽构建成功，但回归为 `274 passed, 2 failed`，因 descriptor capability 动态误判而未迁移、未切换；该失败 release 保留。
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-当前联合分支尚未 push、尚未创建 PR2、尚未进入 `main`、尚未部署；上述联合自动验收不替代生产候选、部署、公网入口、备份恢复或合并后完整浏览器人工验收。
+当前修复已推送 `origin/main` 并部署；上述自动验收及服务器本机 health 不替代人工浏览器硬删除/上传任务回归或本次来源的公网验收。候选 `npm audit` 报告 3 moderate、2 high，尚待评估且未自动修改依赖。
 
 覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，
