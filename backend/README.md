@@ -63,7 +63,8 @@ backend/
 ├── data/ # 运行时数据（数据库/视频/导出，已 gitignore）
 ├── requirements.txt # 生产 runtime 精确直接依赖（不含 pytest）
 ├── requirements-dev.txt # 在 runtime 上增加 pytest/httpx2
-├── constraints-py310-windows.txt # Python 3.10 Windows 候选 freeze；Linux lock 仍是部署门禁
+├── constraints-py310-windows.txt # Python 3.10 Windows 候选 freeze
+├── constraints-py310-linux.txt # Python 3.10.12 / Ubuntu 22.04 服务器隔离候选验证 freeze
 ├── .env.example
 └── README.md
 ```
@@ -90,6 +91,13 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 健康检查：`GET /api/health`。接口文档（Swagger）：`http://127.0.0.1:8000/docs`。
+
+Linux resolved lock 已从服务器 Ubuntu 22.04 / Python 3.10.12 隔离环境保存为
+`constraints-py310-linux.txt`。该环境基于提交 `28cdba6765b119a74fc16e6e608969f4927bf3e9`
+安装 `requirements-dev.txt`，`pip check` 通过，完整后端测试为
+`688 passed, 1 skipped in 441.10s`。这只表示 Linux 候选依赖与后端回归已验证；包含该 lock
+的新最终 release 尚待创建，本功能尚未部署，真实 Nginx/HTTPS/浏览器、Firefox 与约 2 GB
+量化仍是 P3/部署前门禁。
 
 ## 原生视频流媒体票据（P1 本地候选）
 
