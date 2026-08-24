@@ -107,7 +107,7 @@ npm run preview
 npm test -- --run
 ```
 
-HTTP Range 本地候选最终独立复验：frontend 从 `npm ci` 干净安装后 **5 files / 51 tests passed**，production build 处理 **73 modules**；backend selection 为 **108 passed, 10 skipped**，`pip check` 无 broken requirements，compileall 通过；audit 为 **3 moderate / 2 high / 0 critical**。随后服务器 Ubuntu 22.04 / Python 3.10.12 隔离候选基于 `28cdba6765b119a74fc16e6e608969f4927bf3e9` 完成 Linux resolved lock 验证，`pip check` 通过，完整后端测试为 **688 passed, 1 skipped in 441.10s**。功能提交 `a167225` 之后仍须创建包含该 lock 的最终 release；当前功能尚未部署，四入口、登录/注销/账号切换、Range/HEAD、单次续票与 legacy rollback 的真实 Nginx/HTTPS/浏览器验证、Firefox 与约 2 GB 量化仍属于 P3/部署前门禁。
+HTTP Range 本地候选最终独立复验：frontend 从 `npm ci` 干净安装后 **5 files / 51 tests passed**，production build 处理 **73 modules**；backend selection 为 **108 passed, 10 skipped**，`pip check` 无 broken requirements，compileall 通过；audit 为 **3 moderate / 2 high / 0 critical**。随后服务器 Ubuntu 22.04 / Python 3.10.12 隔离候选基于 `28cdba6765b119a74fc16e6e608969f4927bf3e9` 完成 Linux resolved lock、`pip check` 与完整后端测试（**688 passed, 1 skipped in 441.10s**），并形成已推送的 `971c056d7f6257eb7f29ab8a3fe81e731ecdd387`。该提交的最终隔离 release 已创建；使用 Node 22.23.2/npm 10.9.8 完成 `npm ci`、**5 files / 51 tests** 与默认 legacy production build（**73 modules**），`dist` 已存在，但未构建 native Preview 制品。该 release 未启动候选服务、未切换 `current`，功能尚未部署；四入口、登录/注销/账号切换、Range/HEAD、单次续票与 legacy rollback 的真实 Nginx/HTTPS/浏览器验证、Firefox 与约 2 GB 量化仍属于 P3/部署前门禁。
 
 ## 目录结构
 

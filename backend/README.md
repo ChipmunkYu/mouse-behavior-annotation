@@ -95,9 +95,12 @@ uvicorn app.main:app --reload --port 8000
 Linux resolved lock 已从服务器 Ubuntu 22.04 / Python 3.10.12 隔离环境保存为
 `constraints-py310-linux.txt`。该环境基于提交 `28cdba6765b119a74fc16e6e608969f4927bf3e9`
 安装 `requirements-dev.txt`，`pip check` 通过，完整后端测试为
-`688 passed, 1 skipped in 441.10s`。这只表示 Linux 候选依赖与后端回归已验证；包含该 lock
-的新最终 release 尚待创建，本功能尚未部署，真实 Nginx/HTTPS/浏览器、Firefox 与约 2 GB
-量化仍是 P3/部署前门禁。
+`688 passed, 1 skipped in 441.10s`，并由此形成已推送至 `origin/docs/http-range-plan` 的 Linux lock
+提交 `971c056d7f6257eb7f29ab8a3fe81e731ecdd387`。服务器已创建该提交的最终隔离 release；其
+runtime `.venv` 按提交内 constraints 与 requirements 安装且 `pip check` 通过，Linux 同文件系统
+`os.replace` 后已打开 FD 继续读完整 payload 的门禁也通过。该 release 未启动候选服务、未切换
+`current`，本功能尚未部署；真实 Nginx/HTTPS/日志、浏览器、Firefox、约 2 GB 量化及 native
+Preview 制品仍是 P3/部署前门禁。
 
 ## 原生视频流媒体票据（P1 本地候选）
 
