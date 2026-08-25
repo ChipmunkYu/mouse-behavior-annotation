@@ -64,17 +64,17 @@ function roleBasedCategory(
 /** 返回 RFID-CV 行为标注规范的可编辑 12 类方案；每次调用均创建全新的类别和角色对象。 */
 export function createDefaultCategoryScheme(): CategorySchemeCategoryInput[] {
   return [
-    unorderedCategory("奔跑", "个体行为", 0, 1, 1),
-    unorderedCategory("行走", "个体行为", 1, 1, 1),
-    unorderedCategory("静止", "个体行为", 2, 1, 1),
-    unorderedCategory("一起", "社交行为", 3, 2, 2),
-    roleBasedCategory("主动接近/被接近", 4, "主动接近者", "被接近者"),
-    roleBasedCategory("追逐/被追逐", 5, "追逐者", "被追逐者"),
-    roleBasedCategory("回避/被回避", 6, "回避者", "被回避者"),
-    unorderedCategory("攻击", "社交行为", 7, 2, 2),
-    roleBasedCategory("鼻头接触", 8, "鼻部接触者", "头部被接触者"),
-    roleBasedCategory("鼻尾接触", 9, "鼻部接触者", "尾部被接触者"),
-    unorderedCategory("扎堆", "群体行为", 10, 3, null),
-    unorderedCategory("孤立", "群体行为", 11, 1, 1),
+    unorderedCategory("Running", "个体行为", 0, 1, 1),
+    unorderedCategory("Walking", "个体行为", 1, 1, 1),
+    unorderedCategory("Static", "个体行为", 2, 1, 1),
+    unorderedCategory("Together", "社交行为", 3, 2, 2),
+    roleBasedCategory("Approach", 4, "Approaching", "Approached"),
+    roleBasedCategory("Chasing", 5, "Chasing", "Chased"),
+    roleBasedCategory("Avoiding", 6, "Avoiding", "Avoided"),
+    roleBasedCategory("Attack", 7, "Attacker", "Attacked"),
+    roleBasedCategory("Snout-head_contact", 8, "Snout_contacting", "Head_contacted"),
+    roleBasedCategory("Snout-rear_contact", 9, "Snout_contacting", "Rear_contacted"),
+    unorderedCategory("Huddling", "群体行为", 10, 3, null),
+    unorderedCategory("Isolation", "群体行为", 11, 1, 1),
   ];
 }
