@@ -349,7 +349,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询当前 draft 的 LIFO undo 栈（不是永久审计） |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 仅撤销栈顶 Split/Merge；非栈顶或类型不匹配返回 409 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 以 sparse override 整轨抑制当前未抑制 detection；不写旧 suppression 表 |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表；无 active detection import 时返回空列表，写操作仍保持导入门禁 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 仅在该 suppression edit 为栈顶时撤销，否则返回 409 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | legacy 兼容的修正后 track JSONL/manifest 接口；不属于正式项目 ZIP |
 

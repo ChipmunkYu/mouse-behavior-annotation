@@ -27,15 +27,12 @@ def _require_video(db: Session, video_id: int, project_id: int) -> Video:
     return video
 
 
-def _get_active_import(db: Session, video_id: int) -> DetectionImport:
-    detection_import = (
+def _get_active_import(db: Session, video_id: int) -> DetectionImport | None:
+    return (
         db.query(DetectionImport)
         .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)
         .first()
     )
-    if detection_import is None:
-        raise HTTPException(status_code=400, detail="No active detection import for this video")
-    return detection_import
 
 
 @router.get("/api/projects/{project_id}/videos/{video_id}/detection-suppressions")
@@ -47,6 +44,8 @@ def list_active_suppressions(
 ) -> list[dict]:
     _require_video(db, video_id, project_id)
     detection_import = _get_active_import(db, video_id)
+    if detection_import is None:
+        return []
     edits = (
         db.query(DraftIdentityEdit)
         .filter(
