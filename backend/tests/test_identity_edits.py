@@ -134,6 +134,33 @@ def _suppress_payload(track_id: int = 1, version: int = 0) -> dict:
     }
 
 
+def test_suppression_list_without_active_import_is_empty_but_writes_remain_gated(
+    ctx,
+):
+    setup = ctx.make_project_with_video("No detection import")
+    headers = setup["headers"]
+    project_id = setup["project"]["id"]
+    video_id = setup["video"]["id"]
+    url = _suppression_url(project_id, video_id)
+
+    listed = ctx.client.get(url, headers=headers)
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+    created = ctx.client.post(url, json=_suppress_payload(), headers=headers)
+    reverted = ctx.client.post(
+        f"{url}/1/revert",
+        json={"base_identity_revision": 0, "base_detection_import_revision": 1},
+        headers=headers,
+    )
+    for response in (created, reverted):
+        assert response.status_code == 400
+        assert response.json()["detail"] == "No detection import is active for this video"
+
+    with ctx.session_factory() as db:
+        assert db.query(models.DraftIdentityEdit).count() == 0
+
+
 def test_raw_baseline_and_effective_read_have_no_legacy_rows(ctx, login_headers):
     headers, project_id, video_id = _setup(ctx, login_headers)
     detections = ctx.client.get(
@@ -319,6 +346,11 @@ def test_suppress_and_lifo_undo_delete_baseline_overrides(ctx, login_headers):
     assert suppressed.status_code == 200, suppressed.text
     suppression_id = suppressed.json()["suppression_id"]
     assert suppressed.json()["frozen_detection_count"] == 4
+    listed = ctx.client.get(_suppression_url(project_id, video_id), headers=headers)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [suppression_id]
+    assert listed.json()[0]["result_identity_revision"] == 1
+    assert listed.json()[0]["frozen_detection_count"] == 4
     assert ctx.client.get(
         f"/api/projects/{project_id}/videos/{video_id}/detections?start_frame=0&end_frame=4",
         headers=headers,
