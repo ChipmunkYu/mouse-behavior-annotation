@@ -16,10 +16,12 @@
 from __future__ import annotations
 
 from math import ceil
+from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, literal, or_, select, union_all
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -64,9 +66,16 @@ def _base_filters(
     return conds
 
 
-def _to_item(row) -> ClipItem:
-    ready = row.clip_status == "ready"
+def _to_item(row, settings) -> ClipItem:
+    media_status = row.media_status
+    if media_status == "ready" and (
+        _resolve_entity(row.clip_path, settings.clips_dir) is None
+        or _resolve_entity(row.thumbnail_path, settings.thumbnails_dir) is None
+    ):
+        media_status = "pending"
     return ClipItem(
+        item_key=f"{row.authority_type}:{row.annotation_id}",
+        clip_id=row.clip_id,
         annotation_id=row.annotation_id,
         video_id=row.video_id,
         video_filename=row.video_filename,
@@ -77,8 +86,7 @@ def _to_item(row) -> ClipItem:
         start_frame=row.start_frame,
         end_frame=row.end_frame,
         confidence=row.confidence,
-        clip_path=row.clip_path if ready else None,
-        thumbnail_path=row.thumbnail_path if ready else None,
+        media_status=media_status,
         annotator_name=row.annotator_name,
         review_status=row.review_status,
         created_at=row.created_at,
@@ -93,6 +101,7 @@ def _to_item(row) -> ClipItem:
 @router.get("/api/projects/{project_id}/clips", response_model=ClipPageOut)
 def list_clips(
     project_id: int,
+    request: Request,
     category_id: Optional[int] = None,
     video_id: Optional[int] = None,
     annotator_id: Optional[int] = None,
@@ -112,6 +121,7 @@ def list_clips(
     if search: conds.append(or_(SubmissionAnnotation.category_name.ilike(f"%{search}%"), Submission.source_video_filename.ilike(f"%{search}%")))
     new_query = (
         select(
+            literal("submission").label("authority_type"),
             SubmissionAnnotation.id.label("annotation_id"), Submission.video_id,
             Submission.source_video_filename.label("video_filename"),
             SubmissionAnnotation.category_id, SubmissionAnnotation.category_name,
@@ -121,9 +131,9 @@ def list_clips(
             literal("approved").label("review_status"),
             Submission.submitted_at.label("created_at"),
             User.username.label("annotator_name"),
-            Clip.clip_path,
-            Clip.thumbnail_path,
-            Clip.status.label("clip_status"),
+            Clip.id.label("clip_id"),
+            case((Clip.id.is_(None), "pending"), else_=Clip.status).label("media_status"),
+            Clip.clip_path, Clip.thumbnail_path,
             SubmissionAnnotation.category_group,
             SubmissionAnnotation.category_participant_mode,
             SubmissionAnnotation.role_definitions_snapshot.label("role_definitions"),
@@ -139,26 +149,101 @@ def list_clips(
     legacy_conds = _base_filters(project_id, category_id=category_id, video_id=video_id,
                                  annotator_id=annotator_id, search=search)
     legacy_conds.append(~Annotation.video_id.in_(authority_video_ids))
+    latest_legacy_clip_id = select(func.max(Clip.id)).where(
+        Clip.annotation_id == Annotation.id
+    ).correlate(Annotation).scalar_subquery()
     legacy_query = select(
+        literal("legacy").label("authority_type"),
         Annotation.id.label("annotation_id"), Annotation.video_id, Video.filename.label("video_filename"),
         Annotation.category_id, BehaviorCategory.name.label("category_name"), Annotation.start_time,
         Annotation.end_time, Annotation.start_frame, Annotation.end_frame, Annotation.confidence,
         Annotation.review_status, Annotation.created_at, User.username.label("annotator_name"),
-        Clip.clip_path, Clip.thumbnail_path, Clip.status.label("clip_status"),
+        Clip.id.label("clip_id"),
+        case(
+            (Clip.id.is_(None), "pending"),
+            (Clip.source_revision == Video.media_revision, Clip.status),
+            else_="stale",
+        ).label("media_status"),
+        Clip.clip_path, Clip.thumbnail_path,
         BehaviorCategory.group.label("category_group"),
         BehaviorCategory.participant_mode.label("category_participant_mode"),
         BehaviorCategory.role_definitions.label("role_definitions"),
         Annotation.participant_roles.label("participant_roles"), Annotation.mouse_ids,
     ).select_from(Annotation).join(Video).join(BehaviorCategory).outerjoin(User, User.id == Annotation.annotator_id).outerjoin(
-        Clip, and_(Clip.annotation_id == Annotation.id, Clip.source_revision == Video.media_revision)
+        Clip, Clip.id == latest_legacy_clip_id
     ).where(*legacy_conds)
     mixed = union_all(new_query, legacy_query).subquery("mixed_clip_authority")
     total = db.execute(select(func.count()).select_from(mixed)).scalar_one()
     rows = db.execute(select(mixed).order_by(mixed.c.start_time, mixed.c.annotation_id)
                       .offset((page - 1) * page_size).limit(page_size)).all()
-    items = [_to_item(row) for row in rows]
+    items = [_to_item(row, request.app.state.settings) for row in rows]
     pages = (total + page_size - 1) // page_size if total else 0
     return ClipPageOut(total=total, pages=pages, items=items)
+
+
+def _resolve_entity(raw: str | None, root: Path) -> Path | None:
+    if not raw:
+        return None
+    try:
+        base = root.resolve()
+        candidate = Path(raw)
+        candidate = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+        valid = candidate.is_relative_to(base) and candidate.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not valid:
+        return None
+    return candidate
+
+
+_resolve_thumbnail = _resolve_entity
+
+
+@router.get("/api/projects/{project_id}/clips/{clip_id}/thumbnail")
+def get_clip_thumbnail(
+    project_id: int,
+    clip_id: int,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Serve a ready thumbnail by Clip identity without exposing its disk name."""
+    clip = db.get(Clip, clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    if clip.status != "ready":
+        raise HTTPException(status_code=404, detail="Thumbnail not ready")
+    if clip.annotation_id is not None:
+        current = db.query(Clip.id).join(Annotation, Annotation.id == Clip.annotation_id).join(
+            Video, Video.id == Annotation.video_id
+        ).filter(
+            Clip.id == clip.id,
+            Video.project_id == project_id,
+            Clip.source_revision == Video.media_revision,
+            Annotation.review_status == APPROVED,
+            Video.workflow_status == APPROVED,
+        ).first()
+    else:
+        current = db.query(Clip.id).join(
+            SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id
+        ).join(Submission, Submission.id == SubmissionAnnotation.submission_id).join(
+            Video, Video.id == Submission.video_id
+        ).filter(
+            Clip.id == clip.id, Submission.status == APPROVED,
+            Video.project_id == project_id,
+        ).first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not ready")
+    settings = request.app.state.settings
+    path = _resolve_thumbnail(clip.thumbnail_path, settings.thumbnails_dir)
+    if path is None or _resolve_entity(clip.clip_path, settings.clips_dir) is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        filename="thumbnail.jpg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get(

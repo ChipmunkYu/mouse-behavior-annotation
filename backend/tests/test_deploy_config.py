@@ -63,3 +63,37 @@ def test_systemd_uses_data_disk_multipart_temp_directory():
     assert "ExecStartPre=/usr/bin/test -d /data/mouse-annotation/tmp" in service
     assert "UMask=0027" in service
     assert "/NVme" not in service
+
+
+def test_nginx_media_stream_candidate_is_narrow_and_cookie_safe():
+    config = NGINX.read_text(encoding="utf-8")
+    stream = re.search(
+        r"location\s+~\s+\^/api/videos/\[0-9\]\+/stream\$\s*\{(?P<body>.*?)\n    \}", config, re.S
+    )
+    assert stream is not None
+    body = stream.group("body")
+    # Nginx permits HEAD wherever GET is permitted; every other method is denied.
+    assert "limit_except GET" in body and "deny all;" in body
+    assert "auth_request" not in body
+    assert "proxy_buffering off;" in body
+    assert "gzip off;" in body
+    assert "proxy_force_ranges" not in body
+    assert "access_log" in body
+    assert config.index(stream.group(0)) < config.index("location /api/")
+
+    media_format = re.search(r"log_format\s+media_stream\s+(?P<body>.*?);", config, re.S)
+    assert media_format is not None
+    log_body = media_format.group("body")
+    assert "$uri" in log_body
+    for forbidden in ("$request ", "$request_uri", "$args", "$http_cookie"):
+        assert forbidden not in log_body
+
+
+def test_nginx_logout_candidate_is_exact_post_only_bypass():
+    config = NGINX.read_text(encoding="utf-8")
+    logout = re.search(r"location\s+=\s+/api/auth/logout\s*\{(?P<body>.*?)\n    \}", config, re.S)
+    assert logout is not None
+    body = logout.group("body")
+    assert "limit_except POST" in body
+    assert "auth_request" not in body
+    assert config.index(logout.group(0)) < config.index("location /api/")

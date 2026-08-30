@@ -15,6 +15,7 @@ def _io(tmp_path: Path) -> VideoDeleteIO:
     for root in (
         settings.videos_dir, settings.exports_dir, settings.clips_dir,
         settings.thumbnails_dir, settings.import_batches_dir, settings.detection_imports_dir,
+        settings.display_proxies_dir,
     ):
         root.mkdir(parents=True)
     return VideoDeleteIO(settings)
@@ -53,6 +54,23 @@ def test_duplicate_missing_quarantine_restore_and_manifest_privacy(tmp_path):
     io.restore("op7")
     assert source.read_bytes() == b"video"
     assert not (io.quarantine_dir / "op7").exists()
+
+
+def test_display_proxy_root_deduplicates_and_round_trips(tmp_path):
+    io = _io(tmp_path)
+    proxy = io.settings.display_proxies_dir / "proxy.mp4"
+    proxy.write_bytes(b"proxy")
+    manifest = io.prepare(7, [
+        DeletePath("display_proxies", proxy.name),
+        DeletePath("display_proxies", proxy.name),
+    ], operation_id="display-proxy")
+    assert [(entry.root_kind, entry.relative_key) for entry in manifest.entries] == [
+        ("display_proxies", proxy.name)
+    ]
+    io.quarantine(manifest)
+    assert not proxy.exists()
+    io.restore(manifest)
+    assert proxy.read_bytes() == b"proxy"
 
 
 def test_manifest_metadata_round_trip_and_id_validation(tmp_path):
@@ -545,3 +563,95 @@ def test_manifest_is_versioned_and_atomic_replace_is_used(tmp_path, monkeypatch)
     raw = json.loads((io.quarantine_dir / "atomic" / "manifest.json").read_text(encoding="utf-8"))
     assert raw["version"] == 2
     assert ("manifest.json.tmp", "manifest.json") in calls
+
+
+def _run_file_response(response, sent):
+    import asyncio
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "GET", "scheme": "http", "path": "/stream", "raw_path": b"/stream",
+        "query_string": b"", "headers": [], "client": ("test", 1), "server": ("test", 80),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(response(scope, receive, send))
+
+
+def test_starlette_file_response_stat_start_open_order_and_pre_open_isolation(tmp_path, monkeypatch):
+    """真实 ASGI 契约：1.5.1 simple response 先 stat、发头，再 open。"""
+    import anyio
+    import starlette.responses as responses
+
+    source = tmp_path / "ordered.mp4"
+    quarantine = tmp_path / "ordered.quarantine"
+    source.write_bytes(b"response-body")
+    events = []
+    sent = []
+    real_stat = os.stat
+    real_open = anyio.open_file
+
+    def record_stat(path, *args, **kwargs):
+        if Path(path) == source:
+            events.append("stat")
+        return real_stat(path, *args, **kwargs)
+
+    async def record_open(path, *args, **kwargs):
+        if Path(path) == source:
+            events.append("open")
+        return await real_open(path, *args, **kwargs)
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            events.append("start")
+            os.replace(source, quarantine)
+        sent.append(message)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "GET", "scheme": "http", "path": "/stream", "raw_path": b"/stream",
+        "query_string": b"", "headers": [], "client": ("test", 1), "server": ("test", 80),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    monkeypatch.setattr(responses.os, "stat", record_stat)
+    monkeypatch.setattr(responses.anyio, "open_file", record_open)
+    with pytest.raises(FileNotFoundError):
+        import asyncio
+        asyncio.run(responses.FileResponse(source)(scope, receive, send))
+    assert events == ["stat", "start", "open"]
+    assert [item["type"] for item in sent] == ["http.response.start"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows open-handle sharing behavior is recorded separately")
+def test_posix_opened_file_response_continues_after_same_filesystem_isolation(tmp_path, monkeypatch):
+    import anyio
+    import starlette.responses as responses
+
+    source = tmp_path / "opened.mp4"
+    quarantine = tmp_path / "opened.quarantine"
+    content = b"opened-response-body"
+    source.write_bytes(content)
+    real_open = anyio.open_file
+    opened = []
+
+    async def open_then_isolate(path, *args, **kwargs):
+        handle = await real_open(path, *args, **kwargs)
+        opened.append(True)
+        os.replace(source, quarantine)
+        return handle
+
+    sent = []
+    monkeypatch.setattr(responses.anyio, "open_file", open_then_isolate)
+    _run_file_response(responses.FileResponse(source), sent)
+    body = b"".join(item.get("body", b"") for item in sent if item["type"] == "http.response.body")
+    assert opened == [True]
+    assert body == content
+    assert not source.exists() and quarantine.exists()

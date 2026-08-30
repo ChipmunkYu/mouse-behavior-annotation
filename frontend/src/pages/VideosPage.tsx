@@ -4,7 +4,7 @@ import { batchAssignVideos, claimVideo, claimVideos, createVideo, deleteVideo, g
 import type { AssigneeDirectoryItem, AssignmentStats, Project, Video, VideoView } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { useConfirm } from "../components/ConfirmDialog";
-import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge, statusLabel } from "../components/ui";
+import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { MediaStatusSummary } from "../components/MediaStatusPanel";
 import VideoPreviewDialog from "../components/VideoPreviewDialog";
@@ -12,6 +12,7 @@ import { ApiError } from "../api/client";
 import { useVideoMarqueeSelection } from "../hooks/useVideoMarqueeSelection";
 import { formatDate, formatDuration } from "../utils/format";
 import { useProjectUploadVersion } from "../upload/UploadManagerContext";
+import { canPlayVideo, playbackStatusLabel } from "../api/mediaCapabilities";
 
 const VIEWS: { key: VideoView; label: string; hint: string }[] = [
   { key: "mine", label: "我的任务", hint: "由你负责的视频" },
@@ -26,7 +27,6 @@ interface VideoFormState {
   width: string;
   height: string;
   status: string;
-  storage_path: string;
 }
 
 const EMPTY_FORM: VideoFormState = {
@@ -36,7 +36,6 @@ const EMPTY_FORM: VideoFormState = {
   width: "",
   height: "",
   status: "",
-  storage_path: "",
 };
 
 function actionError(err: unknown): string {
@@ -314,7 +313,6 @@ export default function VideosPage() {
         width,
         height,
         status: form.status.trim() || "metadata",
-        storage_path: form.storage_path.trim() || null,
       });
       await load();
       setDevOpen(false);
@@ -406,15 +404,15 @@ export default function VideosPage() {
       {selectable.length > 0 ? <div className="selection-tools"><label className="select-all"><input ref={selectAllRef} type="checkbox" checked={visibleSelectedCount === selectable.length} disabled={selectionLocked} onChange={toggleAll} aria-label={selectAllAriaLabel}/> <span>{selectAllLabel}</span></label>{marquee.interactionEnabled ? <span className="selection-hint">拖动框选 · Shift 追加 · Ctrl/Cmd 切换</span> : null}</div> : null}
       <div ref={marquee.gridRef} className={`video-grid ${marquee.interactionEnabled ? "selection-enabled" : ""}`} tabIndex={marquee.interactionEnabled ? 0 : -1} aria-label={canSelect ? memberClaimMode ? "可批量领取的视频列表" : view === "unassigned" ? "可批量分配的视频列表" : view === "all" ? "可选择操作的视频列表" : "可批量改派的视频列表" : "视频列表"} {...marquee.gridPointerHandlers}>{displayed.map((v) => { const assignable = !selectionLocked && canSelect && (view === "all" ? true : view === "unassigned" ? v.workflow_status === "draft" : ["draft", "rejected"].includes(v.workflow_status)); const mine = v.assignee_membership_id === project?.membership_id; return <article key={v.id} data-video-id={v.id} data-video-selectable={assignable ? "true" : "false"} onClick={assignable ? (event) => selectCard(v.id, event) : undefined} className={`card video-card ${selected.has(v.id) ? "selected" : ""}`}>
         {canSelect ? <label className="card-select" title={assignable ? `${cardSelectionVerb}视频` : selectionLocked ? "操作进行中，暂不能更改选择" : "当前状态不可选择"}><input type="checkbox" checked={selected.has(v.id)} disabled={!assignable} onChange={() => toggleOne(v.id)} aria-label={`${cardSelectionVerb}：${v.filename}`}/></label> : null}
-        <div className="thumb" aria-hidden="true">{v.status === "needs_transcode" ? "⟳" : v.storage_path ? "▶" : "▢"}</div><div className="name" data-selection-copy title={v.filename}>{v.filename}</div>
+        <div className="thumb" aria-hidden="true">{canPlayVideo(v.playback_status) ? "▶" : v.playback_status === "pending" ? "⟳" : "▢"}</div><div className="name" data-selection-copy title={v.filename}>{v.filename}</div>
         <div className={`assignee-line ${v.assignee ? "" : "unassigned"}`} data-selection-copy><span className="assignee-avatar">{v.assignee?.username.slice(0, 1).toUpperCase() ?? "?"}</span><span>{v.assignee ? <><small>负责人</small><b title={v.assignee.username}>{v.assignee.username}{mine ? "（我）" : ""}</b></> : <><small>负责人</small><b>未分配</b></>}</span></div>
-        <div className="meta" data-selection-copy><span>时长 <b>{formatDuration(v.duration)}</b></span><span>帧率 <b>{v.fps != null ? `${v.fps} fps` : "—"}</b></span><span>分辨率 <b>{v.width != null && v.height != null ? `${v.width} × ${v.height}` : "—"}</b></span><span>状态 <b>{statusLabel(v.status)}</b></span></div>
-        {v.status === "needs_transcode" ? <div className="transcode-note" role="note" data-selection-copy>需先转码：当前源格式不能在浏览器中直接播放，因此暂不可进入标注。</div> : null}
+        <div className="meta" data-selection-copy><span>时长 <b>{formatDuration(v.duration)}</b></span><span>帧率 <b>{v.fps != null ? `${v.fps} fps` : "—"}</b></span><span>分辨率 <b>{v.width != null && v.height != null ? `${v.width} × ${v.height}` : "—"}</b></span><span>播放状态 <b>{playbackStatusLabel(v.playback_status)}</b></span></div>
+        {!canPlayVideo(v.playback_status) ? <div className="transcode-note" role="note" data-selection-copy>{v.playback_status === "pending" ? "播放资源处理中，暂不可进入。" : v.playback_status === "failed" ? "播放资源处理失败，暂不可进入。" : "暂无可用播放资源。"}</div> : null}
         <div className="workflow-line" data-selection-copy><WorkflowBadge value={v.workflow_status} revision={v.annotation_revision}/></div>
         {v.submitted_at || v.approved_at ? <div className="workflow-times" data-selection-copy>{v.submitted_at ? <span>提交 <b>{formatDate(v.submitted_at)}</b></span> : null}{v.approved_at ? <span>通过 <b>{formatDate(v.approved_at)}</b></span> : null}</div> : null}
         {v.workflow_status === "approved" ? <div className="card-media-summary" data-selection-copy><MediaStatusSummary projectId={pid} videoId={v.id}/></div> : null}
-        <div className="foot" data-selection-copy><span>上传 {formatDate(v.created_at)}</span><StatusBadge value={v.status}/></div>
-        {view === "unassigned" ? <div className="actions card-actions"><button className="btn btn-sm btn-primary" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button></div> : view === "mine" ? <div className="actions card-actions">{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={v.status === "needs_transcode"} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div> : <div className="actions card-actions preview-card-actions" data-selection-interactive onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="btn btn-sm" disabled={v.status === "needs_transcode" || !v.storage_path} title={v.status === "needs_transcode" ? "视频需要先转码，暂时无法预览" : !v.storage_path ? "视频没有可用的源文件，暂时无法预览" : `预览 ${v.filename}`} onClick={() => setPreviewVideo(v)}>▶ 预览视频</button>{v.status === "needs_transcode" || !v.storage_path ? <span className="preview-unavailable" role="note">{v.status === "needs_transcode" ? "需先转码" : "缺少源文件"}</span> : null}</div>}
+        <div className="foot" data-selection-copy><span>上传 {formatDate(v.created_at)}</span><StatusBadge value={v.playback_status}/></div>
+        {view === "unassigned" ? <div className="actions card-actions"><button className="btn btn-sm btn-primary" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "claim")}>{actionId === v.id ? "领取中…" : "领取任务"}</button></div> : view === "mine" ? <div className="actions card-actions">{mine && v.workflow_status === "draft" ? <button className="btn btn-sm btn-ghost" disabled={actionId !== null || busy} onClick={() => void perform(v.id, "release")}>释放</button> : null}<button className="btn btn-sm btn-primary" disabled={!canPlayVideo(v.playback_status)} onClick={() => navigate(`/projects/${pid}/annotate/${v.id}`)}>进入标注 →</button></div> : <div className="actions card-actions preview-card-actions" data-selection-interactive onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="btn btn-sm" disabled={!canPlayVideo(v.playback_status)} title={canPlayVideo(v.playback_status) ? `预览 ${v.filename}` : "视频暂无可用播放资源"} onClick={() => setPreviewVideo(v)}>▶ 预览视频</button>{!canPlayVideo(v.playback_status) ? <span className="preview-unavailable" role="note">{v.playback_status === "pending" ? "处理中" : v.playback_status === "failed" ? "处理失败" : "不可播放"}</span> : null}</div>}
       </article>; })}{marquee.rect ? <div className="marquee-rect" aria-hidden="true" style={marquee.rect}/> : null}</div></>}
     {/* 开发工具与普通分工流程分层，并默认折叠。 */}
     <details className="dev-panel" open={devOpen} onToggle={(event) => setDevOpen(event.currentTarget.open)}>
@@ -447,10 +445,6 @@ export default function VideosPage() {
             <div className="field">
               <label htmlFor="video-status">状态 status（可选）</label>
               <input id="video-status" className="input" value={form.status} placeholder="默认 metadata；如 ready / needs_transcode / error" onChange={(event) => updateField("status", event.target.value)} />
-            </div>
-            <div className="field">
-              <label htmlFor="video-path">存储路径 storage_path（可选）</label>
-              <input id="video-path" className="input" value={form.storage_path} placeholder="data/videos/ 内相对路径或绝对路径" onChange={(event) => updateField("storage_path", event.target.value)} />
             </div>
           </div>
           <div className="form-error">{formError ?? ""}</div>

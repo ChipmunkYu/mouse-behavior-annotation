@@ -638,6 +638,7 @@ def enqueue_submission_media(db: Session, submission: Submission) -> BackgroundJ
         submission_id=submission.id).order_by(SubmissionAnnotation.id)]
     for annotation_id in annotation_ids:
         db.execute(sqlite_insert(Clip).values(
+            project_id=submission.video.project_id,
             submission_annotation_id=annotation_id, status="pending", media_revision=1,
         ).on_conflict_do_nothing(
             index_elements=["submission_annotation_id"],

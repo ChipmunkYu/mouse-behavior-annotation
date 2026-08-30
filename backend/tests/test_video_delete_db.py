@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import (
     Annotation, BackgroundJob, Clip, CorrectedDetectionAssignment, CorrectedTrack,
     DetectionImport, DetectionSnapshot, DetectionSuppression,
@@ -239,6 +240,53 @@ def test_active_or_unknown_job_blocks_without_side_effects(ctx, tmp_path, status
             _freeze(db, _settings(tmp_path), project_id, video_id, actor_id)
         assert db.get(Video, video_id) is not None
         assert db.get(BackgroundJob, job_id).status == status
+
+
+def test_active_display_proxy_job_blocks_without_side_effects(ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    with ctx.session_factory() as db:
+        job = BackgroundJob(
+            project_id=project_id, job_type="display_proxy", status="running",
+            run_token="active-test-token",
+            payload={"video_id": video_id, "project_id": project_id,
+                     "source_sha256": "a" * 64,
+                     "profile_version": DISPLAY_PROXY_PROFILE_VERSION},
+        )
+        db.add(job); db.commit()
+        with pytest.raises(VideoDeleteConflictError):
+            _freeze(db, _settings(tmp_path), project_id, video_id, actor_id)
+        assert db.get(Video, video_id) is not None
+
+
+def test_display_proxy_result_outside_root_and_shared_proxy_fail_closed(ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    payload = {"video_id": video_id, "project_id": project_id,
+               "source_sha256": "a" * 64,
+               "profile_version": DISPLAY_PROXY_PROFILE_VERSION}
+    with ctx.session_factory() as db:
+        db.add(BackgroundJob(
+            project_id=project_id, job_type="display_proxy", status="failed",
+            payload=payload, result_path=str(tmp_path / "outside.mp4"),
+        ))
+        db.commit()
+        with pytest.raises(VideoDeleteIntegrityError, match="controlled root"):
+            _freeze(db, settings, project_id, video_id, actor_id)
+
+        db.query(BackgroundJob).delete()
+        target = db.get(Video, video_id)
+        other = Video(project_id=project_id, filename="other.mp4",
+                      storage_path="other.mp4", workflow_status="draft")
+        for video in (target, other):
+            video.source_sha256 = "a" * 64
+            video.display_status = "ready"
+            video.display_path = "shared-proxy.mp4"
+            video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+            video.display_source_sha256 = video.source_sha256
+            video.display_generated_at = datetime.utcnow()
+        db.add(other); db.commit()
+        with pytest.raises(VideoDeleteConflictError, match="shared"):
+            _freeze(db, settings, project_id, video_id, actor_id)
 
 
 def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):

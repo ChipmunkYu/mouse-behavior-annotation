@@ -1,6 +1,6 @@
 import { completeImportBatch, createImportBatch, getImportBatch, uploadBatchFile, uploadVideo } from "../api";
 import { ApiError } from "../api/client";
-import type { ImportFileRole, VideoImportBatch } from "../api/types";
+import type { ImportFileRole, VideoImportBatch, VideoImportCompletion } from "../api/types";
 import type { UploadTask } from "./types";
 
 const BATCH_ORDER: ImportFileRole[] = ["tracks", "metadata", "video"];
@@ -13,11 +13,13 @@ export interface TaskExecutionCallbacks {
   isCurrent: () => boolean;
 }
 
-export function batchSucceeded(batch: VideoImportBatch): boolean {
+type ImportBatchResult = VideoImportBatch | VideoImportCompletion;
+
+export function batchSucceeded(batch: ImportBatchResult): boolean {
   return batch.status === "ready" || batch.status === "video_only";
 }
 
-function batchStatusError(batch: VideoImportBatch): string {
+function batchStatusError(batch: ImportBatchResult): string {
   if (batch.status === "failed") return "批次校验失败，请重试或取消任务。";
   return `批次尚未完成（${batch.status}），请稍后重试。`;
 }
@@ -67,7 +69,7 @@ export async function executeUploadTask(task: UploadTask, signal: AbortSignal, c
       }
 
       callbacks.update((current) => ({ ...current, phase: "completing", progress: 100 }));
-      let completed: VideoImportBatch;
+      let completed: ImportBatchResult;
       try {
         completed = await completeImportBatch(task.projectId, created.id, task.assigneeMembershipId, signal);
         if (batchSucceeded(completed)) {

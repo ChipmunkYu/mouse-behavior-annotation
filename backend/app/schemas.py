@@ -2,14 +2,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 
 StrictBusinessInt = Annotated[int, Field(strict=True)]
 StrictPositiveBusinessInt = Annotated[int, Field(strict=True, gt=0)]
 StrictNonNegativeBusinessInt = Annotated[int, Field(strict=True, ge=0)]
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w.])(?:\\\\[^\\/'\";\r\n]+[\\/][^'\";\r\n]+|[A-Za-z]:[\\/][^'\";\r\n]+|/[^'\";\r\n]+)"
+)
+
+
+def _sanitize_public_value(value: Any) -> Any:
+    """Redact absolute filesystem paths from otherwise useful public diagnostics."""
+    if isinstance(value, str):
+        return _ABSOLUTE_PATH.sub("[path]", value)
+    if isinstance(value, dict):
+        return {key: _sanitize_public_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_public_value(item) for item in value]
+    return value
 
 
 # ---------- 认证 ----------
@@ -32,6 +47,11 @@ class LoginResponse(BaseModel):
     user: UserOut
 
 
+class StreamTicketResponse(BaseModel):
+    url: str
+    expires_at: datetime
+
+
 # ---------- 项目 ----------
 class ProjectOut(BaseModel):
     id: int
@@ -39,7 +59,7 @@ class ProjectOut(BaseModel):
     description: Optional[str] = None
     status: str
     created_at: datetime
-    role: str
+    role: Literal["owner", "admin", "member"]
     membership_id: int
     can_review: bool
     category_scheme_version: int = 0
@@ -92,6 +112,22 @@ class AssigneeOut(BaseModel):
 
 
 # ---------- 行为类别 ----------
+class RoleDefinitionOut(BaseModel):
+    key: str
+    name: str
+    min_count: int
+    max_count: Optional[int] = None
+    role_sort_order: int
+
+
+class RoleDefinitionIn(BaseModel):
+    key: Optional[str] = None
+    name: str
+    min_count: int
+    max_count: Optional[int] = None
+    role_sort_order: int
+
+
 class CategoryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -106,7 +142,7 @@ class CategoryOut(BaseModel):
     mouse_count_min: int = 1
     mouse_count_max: Optional[int] = None
     participant_mode: Literal["unordered", "role_based"] = "unordered"
-    role_definitions: list[dict[str, Any]] = []
+    role_definitions: list[RoleDefinitionOut] = []
 
 
 class CategorySchemeCategoryIn(BaseModel):
@@ -117,7 +153,7 @@ class CategorySchemeCategoryIn(BaseModel):
     sort_order: int = Field(ge=0, strict=True)
     is_active: bool = True
     participant_mode: Literal["unordered", "role_based"] = "unordered"
-    role_definitions: list[dict[str, Any]] = []
+    role_definitions: list[RoleDefinitionIn] = []
     mouse_count_min: Optional[StrictPositiveBusinessInt] = None
     mouse_count_max: Optional[StrictPositiveBusinessInt] = None
 
@@ -164,6 +200,22 @@ class CategorySchemeAuditOut(BaseModel):
 
 
 # ---------- 视频 ----------
+class SubmissionAnnotationSnapshotOut(BaseModel):
+    id: int
+    source_annotation_id: Optional[int] = None
+    category_id: int
+    category_name: str
+    category_group: Optional[str] = None
+    category_participant_mode: Literal["unordered", "role_based"] = "unordered"
+    role_definitions: list[RoleDefinitionOut] = []
+    participant_roles: dict[str, list[int]] = {}
+    mouse_ids: list[int] = []
+    start_time: float
+    end_time: float
+    start_frame: int
+    end_frame: int
+
+
 class VideoCreate(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     duration: Optional[float] = Field(default=None, ge=0)
@@ -171,7 +223,6 @@ class VideoCreate(BaseModel):
     width: Optional[int] = Field(default=None, ge=0)
     height: Optional[int] = Field(default=None, ge=0)
     status: Optional[str] = None
-    storage_path: Optional[str] = None
     assignee_membership_id: Optional[StrictPositiveBusinessInt] = None
 
 
@@ -185,7 +236,7 @@ class VideoOut(BaseModel):
     fps: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    storage_path: Optional[str] = None
+    playback_status: Literal["ready", "pending", "failed", "unavailable"]
     status: str
     # 审核工作流字段（新增；旧数据迁移后由 DB 默认值填充）
     workflow_status: str = "draft"
@@ -198,7 +249,22 @@ class VideoOut(BaseModel):
     assignee_membership_id: Optional[int] = None
     assignee: Optional[AssigneeOut] = None
     created_at: datetime
-    submission_annotations: list[dict[str, Any]] = []
+    submission_annotations: list[SubmissionAnnotationSnapshotOut] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_playback_status(cls, value, info: ValidationInfo):
+        """Accept only the status supplied by the authoritative endpoint resolver."""
+        if isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = {
+                name: item for name in cls.model_fields
+                if (item := getattr(value, name, None)) is not None
+            }
+        supplied = (info.context or {}).get("playback_status")
+        data["playback_status"] = supplied or data.get("playback_status", "unavailable")
+        return data
 
 
 class AssignmentBatchRequest(BaseModel):
@@ -313,7 +379,7 @@ class AnnotationOut(BaseModel):
     mouse_ids: list[int] = []
     participant_roles: dict[str, list[int]] = {}
     participant_status: Literal["valid", "needs_participants"] = "valid"
-    mouse_id_status: str = "needs_mouse_ids"
+    mouse_id_status: Literal["valid", "needs_mouse_ids"] = "needs_mouse_ids"
     detection_import_revision: int = 0
     identity_revision: int = 0
     created_at: datetime
@@ -334,7 +400,7 @@ class ReviewOut(BaseModel):
     project_id: int
     video_id: int
     reviewer_id: Optional[int] = None
-    result: str
+    result: Literal["approved", "rejected"]
     comment: Optional[str] = None
     annotation_revision: int
     detection_import_revision: int = 0
@@ -343,7 +409,7 @@ class ReviewOut(BaseModel):
     # 便捷字段：审核人用户名
     reviewer: Optional[str] = None
     submission_id: Optional[int] = None
-    submission_annotations: list[dict[str, Any]] = []
+    submission_annotations: list[SubmissionAnnotationSnapshotOut] = []
 
 
 # ---------- 后台任务 / 媒体状态（批次 4） ----------
@@ -352,16 +418,24 @@ class JobOut(BaseModel):
 
     id: int
     project_id: Optional[int] = None
-    job_type: str
-    status: str
+    job_type: Literal["media", "export", "cleanup", "display_proxy"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     progress: int
-    payload: Optional[dict[str, Any]] = None
-    result_path: Optional[str] = None
-    error: Optional[str] = None
+    error: Optional[Literal["processing_failed"]] = None
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_error(cls, value):
+        if isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = {name: getattr(value, name, None) for name in cls.model_fields}
+        data["error"] = "processing_failed" if data.get("error") else None
+        return data
 
 
 class MediaStatusOut(BaseModel):
@@ -378,8 +452,10 @@ class MediaStatusOut(BaseModel):
 
 # ---------- 跨视频片段库（批次 5） ----------
 class ClipItem(BaseModel):
-    """库中的一条审核通过标注，含对应 ready Clip 的相对路径（非 ready 为 null）。"""
+    """库中的一条审核通过标注及其不透明媒体资源键。"""
 
+    item_key: str
+    clip_id: Optional[int] = None
     annotation_id: int
     video_id: int
     video_filename: str
@@ -390,14 +466,13 @@ class ClipItem(BaseModel):
     start_frame: int
     end_frame: int
     confidence: str
-    clip_path: Optional[str] = None
-    thumbnail_path: Optional[str] = None
+    media_status: Literal["pending", "processing", "ready", "failed", "stale"]
     annotator_name: Optional[str] = None
     review_status: str
     created_at: datetime
     category_group: Optional[str] = None
     category_participant_mode: Literal["unordered", "role_based"] = "unordered"
-    role_definitions: list[dict[str, Any]] = []
+    role_definitions: list[RoleDefinitionOut] = []
     participant_roles: dict[str, list[int]] = {}
     mouse_ids: list[int] = []
 
@@ -490,13 +565,14 @@ class VideoImportBatchOut(BaseModel):
     video_upload_state: str
     tracks_upload_state: str
     metadata_upload_state: str
-    video_path: Optional[str] = None
     video_filename: Optional[str] = None
-    tracks_path: Optional[str] = None
-    metadata_path: Optional[str] = None
     created_video_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("validation_errors")
+    def sanitize_validation_errors(self, value: Any) -> Any:
+        return _sanitize_public_value(value)
 
 
 class DetectionImportOut(BaseModel):
@@ -506,9 +582,7 @@ class DetectionImportOut(BaseModel):
     video_id: int
     revision: int
     schema_version: str
-    tracks_path: Optional[str] = None
     tracks_sha256: Optional[str] = None
-    metadata_path: Optional[str] = None
     metadata_sha256: Optional[str] = None
     model: Optional[str] = Field(default=None, validation_alias="model_name")
     model_weights_sha256: Optional[str] = None
@@ -520,12 +594,21 @@ class DetectionImportOut(BaseModel):
     frame_count: Optional[int] = None
     frame_range: Optional[dict[str, Any]] = None
     detection_count: Optional[int] = None
-    source_relative: Optional[str] = None
     status: str
-    error: Optional[str] = None
+    error: Optional[Literal["import_failed"]] = None
     active: bool
     created_by: Optional[int] = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_error(cls, value):
+        if isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = {name: getattr(value, name, None) for name in cls.model_fields}
+        data["error"] = "import_failed" if data.get("error") else None
+        return data
 
 
 class RawDetectionOut(BaseModel):
@@ -608,13 +691,30 @@ class BatchStatusOut(BaseModel):
     video_upload_state: str
     tracks_upload_state: str
     metadata_upload_state: str
-    video_path: Optional[str] = None
     video_filename: Optional[str] = None
-    tracks_path: Optional[str] = None
-    metadata_path: Optional[str] = None
     created_video_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("validation_errors")
+    def sanitize_validation_errors(self, value: Any) -> Any:
+        return _sanitize_public_value(value)
+
+
+class VideoImportCompletionOut(BaseModel):
+    batch_id: int
+    video_id: Optional[int] = None
+    created_video_id: Optional[int] = None
+    detection_import_id: Optional[int] = None
+    revision: Optional[int] = None
+    detection_count: Optional[int] = None
+    status: Literal["ready", "video_only", "failed"]
+    validation_errors: Optional[Any] = None
+    message: str
+
+    @field_serializer("validation_errors")
+    def sanitize_validation_errors(self, value: Any) -> Any:
+        return _sanitize_public_value(value)
 
 
 class DetectionImportCurrentOut(BaseModel):

@@ -62,7 +62,7 @@ function AppLayoutContent() {
     if (loggingOut) return;
     setLoggingOut(true);
     await cancelAllForLogout();
-    logout();
+    await logout();
   }
 
   function isActive(item: NavItem): boolean {

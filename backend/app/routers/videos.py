@@ -1,25 +1,32 @@
 """视频接口：项目内视频列表 / JSON 创建视频元数据 / 真实视频流式上传 / 视频流。"""
 from __future__ import annotations
 
+import hmac
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
+from time import time
 from uuid import uuid4
 
 from collections.abc import Iterator
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+import jwt
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import AuthContext, authenticate_token, get_auth_context, get_current_user
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..database import get_db
 from ..deps import project_access
 from ..models import ProjectMembership, User, Video
+from ..media_auth import (
+    MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
+)
 from ..permissions import is_manager, require_manager
 from ..video_delete_db import (
     VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
@@ -29,6 +36,7 @@ from ..video_delete_service import VideoDeleteServiceError
 from ..video_operation_gate import VideoOperationBusyError
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_dependency import require_video_operation_gate
+from ..video_playback import public_video, resolve_video_playback
 from ..schemas import (
     AssignmentBatchRequest,
     AssignmentStatsItem,
@@ -37,6 +45,7 @@ from ..schemas import (
     VideoClaimsResponse,
     VideoCreate,
     VideoOut,
+    StreamTicketResponse,
 )
 
 router = APIRouter(tags=["videos"])
@@ -190,12 +199,13 @@ def _remove_file(path: Path) -> None:
 @router.get("/api/projects/{project_id}/videos", response_model=list[VideoOut])
 def list_videos(
     project_id: int,
+    request: Request,
     view: Literal["mine", "unassigned", "all"] = "all",
     workflow_status: str | None = None,
     assignee_membership_id: int | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> list[Video]:
+) -> list[dict]:
     query = db.query(Video).filter(Video.project_id == project_id)
     if view == "mine":
         query = query.filter(Video.assignee_membership_id == access[1].id)
@@ -208,16 +218,18 @@ def list_videos(
         query = query.filter(Video.workflow_status == workflow_status)
     if assignee_membership_id is not None:
         query = query.filter(Video.assignee_membership_id == assignee_membership_id)
-    return query.order_by(Video.created_at.desc()).all()
+    return [public_video(video, request.app.state.settings)
+            for video in query.order_by(Video.created_at.desc()).all()]
 
 
 @router.post("/api/projects/{project_id}/videos", response_model=VideoOut, status_code=201)
 def create_video(
     project_id: int,
     body: VideoCreate,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> Video:
+) -> dict:
     filename = body.filename.strip()
     if not filename:
         raise HTTPException(status_code=400, detail="filename must not be empty")
@@ -233,7 +245,6 @@ def create_video(
         width=body.width,
         height=body.height,
         status=body.status or "metadata",
-        storage_path=body.storage_path,
         uploaded_by=access[1].user_id,
         assignee_membership_id=body.assignee_membership_id,
     )
@@ -243,7 +254,7 @@ def create_video(
     except IntegrityError as exc:
         _raise_if_assignee_conflict(db, exc)
     db.refresh(video)
-    return video
+    return public_video(video, request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/upload", response_model=VideoOut, status_code=201)
@@ -254,11 +265,11 @@ async def upload_video(
     assignee_membership_id: int | None = Form(default=None),
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> Video:
+) -> dict:
     """真实视频流式上传：multipart 字段 `file`，分块写入临时文件后原子 rename。
 
     - 应用层不设文件大小上限；每块写入前校验 videos_dir 可用空间（保留 UPLOAD_DISK_RESERVE_BYTES）。
-    - 磁盘目标为 UUID 名（相对 storage_path），临时 `.part` 成功后原子 rename；
+    - 磁盘目标使用内部 UUID 名，临时 `.part` 成功后原子 rename；
       失败/取消/DB 提交失败均清理临时与最终孤儿文件。
     - 扩展名（大小写不敏感）是唯一校验依据；Content-Type 仅作辅助。
     """
@@ -346,7 +357,7 @@ async def upload_video(
             _remove_file(final_path)
             raise HTTPException(status_code=500, detail=ERR_DB_SAVE)
         db.refresh(video)
-        return video
+        return public_video(video, settings)
     except _InsufficientDiskSpace:
         raise HTTPException(status_code=507, detail=ERR_DISK_SPACE)
     except _EmptyUpload:
@@ -370,6 +381,7 @@ async def upload_video(
 def claim_videos(
     project_id: int,
     body: VideoClaimsRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> VideoClaimsResponse:
@@ -390,14 +402,15 @@ def claim_videos(
     by_id = {video.id: video for video in rows}
     return VideoClaimsResponse(
         claimed_count=len(video_ids),
-        videos=[by_id[video_id] for video_id in video_ids],
+        videos=[public_video(by_id[video_id], request.app.state.settings)
+                for video_id in video_ids],
     )
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut,
              dependencies=[Depends(require_video_operation_gate)])
-def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
-                db: Session = Depends(get_db)) -> Video:
+def claim_video(project_id: int, video_id: int, request: Request,
+                access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
     try:
         changed = _claim_videos_cas(db, project_id, [video_id], access[1].id)
     except IntegrityError as exc:
@@ -408,13 +421,13 @@ def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_
             raise HTTPException(status_code=404, detail="Video not found in this project")
         raise HTTPException(status_code=409, detail="Video is no longer claimable")
     db.commit()
-    return db.get(Video, video_id)
+    return public_video(db.get(Video, video_id), request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/release", response_model=VideoOut,
              dependencies=[Depends(require_video_operation_gate)])
-def release_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
-                  db: Session = Depends(get_db)) -> Video:
+def release_video(project_id: int, video_id: int, request: Request,
+                  access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
     changed = db.query(Video).filter(
         Video.id == video_id, Video.project_id == project_id,
         Video.assignee_membership_id == access[1].id, Video.workflow_status == "draft",
@@ -425,13 +438,13 @@ def release_video(project_id: int, video_id: int, access: tuple = Depends(projec
             raise HTTPException(status_code=404, detail="Video not found in this project")
         raise HTTPException(status_code=409, detail="Only the current assignee may release a draft video")
     db.commit()
-    return db.get(Video, video_id)
+    return public_video(db.get(Video, video_id), request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/assignments", response_model=list[VideoOut],
              dependencies=[Depends(_assignment_operation_gate)])
-def batch_assign(project_id: int, body: AssignmentBatchRequest,
-                 access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[Video]:
+def batch_assign(project_id: int, body: AssignmentBatchRequest, request: Request,
+                 access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[dict]:
     require_manager(access[1])
     _validate_assignee(db, project_id, body.assignee_membership_id)
     ids = list(dict.fromkeys(body.video_ids))
@@ -454,7 +467,8 @@ def batch_assign(project_id: int, body: AssignmentBatchRequest,
             detail="Assignment conflict: every video must still belong to this project and be draft/rejected",
         )
     db.commit()
-    return db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()
+    return [public_video(video, request.app.state.settings) for video in
+            db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()]
 
 
 @router.get("/api/projects/{project_id}/assignment-stats", response_model=AssignmentStatsOut)
@@ -493,13 +507,13 @@ def assignment_stats(project_id: int, access: tuple = Depends(project_access),
     )
 
 
-@router.get("/api/videos/{video_id}/stream")
-def stream_video(
-    video_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> FileResponse:
+def _authorized_video_path(
+    *, video_id: int, user_id: int, request: Request, db: Session
+) -> tuple[Video, Path]:
+    """签票与每次取流共用的实时用户、成员、路径和普通非空文件检查。"""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User no longer exists")
     video = db.get(Video, video_id)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -507,7 +521,7 @@ def stream_video(
     # 需为视频所属项目的成员
     membership = (
         db.query(ProjectMembership)
-        .filter(ProjectMembership.project_id == video.project_id, ProjectMembership.user_id == user.id)
+        .filter(ProjectMembership.project_id == video.project_id, ProjectMembership.user_id == user_id)
         .first()
     )
     if membership is None:
@@ -516,19 +530,154 @@ def stream_video(
     if membership.status != "active":
         raise HTTPException(status_code=403, detail=ERR_MEMBERSHIP_INACTIVE)
 
-    if not video.storage_path:
-        raise HTTPException(status_code=404, detail="Video file is not available (no storage_path)")
+    playback = resolve_video_playback(video, request.app.state.settings)
+    if playback.status != "ready" or playback.path is None:
+        raise HTTPException(status_code=404, detail="Video playback is not ready")
+    return video, playback.path
 
-    # 安全边界：只允许提供配置视频目录内的文件，防止任意读取项目外敏感文件。
-    # storage_path 支持“绝对路径”或“相对 data/videos/ 的相对路径”，二者都必须解析到 videos_dir 内。
-    videos_dir = request.app.state.settings.videos_dir.resolve()
-    raw = Path(video.storage_path)
-    path = raw.resolve() if raw.is_absolute() else (videos_dir / raw).resolve()
 
-    if not path.is_relative_to(videos_dir):
-        raise HTTPException(status_code=404, detail="Video file is outside the allowed videos directory")
+def _set_media_cookie(response: Response, name: str, value: str, *, path: str, max_age: int) -> None:
+    response.set_cookie(
+        name, value, max_age=max_age, path=path,
+        secure=True, httponly=True, samesite="strict",
+    )
 
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
 
-    return FileResponse(path=path, filename=video.filename, content_disposition_type="inline")
+@router.post("/api/videos/{video_id}/stream-ticket", response_model=StreamTicketResponse)
+def create_stream_ticket(
+    video_id: int,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+) -> StreamTicketResponse:
+    settings = request.app.state.settings
+    if not settings.media_ticket_enabled:
+        raise HTTPException(status_code=404, detail="Media tickets are disabled")
+    keys = MediaKeys.from_settings(settings)
+    binding_values = raw_cookie_values(request.scope, {settings.media_binding_cookie_name})[
+        settings.media_binding_cookie_name
+    ]
+    # 零个 binding 仅用于滚动升级旧会话；一旦出现，必须唯一且属于当前原始 Bearer。
+    # 失败发生在任何 Set-Cookie 之前，不能借续票覆盖现有 binding。
+    if len(binding_values) > 1:
+        raise HTTPException(status_code=401, detail="Invalid media credentials")
+    expected_binding = bearer_binding(auth.raw_token, keys.raw_bearer)
+    if binding_values:
+        try:
+            existing = decode_media_jwt(
+                binding_values[0], key=keys.binding_jwt,
+                audience=settings.media_binding_audience,
+                expected_type=settings.media_binding_type,
+                required=("sub", "binding", "aud", "typ", "iat", "exp"),
+            )
+            if (
+                not isinstance(existing["sub"], str)
+                or existing["sub"] != str(auth.user.id)
+                or not isinstance(existing["binding"], str)
+                or not hmac.compare_digest(existing["binding"], expected_binding)
+            ):
+                raise jwt.InvalidTokenError("binding does not match bearer")
+        except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid media credentials") from None
+    _authorized_video_path(video_id=video_id, user_id=auth.user.id, request=request, db=db)
+    now = int(time())
+    bearer_exp = int(auth.claims["exp"])
+    exp = min(now + settings.media_ticket_ttl_seconds, bearer_exp)
+    if exp <= now:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    binding = expected_binding
+    sub = str(auth.user.id)
+    ticket = encode_media_jwt({
+        "sub": sub, "video_id": video_id, "binding": binding,
+        "aud": settings.media_ticket_audience, "typ": settings.media_ticket_type,
+        "iat": now, "exp": exp,
+    }, keys.ticket)
+    binding_token = encode_media_jwt({
+        "sub": sub, "binding": binding, "aud": settings.media_binding_audience,
+        "typ": settings.media_binding_type, "iat": now, "exp": bearer_exp,
+    }, keys.binding_jwt)
+    stream_path = f"/api/videos/{video_id}/stream"
+    _set_media_cookie(
+        response, settings.media_ticket_cookie_name, ticket,
+        path=stream_path, max_age=max(0, exp - now),
+    )
+    _set_media_cookie(
+        response, settings.media_binding_cookie_name, binding_token,
+        path=settings.media_binding_cookie_path, max_age=max(0, bearer_exp - now),
+    )
+    return StreamTicketResponse(
+        url=stream_path,
+        expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+    )
+
+
+def _legacy_auth_context(request: Request, db: Session) -> AuthContext:
+    value = request.headers.get("authorization")
+    if not value or not value.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = value[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return authenticate_token(token, db, request.app.state.settings)
+
+
+def _stream_user_id(video_id: int, request: Request, db: Session) -> int:
+    settings = request.app.state.settings
+    names = {settings.media_ticket_cookie_name, settings.media_binding_cookie_name}
+    values = raw_cookie_values(request.scope, names)
+    cookie_present = any(values[name] for name in names)
+    if not cookie_present:
+        if not settings.media_legacy_bearer_enabled:
+            raise HTTPException(status_code=401, detail="Media authentication required")
+        return _legacy_auth_context(request, db).user.id
+
+    # 任一媒体名出现即锁定 Cookie 分支；功能关闭或重复/缺一均不得回退 Bearer。
+    if not settings.media_ticket_enabled or any(len(values[name]) != 1 for name in names):
+        raise HTTPException(status_code=401, detail="Invalid media credentials")
+    keys = MediaKeys.from_settings(settings)
+    try:
+        ticket = decode_media_jwt(
+            values[settings.media_ticket_cookie_name][0], key=keys.ticket,
+            audience=settings.media_ticket_audience, expected_type=settings.media_ticket_type,
+            required=("sub", "video_id", "binding", "aud", "typ", "iat", "exp"),
+        )
+        binding = decode_media_jwt(
+            values[settings.media_binding_cookie_name][0], key=keys.binding_jwt,
+            audience=settings.media_binding_audience, expected_type=settings.media_binding_type,
+            required=("sub", "binding", "aud", "typ", "iat", "exp"),
+        )
+        if (
+            type(ticket["video_id"]) is not int
+            or ticket["video_id"] != video_id
+            or not isinstance(ticket["sub"], str)
+            or not isinstance(binding["sub"], str)
+            or not isinstance(ticket["binding"], str)
+            or not isinstance(binding["binding"], str)
+            or ticket["sub"] != binding["sub"]
+            or ticket["binding"] != binding["binding"]
+        ):
+            raise jwt.InvalidTokenError("media claims do not match")
+        return int(ticket["sub"])
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid media credentials") from None
+
+
+@router.get("/api/videos/{video_id}/stream")
+@router.head("/api/videos/{video_id}/stream")
+def stream_video(
+    video_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    user_id = _stream_user_id(video_id, request, db)
+    video, path = _authorized_video_path(
+        video_id=video_id, user_id=user_id, request=request, db=db,
+    )
+
+    return FileResponse(
+        path=path,
+        filename=video.filename,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-store"},
+    )

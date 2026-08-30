@@ -49,6 +49,11 @@ def _video_rows(ctx) -> list:
         return db.query(models.Video).all()
 
 
+def _storage_path(ctx, video_id: int) -> str | None:
+    with ctx.session_factory() as db:
+        return db.get(models.Video, video_id).storage_path
+
+
 # ---------- 基本上传 / 元数据 / 流式读取 ----------
 def test_upload_mp4_sets_fields_and_streams(ctx, login_headers):
     headers = login_headers()
@@ -62,17 +67,18 @@ def test_upload_mp4_sets_fields_and_streams(ctx, login_headers):
     assert body["status"] == "uploaded"
     assert body["workflow_status"] == "draft"
     assert body["annotation_revision"] == 1
-    assert body["storage_path"]
-    assert body["storage_path"] == Path(body["storage_path"]).name  # 相对路径、无分隔符
+    assert "storage_path" not in body
     assert body["duration"] is None and body["fps"] is None  # 本批不运行 ffprobe
 
     with ctx.session_factory() as db:
         row = db.get(models.Video, body["id"])
         assert row is not None
         assert row.uploaded_by is not None  # uploaded_by = 当前用户
+        storage_path = row.storage_path
+        assert storage_path == Path(storage_path).name
 
     videos_dir = _videos_dir(ctx)
-    final = videos_dir / body["storage_path"]
+    final = videos_dir / storage_path
     assert final.is_file()
     assert final.read_bytes() == data
     assert final.resolve().is_relative_to(videos_dir)  # 路径限制在 videos_dir 内
@@ -104,6 +110,9 @@ def test_upload_extension_status_mapping(ctx, login_headers, name, expected_stat
     resp = _upload(ctx.client, pid, headers, name=name, data=b"data")
     assert resp.status_code == 201, resp.text
     assert resp.json()["status"] == expected_status
+    assert resp.json()["playback_status"] == (
+        "ready" if expected_status == "uploaded" else "unavailable"
+    )
 
 
 def test_upload_extension_case_insensitive(ctx, login_headers):
@@ -115,7 +124,7 @@ def test_upload_extension_case_insensitive(ctx, login_headers):
     resp = _upload(ctx.client, pid, headers, name="cage.AVI", data=b"data")
     assert resp.status_code == 201
     assert resp.json()["status"] == "needs_transcode"
-    assert Path(resp.json()["storage_path"]).suffix == ".avi"  # 磁盘目标扩展名小写
+    assert Path(_storage_path(ctx, resp.json()["id"])).suffix == ".avi"  # 磁盘目标扩展名小写
 
 
 def test_upload_chinese_filename_preserved(ctx, login_headers):
@@ -186,8 +195,9 @@ def test_upload_sanitizes_traversal_filename(ctx, login_headers, evil):
     assert resp.status_code == 201, evil
     body = resp.json()
     assert body["filename"] == "evil.mp4"
-    assert body["storage_path"] == Path(body["storage_path"]).name
-    target = _videos_dir(ctx) / body["storage_path"]
+    storage_path = _storage_path(ctx, body["id"])
+    assert storage_path == Path(storage_path).name
+    target = _videos_dir(ctx) / storage_path
     assert target.is_file()
     assert target.resolve().is_relative_to(_videos_dir(ctx))
 
@@ -199,7 +209,7 @@ def test_upload_same_name_does_not_overwrite(ctx, login_headers):
     r1 = _upload(ctx.client, pid, headers, name="same.mp4", data=b"ONE")
     r2 = _upload(ctx.client, pid, headers, name="same.mp4", data=b"TWO")
     assert r1.status_code == 201 and r2.status_code == 201
-    p1, p2 = r1.json()["storage_path"], r2.json()["storage_path"]
+    p1, p2 = _storage_path(ctx, r1.json()["id"]), _storage_path(ctx, r2.json()["id"])
     assert p1 != p2
     videos_dir = _videos_dir(ctx)
     assert (videos_dir / p1).read_bytes() == b"ONE"
@@ -290,7 +300,7 @@ def test_upload_streams_in_chunks_and_checks_disk_per_chunk(ctx, login_headers, 
     # 分块写入 → 磁盘检查多次（开写前首检 + 每块写入前）
     assert len(calls) >= 2
     assert all(str(c).endswith("videos") for c in calls)
-    target = _videos_dir(ctx) / resp.json()["storage_path"]
+    target = _videos_dir(ctx) / _storage_path(ctx, resp.json()["id"])
     assert target.read_bytes() == data
     assert not list(_videos_dir(ctx).glob("*.part"))
 
@@ -458,4 +468,5 @@ def test_mock_json_endpoint_still_works(ctx, login_headers):
     )
     assert resp.status_code == 201
     assert resp.json()["status"] == "metadata"
-    assert resp.json()["storage_path"] is None
+    assert "storage_path" not in resp.json()
+    assert _storage_path(ctx, resp.json()["id"]) is None

@@ -179,6 +179,53 @@ class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (
         CheckConstraint("annotation_revision >= 1", name="ck_videos_annotation_revision_min"),
+        CheckConstraint(
+            "display_status IN ('pending', 'processing', 'ready', 'failed')",
+            name="ck_videos_display_status",
+        ),
+        CheckConstraint(
+            "source_sha256 IS NULL OR (length(source_sha256) = 64 "
+            "AND source_sha256 NOT GLOB '*[^0-9a-f]*')",
+            name="ck_videos_source_sha256",
+        ),
+        CheckConstraint(
+            "display_source_sha256 IS NULL OR (length(display_source_sha256) = 64 "
+            "AND display_source_sha256 NOT GLOB '*[^0-9a-f]*')",
+            name="ck_videos_display_source_sha256",
+        ),
+        CheckConstraint(
+            "display_status NOT IN ('processing', 'ready') OR source_sha256 IS NOT NULL",
+            name="ck_videos_display_source_required",
+        ),
+        CheckConstraint(
+            "display_status <> 'ready' OR (display_path IS NOT NULL "
+            "AND length(display_path) > 0 AND display_profile_version IS NOT NULL "
+            "AND length(display_profile_version) > 0 AND display_source_sha256 IS NOT NULL "
+            "AND display_source_sha256 = source_sha256 "
+            "AND display_generated_at IS NOT NULL AND display_error IS NULL)",
+            name="ck_videos_display_ready",
+        ),
+        CheckConstraint(
+            "display_status = 'ready' OR (display_path IS NULL "
+            "AND display_profile_version IS NULL AND display_source_sha256 IS NULL "
+            "AND display_generated_at IS NULL)",
+            name="ck_videos_display_nonready",
+        ),
+        CheckConstraint(
+            "display_status NOT IN ('pending', 'processing') OR display_error IS NULL",
+            name="ck_videos_display_active_error",
+        ),
+        CheckConstraint(
+            "display_status <> 'failed' OR (display_error IS NOT NULL AND length(display_error) > 0)",
+            name="ck_videos_display_failed_error",
+        ),
+        CheckConstraint(
+            "display_status <> 'ready' OR (substr(display_path, 1, 1) <> '/' "
+            "AND instr(display_path, '/') = 0 AND instr(display_path, '\\') = 0 "
+            "AND instr(display_path, char(0)) = 0 AND instr(display_path, '..') = 0 "
+            "AND instr(display_path, ':') = 0)",
+            name="ck_videos_display_path_safe",
+        ),
         ForeignKeyConstraint(
             ["assignee_membership_id", "project_id"],
             ["project_memberships.id", "project_memberships.project_id"],
@@ -198,6 +245,15 @@ class Video(Base):
     height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     storage_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="metadata", nullable=False)
+    display_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    display_status: Mapped[str] = mapped_column(
+        String(32), default="pending", server_default="pending", nullable=False
+    )
+    display_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    display_profile_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    display_source_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    display_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 上传者被删除后视频元数据保留，uploaded_by 置空（SET NULL）
     uploaded_by: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -404,6 +460,12 @@ class BackgroundJob(Base):
         CheckConstraint(
             "progress >= 0 AND progress <= 100", name="ck_background_jobs_progress_range"
         ),
+        CheckConstraint(
+            "job_type <> 'display_proxy' OR "
+            "((status = 'running' AND run_token IS NOT NULL AND length(run_token) > 0) OR "
+            "(status <> 'running' AND run_token IS NULL))",
+            name="ck_background_jobs_display_proxy_run_token",
+        ),
         Index("ix_background_jobs_status", "status"),
         Index("ix_background_jobs_type_status", "job_type", "status"),
     )
@@ -428,6 +490,7 @@ class BackgroundJob(Base):
     # 任务领取/中断重排次数（批次 4）：重启恢复时 running 视为中断，
     # attempts < media_max_attempts 则重排，否则判失败（重试上限耗尽）。
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    run_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

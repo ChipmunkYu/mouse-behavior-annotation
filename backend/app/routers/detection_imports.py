@@ -50,6 +50,7 @@ from ..schemas import (
     DetectionImportReplacementPreviewOut,
     DetectionWithTrackOut,
     PageOut,
+    VideoImportCompletionOut,
     VideoImportBatchOut,
 )
 from ..track_ids import TRACK_ID_UPPER_BOUND, is_valid_track_id, next_display_track_id
@@ -961,7 +962,10 @@ def _media_status_for_ext(ext: str) -> str:
     return "uploaded" if ext in PLAYABLE else "needs_transcode"
 
 
-@router.post("/api/projects/{project_id}/video-import-batches/{batch_id}/complete")
+@router.post(
+    "/api/projects/{project_id}/video-import-batches/{batch_id}/complete",
+    response_model=VideoImportCompletionOut,
+)
 def complete_import_batch(
     project_id: int,
     batch_id: int,
@@ -1222,13 +1226,13 @@ def _finish_import_batch(*, db: Session, batch_id: int, project_id: int,
 
 
 def _build_ready_response(db: Session, batch: VideoImportBatch, imp: DetectionImport | None = None) -> dict:
-    """构建完成状态的响应。如果已有 imp 则使用；否则从 DB 查找当前活动的导入。"""
+    """构建稳定的批次完成响应；重复调用始终返回该批次创建的 revision 1 导入。"""
     if imp is None and batch.created_video_id:
         imp = (
             db.query(DetectionImport)
             .filter(
                 DetectionImport.video_id == batch.created_video_id,
-                DetectionImport.active == True,
+                DetectionImport.revision == 1,
             )
             .first()
         )

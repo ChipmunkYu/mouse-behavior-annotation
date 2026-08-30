@@ -12,12 +12,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   createVideoReview,
-  fetchVideoStreamUrl,
   listProjects,
   listReviewQueue,
   listVideoReviews,
 } from "../api";
-import { ApiError } from "../api/client";
 import type { Category, Project, Review, SubmissionAnnotationSnapshot, Video } from "../api/types";
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
@@ -27,8 +25,7 @@ import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
-
-type StreamState = "idle" | "loading" | "ok" | "empty" | "error";
+import { useMediaSource } from "../media";
 
 /* ================= 只读标注列表（审核视角，无编辑/删除） ================= */
 function ReadOnlyAnnotationList({
@@ -117,8 +114,6 @@ export default function ReviewPage() {
   const [annotations, setAnnotations] = useState<SubmissionAnnotationSnapshot[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
 
-  const [streamState, setStreamState] = useState<StreamState>("idle");
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [elementDuration, setElementDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -127,10 +122,16 @@ export default function ReviewPage() {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewDisabled, setReviewDisabled] = useState(true);
   const selectGenRef = useRef(0);
+  const selectedVideoRef = useRef<Video | null>(null);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmDialog, confirm] = useConfirm();
+  const handleMediaReady = useCallback((_reason: "initial" | "retry-restored", element: HTMLVideoElement) => {
+    setElementDuration(element.duration);
+  }, []);
+  const media = useMediaSource({ videoId: selectedId, surface: "review", videoRef, onReady: handleMediaReady });
+  selectedVideoRef.current = selectedVideo;
 
   const categoryById = useMemo(
     () => new Map(categories.map((c) => [c.id, c] as const)),
@@ -192,8 +193,6 @@ export default function ReviewPage() {
       setAnnotations([]);
       setCategories([]);
       setReviews([]);
-      setStreamUrl(null);
-      setStreamState("idle");
       setElementDuration(0);
       setCurrentTime(0);
       setPlaying(false);
@@ -201,13 +200,12 @@ export default function ReviewPage() {
       return;
     }
     let cancelled = false;
-    let url: string | null = null;
     const vid = selectedId;
     const gen = ++selectGenRef.current;
 
     setNotice(null);
     setErrorMsg(null);
-    setStreamState("loading");
+    setElementDuration(0);
     setReviewDisabled(true);
     setAnnotations([]);
     setCategories([]);
@@ -216,7 +214,7 @@ export default function ReviewPage() {
     Promise.all([listVideoReviews(pid, vid)])
       .then(([revs]) => {
         if (cancelled || gen !== selectGenRef.current) return;
-        const snapshots = selectedVideo?.submission_annotations ?? [];
+        const snapshots = selectedVideoRef.current?.submission_annotations ?? [];
         setAnnotations(snapshots);
         setCategories(snapshots.map((a, index) => ({ id: a.category_id, project_id: pid, name: a.category_name, group: a.category_group ?? "历史类别", color: null, sort_order: index, is_active: true, mouse_count_min: 1, mouse_count_max: null, participant_mode: a.category_participant_mode, role_definitions: a.role_definitions })));
         setReviews(revs);
@@ -227,31 +225,10 @@ export default function ReviewPage() {
         setErrorMsg(err instanceof Error ? err.message : "加载审核数据失败");
       });
 
-    fetchVideoStreamUrl(vid)
-      .then((u) => {
-        if (cancelled) {
-          URL.revokeObjectURL(u);
-          return;
-        }
-        url = u;
-        setStreamUrl(u);
-        setStreamState("ok");
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setStreamState("empty");
-        } else {
-          setStreamState("error");
-          setErrorMsg(err instanceof Error ? err.message : "视频流加载失败");
-        }
-      });
-
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
-  }, [selectedId, pid, selectedVideo]);
+  }, [selectedId, pid]);
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
     const v = videoRef.current;
@@ -367,7 +344,7 @@ export default function ReviewPage() {
     }
   }
 
-  const videoReady = streamState === "ok";
+  const videoReady = media.status === "ready";
 
   return (
     <div className="review-page">
@@ -459,24 +436,24 @@ export default function ReviewPage() {
             ) : (
               <>
                 <div className="card review-player">
-                  {streamState === "idle" || streamState === "loading" ? (
-                    <Loading text="视频流加载中…" />
-                  ) : videoReady && streamUrl ? (
+                  <div className="video-wrap">
+                    <video
+                      ref={videoRef}
+                      className={videoReady ? "" : "media-player-pending"}
+                      onClick={togglePlay}
+                      title="点击播放 / 暂停 [Space]"
+                      onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                      onPlay={() => setPlaying(true)}
+                      onPause={() => setPlaying(false)}
+                      playsInline
+                      preload="metadata"
+                    />
+                    {videoReady ? <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} trackRoleLabels={activeRoleByTrack} /> : null}
+                    {media.status === "loading" || media.status === "idle" ? <div className="media-status-overlay"><Loading text="视频流加载中…" /></div> : null}
+                    {media.status === "error" ? <div className="media-status-overlay"><EmptyState compact title="视频流加载失败" hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>重试播放</button></div> : null}
+                  </div>
+                  {videoReady ? (
                     <>
-                      <div className="video-wrap">
-                        <video
-                          ref={videoRef}
-                          src={streamUrl}
-                          onClick={togglePlay}
-                          title="点击播放 / 暂停 [Space]"
-                          onLoadedMetadata={(e) => setElementDuration(e.currentTarget.duration)}
-                          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                          onPlay={() => setPlaying(true)}
-                          onPause={() => setPlaying(false)}
-                          playsInline
-                        />
-                        <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} trackRoleLabels={activeRoleByTrack} />
-                      </div>
                       <div className="player-controls">
                         <button
                           type="button"
@@ -531,12 +508,7 @@ export default function ReviewPage() {
                         </div>
                       )}
                     </>
-                  ) : (
-                    <EmptyState
-                      title={streamState === "empty" ? "无视频文件" : "视频流加载失败"}
-                      hint={streamState === "empty" ? "该视频未配置存储文件，仅可查看标注与审核历史。" : "请确认后端已启动且视频文件路径合法"}
-                    />
-                  )}
+                  ) : null}
                 </div>
 
                 <Card title="视频片段生成" className="media-card">

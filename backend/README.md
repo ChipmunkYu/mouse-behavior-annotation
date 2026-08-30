@@ -4,7 +4,7 @@
 
 > 当前技术文档术语遵循[项目术语表](../项目术语表.md)；现行架构见[检测状态、提交审核与独立行为视频片段导出设计](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md)。代码/API 标识符保持不变。
 
-- 技术栈：Python 3.11、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
+- 技术栈：Python 3.10+、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
 - 批次 3：提交与审核闭环（submit / review queue / review 裁决 / 审核历史），
@@ -41,7 +41,8 @@ backend/
 │ ├── 0012_assignment_members_invites.py # 三角色、审核能力、邀请码与视频负责人
 │ ├── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
 │ ├── 0014_import_batch_ownership_activity.py # 三文件导入批次创建者与活动时间
-│ └── 0015_frame_authority.py # 多帧闭区间帧权威约束
+│ ├── 0015_frame_authority.py # 多帧闭区间帧权威约束
+│ └── 0016_display_proxy.py # 低码率展示代理状态与持久任务 ownership
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -61,7 +62,10 @@ backend/
 │ └── seed_demo.py # 幂等演示数据脚本（第一阶段本地演示）
 ├── tests/ # pytest 聚焦测试
 ├── data/ # 运行时数据（数据库/视频/导出，已 gitignore）
-├── requirements.txt
+├── requirements.txt # 生产 runtime 精确直接依赖（不含 pytest）
+├── requirements-dev.txt # 在 runtime 上增加 pytest/httpx2
+├── constraints-py310-windows.txt # Python 3.10 Windows 候选 freeze
+├── constraints-py310-linux.txt # Python 3.10.12 / Ubuntu 22.04 服务器隔离候选验证 freeze
 ├── .env.example
 └── README.md
 ```
@@ -77,7 +81,8 @@ python -m venv .venv
 # source .venv/bin/activate # Linux/macOS
 
 # 2. 安装依赖
-pip install -r requirements.txt
+pip install -r requirements-dev.txt # 本地开发/测试
+# 生产仅执行：pip install -r requirements.txt
 
 # 3. 复制并（按需）修改配置
 copy .env.example .env
@@ -88,13 +93,46 @@ uvicorn app.main:app --reload --port 8000
 
 健康检查：`GET /api/health`。接口文档（Swagger）：`http://127.0.0.1:8000/docs`。
 
+Linux resolved lock 已从服务器 Ubuntu 22.04 / Python 3.10.12 隔离环境保存为
+`constraints-py310-linux.txt`。该环境基于提交 `28cdba6765b119a74fc16e6e608969f4927bf3e9`
+安装 `requirements-dev.txt`，`pip check` 通过，完整后端测试为
+`688 passed, 1 skipped in 441.10s`，并由此形成已推送至 `origin/docs/http-range-plan` 的 Linux lock
+提交 `971c056d7f6257eb7f29ab8a3fe81e731ecdd387`。服务器已创建该提交的最终隔离 release；其
+runtime `.venv` 按提交内 constraints 与 requirements 安装且 `pip check` 通过，Linux 同文件系统
+`os.replace` 后已打开 FD 继续读完整 payload 的门禁也通过。该 release 未启动候选服务、未切换
+`current`，本功能尚未部署；真实 Nginx/HTTPS/日志、浏览器、Firefox、约 2 GB 量化及 native
+Preview 制品仍是 P3/部署前门禁。
+
+## 原生视频流媒体票据（P1 本地候选）
+
+`MEDIA_TICKET_ENABLED` 安全默认 `false`，`MEDIA_LEGACY_BEARER_ENABLED` 默认 `true` 以支持回滚。
+启用后，登录设置 host-only 的 Secure/HttpOnly/Strict binding Cookie；Bearer 调用
+`POST /api/videos/{id}/stream-ticket` 后获得干净相对 URL，浏览器凭两个媒体 Cookie 对
+`GET`/`HEAD /api/videos/{id}/stream` 发起可重复 Range 请求。任一媒体 Cookie 出现后都会强制
+双 Cookie 校验，不会降级 Bearer。`POST /api/auth/logout` 无需有效 Bearer，幂等接受 binding
+清理请求。票据上限固定 7200 秒，并受 Bearer `exp` 截断。
+
+`MEDIA_MASTER_SECRET` 必须是 canonical、无 padding 的 base64url；生产配置解码后至少 32 bytes，
+并拒绝仓库默认值和占位值。可按 `.env.production.example` 中的 CSPRNG 命令生成；这里不对真实
+secret 的熵作测量声明。媒体 Cookie 仅适用于同源 HTTPS，应用不得记录 Cookie 或凭据值。
+
+媒体标识是不可配置的安全契约：ticket/binding Cookie 固定为 `mouse_media_ticket` /
+`mouse_media_binding`，binding Path 固定为 `/api/videos/`，两类 JWT 的 aud 固定为
+`video-stream` / `video-stream-binding`、typ 固定为 `media-ticket` / `media-binding`；各对值
+保持互异。部署仅可配置 feature flags、TTL 与 secret。
+
+stream 不进入公共 `video_operation_gate`。本地候选边界是：新请求若隔离先完成，授权 helper
+返回 404；Starlette 1.5.1 在 stat 后、open 前隔离时可能已经发出响应头，随后 body 因 open
+失败而中断，不能宣称必在响应头前失败；文件描述符已经打开后，同文件系统隔离对在途响应的
+影响由 OS 语义决定。本地测试记录实际行为，仍须在 Linux 部署门禁复验已打开 FD 可继续读取。
+
 ## 数据库迁移（Alembic）
 
 数据模型由 Alembic 版本脚本管理（`migrations/versions/`），**不在业务代码中硬编码迁移版本**。
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0015），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0016），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -123,9 +161,9 @@ baseline（0001）再升级到 head（0015），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0014 已版本化库 → 按迁移链增量 `upgrade head` 到 0015；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
+- 0002～0015 已版本化库 → 按迁移链增量 `upgrade head` 到 0016；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -192,6 +230,12 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 批次 7（生命周期清理）已实现，
 见下文对应章节。
 
+## 低码率展示代理生成（P1 本地候选）
+
+迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定候选 profile、显式内部入队、单 owner、CAS、原子发布和启动恢复。候选 profile 为 1280×720、H.264/libx264、CRF 28、veryfast、yuv420p、固定 30 帧 GOP、SAR 1:1、无音频和 faststart，并严格校验 CFR 时间戳、帧数、时长、旋转和源文件 SHA-256。
+
+该能力由 `DISPLAY_PROXIES_ENABLED=false` 默认关闭；当前没有上传/三文件导入自动入队、历史 backfill、展示下载 API 或前端播放切换。硬删除已纳入代理文件和 terminal job 结果，但启用前仍须在 FFmpeg/ffprobe 4.4.2 环境完成真实 round-trip、长视频、ENOSPC 和并发验证。
+
 ## Demo 账号
 
 | 用户名 | 密码 | 说明 |
@@ -220,10 +264,11 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 
 ## 配置
 
-数据库、上传视频、导出片段、clip/thumbnail 与清理异常日志均从环境变量配置，
+数据库、上传视频、导出片段、clip/thumbnail、display proxy 与清理异常日志均从环境变量配置，
 默认位于 `backend/data/` 下（已被 gitignore）：
 - `DATA_DIR/videos/` 上传视频；`DATA_DIR/exports/` 导出；
   `DATA_DIR/clips/` 与 `DATA_DIR/thumbnails/` 片段产物（批次 4 生成）；
+  `DATA_DIR/display_proxies/` 低码率展示代理；
   `DATA_DIR/cleanup-issues.log` 清理异常 JSONL（越界路径 / 删除失败）。
 
 | 环境变量 | 默认值 | 说明 |
@@ -243,6 +288,10 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
 | `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
+| `DISPLAY_PROXIES_ENABLED` | `false` | 是否启用 P1 代理 worker；默认关闭，当前无自动入队或播放切换 |
+| `DISPLAY_PROXY_TIMEOUT_SECONDS` | `3600` | 单个代理转码/探测命令超时（秒） |
+| `DISPLAY_PROXY_MAX_ATTEMPTS` | `3` | 启动恢复时中断任务的最大 attempts |
+| `DISPLAY_PROXY_SYNCHRONOUS` | `false` | 测试用：代理 worker 同步执行 |
 | `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
 | `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
 | `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件、孤儿导出 ZIP 及未活动 `uploading/failed` 三文件导入批次的保留时间 |
@@ -292,7 +341,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/release` | 当前负责人释放自己的 draft 视频 |
 | `POST` | `/api/projects/{project_id}/videos/assignments` | owner/admin 事务批量分配、改派或清空 draft/rejected 视频 |
 | `GET` | `/api/projects/{project_id}/assignment-stats` | 项目与逐负责人的工作流数量统计；`unassigned` 为全部未分配，`claimable` 为未分配 `draft` |
-| `GET` | `/api/videos/{video_id}/stream` | 若 `storage_path` 解析到配置视频目录内且文件存在则 `FileResponse`，否则 404 |
+| `GET` | `/api/videos/{video_id}/stream` | 使用与 `VideoOut.playback_status` 相同的服务端资源选择器；可播放时返回受控媒体实体，否则 404，公开响应不暴露磁盘路径 |
 
 ### YOLO 检测结果导入与 track 修正
 
@@ -312,7 +361,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/history` | 查询当前 draft 的 LIFO undo 栈（不是永久审计） |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert` | 仅撤销栈顶 Split/Merge；非栈顶或类型不匹配返回 409 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 以 sparse override 整轨抑制当前未抑制 detection；不写旧 suppression 表 |
-| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表 |
+| `GET` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions` | 将当前 draft 栈中的 `suppress_track` edit 映射为兼容 suppression 列表；无 active detection import 时返回空列表，写操作仍保持导入门禁 |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert` | 仅在该 suppression edit 为栈顶时撤销，否则返回 409 |
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/detections/export` | legacy 兼容的修正后 track JSONL/manifest 接口；不属于正式项目 ZIP |
 
@@ -457,17 +506,16 @@ H.264 MP4（`-ss` 定位 + `-t` 片长）；默认 `-an`，启用 `MEDIA_MAP_AUD
 |---|---|---|
 | `GET` | `/api/projects/{project_id}/clips` | 片段库分页列表 → `ClipPageOut`（项目成员可读） |
 | `GET` | `/api/projects/{project_id}/clips/categories` | 审核通过片段的类别统计 → `ClipCategoryCount[]` |
+| `GET` | `/api/projects/{project_id}/clips/{clip_id}/thumbnail` | 按 Clip ID 返回受鉴权缩略图；校验项目 authority、ready 状态及实体边界 |
 
 **入库条件**：标注 `review_status=approved` **且** 所属视频当前 `workflow_status=approved`。
 失效回 draft 后仍残留的 approved 标注一并排除（杜绝库内出现已失效片段）；
 pending/rejected 一律隔离。`review_status` 查询参数仅接受 `approved`（其余值 422）。
 
-**ClipItem 字段**：`annotation_id, video_id, video_filename, category_id, category_name,
-start_time, end_time, start_frame, end_frame, confidence, clip_path, thumbnail_path,
-annotator_name, review_status, created_at`。
-`clip_path` / `thumbnail_path` 取当前修订（`Clip.source_revision == video.annotation_revision`）
-对应 Clip 的相对路径；**Clip 缺失或非 ready（pending/processing/failed）时为 null**，
-不校验实体文件是否存在。
+**ClipItem 字段**：使用不透明 `item_key` 区分 legacy/submission ID 空间；`clip_id` 仅在
+媒体记录存在时返回，`media_status` 表达 `pending/processing/ready/failed/stale`。其余字段为
+标注、视频、类别和参与者元数据。物理 `clip_path` / `thumbnail_path` 不进入公开 DTO；
+ready 状态还会校验片段与缩略图实体，缺失或越界时降级为 pending。
 
 **分页与排序**：默认 `page_size=20`、上限 100（`page<1` 或 `page_size>100` → 422）；
 排序 `start_time ASC, id ASC` 保证稳定分页。响应 `{items, total, pages}`。
@@ -480,8 +528,7 @@ annotator_name, review_status, created_at`。
   取关联列（Video/类别/标注者/当前修订 Clip 一次到位）——**无 N+1**，也不加载
   `crop_region` 等重列。
 - 仅项目成员可访问（与其余只读接口一致，不校验 membership.active）。
-- **不批量加载视频流**：本接口只返回元数据与相对路径，客户端自行按需请求单条 blob
-  （如经 `GET /api/videos/{video_id}/stream` 或后续的 clip 文件接口）。
+- **不批量加载媒体**：列表只返回元数据和资源 ID；客户端按需请求单条视频流或受鉴权缩略图。
 
 ### Phase 4：Submission authority 独立四文件项目 ZIP 导出
 
@@ -654,6 +701,10 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 cd backend
 .venv\Scripts\activate
 pytest -q
+
+# 生成或核对稳定 OpenAPI 快照（无数据库、seed、worker 副作用）
+python scripts/export_openapi.py
+python scripts/export_openapi.py --check
 ```
 
 当前全局上传任务管理实现的后端相关测试为 **128 passed, 3 skipped, 1 warning**，前端 production build 通过并处理 **66 modules**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题；该结论不等于跨路由、跨项目、取消/重试、退出、401 回收或可访问性的浏览器人工矩阵已经验收。
@@ -678,14 +729,14 @@ pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状�
 成员权限、进度与部分失败保留成功片段、重试只处理 failed、重启恢复 running 重排/判失败、
 修订失效竞态取消且不复活 Clip、文件原子性与半成品清理、输入源路径安全、实际 DB 迁移 0004），
 批次 5 片段库（仅审核通过且视频 approved 才入库、pending/rejected 与失效残留隔离、
-非 ready Clip 路径为 null、ready 路径与批次 4 产物一致、分页默认 20/上限 100/稳定排序、
+公开 DTO 不含物理路径、`item_key/clip_id/media_status` 与受鉴权缩略图端点、分页默认 20/上限 100/稳定排序、
 category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类别统计、成员权限、
 ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
 分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
-以及迁移验收（全新库建至 head 0015 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径按迁移链升级至 head 0015，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检与 downgrade/upgrade /
+以及迁移验收（全新库建至 head 0016 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径按迁移链升级至 head 0016，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检、0015→0016 的展示代理约束与 downgrade/upgrade /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，

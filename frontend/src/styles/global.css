@@ -740,6 +740,9 @@ a:focus-visible,
   color: var(--text);
 }
 
+.logout-warning { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 8px 10px; margin-bottom: 12px; border: 1px solid var(--warn); border-radius: var(--radius); color: var(--warn); background: var(--warn-weak); font-size: 12px; }
+.logout-warning .btn-link { flex: none; color: var(--warn); }
+
 /* ============ 项目页 ============ */
 .page-header {
   display: flex;
@@ -1061,6 +1064,13 @@ a:focus-visible,
   width: 100%;
   background: #000;
 }
+
+/* 公共媒体 controller 需要播放器在加载与错误期间保持挂载。 */
+.media-player-pending { visibility: hidden; }
+.media-status-overlay { position: absolute; z-index: 6; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 14px; color: var(--text-2); background: #000; text-align: center; }
+.media-status-overlay .loading, .media-status-overlay .empty { padding: 12px; }
+.media-status-overlay .empty-title { color: #d7d9dd; }
+.media-status-overlay .empty-hint { color: #9ca1a9; }
 
 /* 叠加层：预留空间标注 / YOLO 框等图层（P1 为空层，pointer-events 穿透） */
 .overlay-layer {

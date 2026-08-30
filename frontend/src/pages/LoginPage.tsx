@@ -4,7 +4,7 @@ import { useAuth } from "../auth/AuthContext";
 import { ApiError } from "../api/client";
 
 export default function LoginPage() {
-  const { user, login } = useAuth();
+  const { user, login, logoutWarning, clearLogoutWarning } = useAuth();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState("");
@@ -62,6 +62,13 @@ export default function LoginPage() {
             <span>/</span>
             <code>demo123</code>
           </div>
+
+          {logoutWarning ? (
+            <div className="logout-warning" role="status">
+              <span>服务端注销未完成，请重新登录后重试。</span>
+              <button type="button" className="btn-link" onClick={clearLogoutWarning} aria-label="关闭注销提示">关闭</button>
+            </div>
+          ) : null}
 
           <form onSubmit={handleSubmit} noValidate>
             <div className="field">

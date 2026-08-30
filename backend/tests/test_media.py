@@ -50,13 +50,15 @@ def _setup(ctx, headers, *, annotations=1, start_times=None, storage_path="src.m
         f"/api/projects/{project['id']}/videos",
         json={
             "filename": "src.mp4",
-            "storage_path": storage_path,
             "status": "uploaded",
             "duration": 30.0,
             "fps": 25.0,
         },
         headers=headers,
     ).json()
+    with ctx.session_factory() as db:
+        db.get(Video, video["id"]).storage_path = storage_path
+        db.commit()
     anns = []
     times = start_times or [1.0, 4.0, 7.0]
     for i in range(annotations):
@@ -852,13 +854,15 @@ def test_absolute_storage_path_within_videos_dir_ok(media_ctx):
         f"/api/projects/{project['id']}/videos",
         json={
             "filename": "abs.mp4",
-            "storage_path": str(src),
             "status": "uploaded",
             "duration": 30.0,
             "fps": 25.0,
         },
         headers=headers,
     ).json()
+    with ctx.session_factory() as db:
+        db.get(Video, video["id"]).storage_path = str(src)
+        db.commit()
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={

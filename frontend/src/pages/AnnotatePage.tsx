@@ -4,7 +4,6 @@ import {
   createAnnotation,
   deleteAnnotation,
   exportAnnotations,
-  fetchVideoStreamUrl,
   listAnnotations,
   listCategories,
   listDetectionSuppressions,
@@ -41,9 +40,9 @@ import { ParticipantSummary } from "../components/ParticipantSummary";
 import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, frameToStartTime } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
 import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
+import { useMediaSource } from "../media";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
-type StreamState = "loading" | "ok" | "empty" | "error";
 type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
 type DraftField = "category" | "start" | "end" | "participants";
@@ -693,9 +692,6 @@ export default function AnnotatePage() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [streamState, setStreamState] = useState<StreamState>("loading");
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [streamErrorHint, setStreamErrorHint] = useState<string | null>(null);
   const [elementDuration, setElementDuration] = useState(0);
 
   const [currentTime, setCurrentTime] = useState(0);
@@ -757,6 +753,14 @@ export default function AnnotatePage() {
   const seekParam = Number(seekParamRaw);
   const hasSeekTarget = seekParamRaw != null && Number.isFinite(seekParam);
   const pendingSeekRef = useRef<number | null>(null);
+  const handleMediaReady = useCallback((reason: "initial" | "retry-restored", element: HTMLVideoElement) => {
+    setElementDuration(element.duration);
+    if (reason !== "initial" || pendingSeekRef.current == null) return;
+    element.currentTime = Math.min(pendingSeekRef.current, element.duration);
+    setCurrentTime(element.currentTime);
+    pendingSeekRef.current = null;
+  }, []);
+  const media = useMediaSource({ videoId: vid, surface: "annotate", videoRef, onReady: handleMediaReady });
 
   // 同一组件承载相邻视频路由；路由变化时先彻底移除旧视频的交互与临时状态。
   useLayoutEffect(() => {
@@ -775,9 +779,6 @@ export default function AnnotatePage() {
     setCategories([]);
     setAnnotations([]);
     setLoading(true);
-    setStreamState("loading");
-    setStreamUrl(null);
-    setStreamErrorHint(null);
     setElementDuration(0);
     setCurrentTime(0);
     setPlaying(false);
@@ -975,11 +976,11 @@ export default function AnnotatePage() {
   // DB 元数据时长仅作回退：避免元数据 duration 与真实播放时长不一致时时间轴错位。
   const timelineDuration =
     elementDuration > 0 ? elementDuration : video?.duration && video.duration > 0 ? video.duration : null;
-  const videoReady = streamState === "ok" && streamUrl != null;
+  const videoReady = media.status === "ready";
   const effectiveFps = detectionImport?.fps && detectionImport.fps > 0 ? detectionImport.fps : video?.fps && video.fps > 0 ? video.fps : null;
-  const authoritativeFrameCount = detectionImport?.frame_count && detectionImport.frame_count > 0
-    ? detectionImport.frame_count
-    : effectiveFps && timelineDuration ? Math.max(1, Math.ceil(timelineDuration * effectiveFps)) : null;
+  const authoritativeFrameCount = effectiveFps && timelineDuration
+    ? Math.max(1, Math.ceil(timelineDuration * effectiveFps))
+    : null;
   const startDisplayTime = startPoint && effectiveFps ? frameToStartTime(startPoint.frame, effectiveFps) : null;
   const endDisplayTime = endPoint && effectiveFps ? frameToEndTime(endPoint.frame, effectiveFps) : null;
   const hasRoleAssignments = roleSelectedIds.length > 0;
@@ -1231,43 +1232,6 @@ export default function AnnotatePage() {
       setSubmitting(false);
     }
   }, [video, annotations, pid, vid, confirm, detectionImport, invalidTrackCounts]);
-
-  /* ---------- 视频流（带 token 拉取 blob） ---------- */
-  useEffect(() => {
-    let url: string | null = null;
-    let cancelled = false;
-    setStreamState("loading");
-    setStreamUrl(null);
-    setStreamErrorHint(null);
-    setElementDuration(0);
-
-    fetchVideoStreamUrl(vid)
-      .then((u) => {
-        if (cancelled) {
-          URL.revokeObjectURL(u);
-          return;
-        }
-        url = u;
-        setStreamUrl(u);
-        setStreamState("ok");
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setStreamState("empty");
-        } else {
-          setStreamState("error");
-          const message = err instanceof Error ? err.message : "视频流加载失败";
-          setStreamErrorHint(message);
-          setErrorMsg(message);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [vid]);
 
   /* ---------- 从片段库带参跳转：定位到目标时间 ---------- */
   useEffect(() => {
@@ -1992,39 +1956,19 @@ export default function AnnotatePage() {
       <div className="annotate-body">
         <section className="annotate-main">
           <div className="card player-card">
-            {loading ? (
-              <Loading text="加载标注数据…" />
-            ) : streamState === "loading" ? (
-              <Loading text="视频流加载中…" />
-            ) : videoReady && streamUrl ? (
-              <>
-                <div className="video-wrap">
-                  <video
-                    ref={videoRef}
-                    src={streamUrl}
-                    onClick={togglePlay}
-                    title="点击播放 / 暂停 [Space]"
-                    onLoadedMetadata={(e) => {
-                      setStreamErrorHint(null);
-                      setElementDuration(e.currentTarget.duration);
-                      if (pendingSeekRef.current != null) {
-                        e.currentTarget.currentTime = Math.min(pendingSeekRef.current, e.currentTarget.duration);
-                        setCurrentTime(e.currentTarget.currentTime);
-                        pendingSeekRef.current = null;
-                      }
-                    }}
-                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
-                    onError={(e) => {
-                      const mediaError = e.currentTarget.error;
-                      const detail = mediaError?.message || `MediaError code ${mediaError?.code ?? "unknown"}`;
-                      setStreamErrorHint(`浏览器无法加载或解码视频：${streamUrl}（${detail}）`);
-                      setStreamState("error");
-                    }}
-                    playsInline
-                  />
-                  <DetectionOverlay
+            <div className="video-wrap">
+              <video
+                ref={videoRef}
+                className={videoReady && !loading ? "" : "media-player-pending"}
+                onClick={togglePlay}
+                title="点击播放 / 暂停 [Space]"
+                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                playsInline
+                preload="metadata"
+              />
+              {videoReady && !loading ? <DetectionOverlay
                     projectId={pid}
                     videoId={vid}
                     video={videoRef.current}
@@ -2040,8 +1984,12 @@ export default function AnnotatePage() {
                     }}
                     onFrameData={handleFrameData}
                     refreshKey={overlayRefresh}
-                  />
-                </div>
+              /> : null}
+              {loading || media.status === "loading" || media.status === "idle" ? <div className="media-status-overlay"><Loading text={loading ? "加载标注数据…" : "视频流加载中…"} /></div> : null}
+              {!loading && media.status === "error" ? <div className="media-status-overlay"><EmptyState compact title="视频流加载失败" hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>重试播放</button></div> : null}
+            </div>
+            {!loading && videoReady ? (
+              <>
 
                 <div className="player-controls">
                   <button
@@ -2154,16 +2102,7 @@ export default function AnnotatePage() {
                   </div>
                 )}
               </>
-            ) : (
-              <EmptyState
-                title={streamState === "empty" ? "无视频文件" : "视频流加载失败"}
-                hint={
-                  streamState === "empty"
-                    ? "该视频未配置 storage_path 或文件不存在。可先在视频库中补全元数据与文件路径，或直接在下方标注列表管理已有标注。"
-                    : streamErrorHint ?? "视频资源地址不可用或浏览器不支持该视频编码。"
-                }
-              />
-            )}
+            ) : null}
           </div>
 
           <div className="statusbar">

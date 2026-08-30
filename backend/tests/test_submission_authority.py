@@ -148,7 +148,7 @@ def test_review_uses_copy_and_approval_enqueues_atomically(ctx, login_headers):
         assert copy.start_time == 0.0
         clips = db.query(Clip).all()
         assert len(clips) == 1 and clips[0].submission_annotation_id == copy.id
-        assert clips[0].annotation_id is None and clips[0].project_id is None
+        assert clips[0].annotation_id is None and clips[0].project_id == project["id"]
         job = db.query(BackgroundJob).one()
         assert job.payload == {"submission_id": submission.id, "submission_annotation_ids": [copy.id]}
 
@@ -170,6 +170,15 @@ def test_submission_worker_passes_identical_crop_to_clip_and_thumbnail(media_ctx
     assert response.status_code == 200
     assert ctx.processor.clip_crops[-1] == (10, 20, 100, 80)
     assert ctx.processor.thumb_crops[-1] == (10, 20, 100, 80)
+    with ctx.session_factory() as db:
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        clip_id = clip.id
+        clip.project_id = None  # endpoint authority comes from the immutable relation
+        db.commit()
+    thumbnail = ctx.client.get(
+        f"/api/projects/{project['id']}/clips/{clip_id}/thumbnail", headers=headers,
+    )
+    assert thumbnail.status_code == 200
 
 
 def test_raw_baseline_damage_blocks_review(ctx, login_headers):

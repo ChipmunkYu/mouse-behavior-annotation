@@ -16,6 +16,7 @@ VALID_PRODUCTION = {
     "secret_key": "a-production-secret-with-at-least-32-chars",
     "demo_username": "annotation-admin",
     "demo_password": "strong-password-2026",
+    "media_master_secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
 }
 
 
@@ -36,6 +37,10 @@ def test_valid_production_credentials_are_accepted():
         {"demo_password": "demo123"},
         {"demo_password": "CHANGE_ME_PASSWORD"},
         {"demo_password": "short-pass"},
+        {"media_master_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+        {"media_master_secret": "CHANGE_ME_MEDIA_SECRET"},
+        {"media_master_secret": "dG9vLXNob3J0"},
+        {"media_master_secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},
     ],
 )
 def test_invalid_production_credentials_fail_fast(overrides):
@@ -47,6 +52,31 @@ def test_development_defaults_remain_available():
     settings = Settings(env="development")
     assert settings.secret_key == "dev-only-insecure-secret-change-me"
     assert settings.demo_password == "demo123"
+    assert settings.media_ticket_enabled is False
+    assert settings.media_legacy_bearer_enabled is True
+    assert settings.media_ticket_ttl_seconds == 7200
+    assert settings.media_binding_cookie_path == "/api/videos/"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("media_ticket_cookie_name", ""),
+    ("media_ticket_cookie_name", "mouse_media_binding"),
+    ("media_binding_cookie_name", "mouse_media_ticket"),
+    ("media_binding_cookie_path", "/"),
+    ("media_binding_cookie_path", "/api/"),
+    ("media_ticket_audience", "video-stream-binding"),
+    ("media_binding_audience", "video-stream"),
+    ("media_ticket_type", "media-binding"),
+    ("media_binding_type", "media-ticket"),
+])
+def test_media_security_identifiers_are_fixed(field, value):
+    with pytest.raises(ValidationError):
+        Settings(**{field: value})
+
+
+def test_media_ticket_ttl_above_hard_limit_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(media_ticket_ttl_seconds=7201)
 
 
 def test_migrate_cli_rejects_invalid_production_credentials(tmp_path):

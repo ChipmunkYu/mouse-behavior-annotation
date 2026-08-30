@@ -2,6 +2,8 @@
  * 后端接口封装（路由与 backend/app/routers/* 一一对应）。
  */
 import { apiFetch, apiRaw, ApiError, handleUnauthorized, uploadFile, type UploadProgress } from "./client";
+import { assertValidVideoStreamUrl } from "./streamUrl";
+import type { paths } from "./generated/schema";
 import type {
   Annotation,
   AnnotationCreateInput,
@@ -43,6 +45,7 @@ import type {
   SuppressionCreateRequest,
   SuppressionResult,
   VideoImportBatch,
+  VideoImportCompletion,
   AssignmentStats,
   Membership,
   MembershipUpdateInput,
@@ -50,7 +53,28 @@ import type {
   VideoListParams,
   AssigneeDirectoryItem,
   CategoryScheme, CategorySchemePut, CategorySchemeLock, CategorySchemeAudit,
+  StreamTicket,
 } from "./types";
+
+type JsonContent<T> = T extends { content: { "application/json": infer Body } } ? Body : never;
+type OperationResult<Operation> = Operation extends { responses: infer Responses }
+  ? JsonContent<Responses[keyof Responses & (200 | 201 | 202)]>
+  : never;
+type OperationBody<Operation> = Operation extends { requestBody: { content: { "application/json": infer Body } } }
+  ? Body
+  : never;
+
+/** 将手写 transport 的响应泛型绑定到 OpenAPI operation。 */
+function apiOperation<Operation>(
+  path: string,
+  options?: RequestInit
+): Promise<OperationResult<Operation>> {
+  return apiFetch<OperationResult<Operation>>(path, options);
+}
+
+function operationJson<Operation>(body: OperationBody<Operation>): string {
+  return JSON.stringify(body);
+}
 
 // ---------- 认证 ----------
 export function login(username: string, password: string): Promise<LoginResponse> {
@@ -117,7 +141,7 @@ export function listVideos(projectId: number | string, params: VideoListParams =
   if (params.view) qs.set("view", params.view);
   if (params.workflow_status) qs.set("workflow_status", params.workflow_status);
   if (params.assignee_membership_id != null) qs.set("assignee_membership_id", String(params.assignee_membership_id));
-  return apiFetch<Video[]>(`/projects/${projectId}/videos${qs.size ? `?${qs}` : ""}`);
+  return apiOperation<paths["/api/projects/{project_id}/videos"]["get"]>(`/projects/${projectId}/videos${qs.size ? `?${qs}` : ""}`);
 }
 
 /** 同步硬删除单个视频；成功时后端返回 204，所有权限与状态门禁以后端为准。 */
@@ -126,16 +150,16 @@ export function deleteVideo(projectId: number | string, videoId: number | string
 }
 
 export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {
-  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/claim`, { method: "POST" });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/claim"]["post"]>(`/projects/${projectId}/videos/${videoId}/claim`, { method: "POST" });
 }
 export function claimVideos(projectId: number | string, input: VideoClaimsInput): Promise<VideoClaimsResponse> {
-  return apiFetch<VideoClaimsResponse>(`/projects/${projectId}/videos/claims`, { method: "POST", body: JSON.stringify(input) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/claims"]["post"]>(`/projects/${projectId}/videos/claims`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/claims"]["post"]>(input) });
 }
 export function releaseVideo(projectId: number | string, videoId: number): Promise<Video> {
-  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/release`, { method: "POST" });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/release"]["post"]>(`/projects/${projectId}/videos/${videoId}/release`, { method: "POST" });
 }
 export function batchAssignVideos(projectId: number | string, video_ids: number[], assignee_membership_id: number | null): Promise<Video[]> {
-  return apiFetch<Video[]>(`/projects/${projectId}/videos/assignments`, { method: "POST", body: JSON.stringify({ video_ids, assignee_membership_id }) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/assignments"]["post"]>(`/projects/${projectId}/videos/assignments`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/assignments"]["post"]>({ video_ids, assignee_membership_id }) });
 }
 export function getAssignmentStats(projectId: number | string): Promise<AssignmentStats> {
   // 响应同时包含 unassigned（全部未分配）与 claimable（未分配草稿）。
@@ -143,9 +167,9 @@ export function getAssignmentStats(projectId: number | string): Promise<Assignme
 }
 
 export function createVideo(projectId: number | string, input: VideoCreateInput): Promise<Video> {
-  return apiFetch<Video>(`/projects/${projectId}/videos`, {
+  return apiOperation<paths["/api/projects/{project_id}/videos"]["post"]>(`/projects/${projectId}/videos`, {
     method: "POST",
-    body: JSON.stringify(input),
+    body: operationJson<paths["/api/projects/{project_id}/videos"]["post"]>(input),
   });
 }
 
@@ -160,7 +184,7 @@ export function uploadVideo(
   file: File,
   options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal; assigneeMembershipId?: number | null }
 ): Promise<Video> {
-  return uploadFile<Video>(`/projects/${projectId}/videos/upload`, file, {
+  return uploadFile<OperationResult<paths["/api/projects/{project_id}/videos/upload"]["post"]>>(`/projects/${projectId}/videos/upload`, file, {
     field: "file",
     filename: file.name,
     onProgress: options.onProgress,
@@ -171,7 +195,7 @@ export function uploadVideo(
 
 // ---------- YOLO 三文件导入 ----------
 export function createImportBatch(projectId: number | string, signal?: AbortSignal): Promise<VideoImportBatch> {
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches`, { method: "POST", signal });
+  return apiOperation<paths["/api/projects/{project_id}/video-import-batches"]["post"]>(`/projects/${projectId}/video-import-batches`, { method: "POST", signal });
 }
 
 export function uploadBatchFile(
@@ -181,14 +205,14 @@ export function uploadBatchFile(
   file: File,
   options: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {}
 ): Promise<VideoImportBatch> {
-  return uploadFile<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/files/${role}`, file, {
+  return uploadFile<OperationResult<paths["/api/projects/{project_id}/video-import-batches/{batch_id}/files/{role}"]["put"]>>(`/projects/${projectId}/video-import-batches/${batchId}/files/${role}`, file, {
     ...options, method: "PUT", field: "file", filename: file.name,
   });
 }
 
-export function completeImportBatch(projectId: number | string, batchId: number, assigneeMembershipId?: number | null, signal?: AbortSignal): Promise<VideoImportBatch> {
+export function completeImportBatch(projectId: number | string, batchId: number, assigneeMembershipId?: number | null, signal?: AbortSignal): Promise<VideoImportCompletion> {
   const qs = assigneeMembershipId != null ? `?assignee_membership_id=${assigneeMembershipId}` : "";
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}/complete${qs}`, { method: "POST", signal });
+  return apiOperation<paths["/api/projects/{project_id}/video-import-batches/{batch_id}/complete"]["post"]>(`/projects/${projectId}/video-import-batches/${batchId}/complete${qs}`, { method: "POST", signal });
 }
 
 /** 取消未完成批次并删除服务端已接收的批次文件。 */
@@ -197,7 +221,7 @@ export function cancelImportBatch(projectId: number | string, batchId: number, s
 }
 
 export function getImportBatch(projectId: number | string, batchId: number, signal?: AbortSignal): Promise<VideoImportBatch> {
-  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches/${batchId}`, { signal });
+  return apiOperation<paths["/api/projects/{project_id}/video-import-batches/{batch_id}"]["get"]>(`/projects/${projectId}/video-import-batches/${batchId}`, { signal });
 }
 
 export function replaceDetectionImport(
@@ -216,14 +240,14 @@ export function replaceDetectionImport(
   form.append("tracks_file", tracks, tracks.name);
   form.append("metadata_file", metadata, metadata.name);
   return apiRaw(`/projects/${projectId}/videos/${videoId}/detection-imports?confirm=${confirm}`, { method: "POST", body: form })
-    .then(async (res): Promise<DetectionReplacementResponse> => {
+    .then(async (res): Promise<OperationResult<paths["/api/projects/{project_id}/videos/{video_id}/detection-imports"]["post"]>> => {
       if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({})) as { detail?: string }).detail ?? "替换检测数据失败");
-      return await res.json() as DetectionReplacementResponse;
+      return await res.json() as OperationResult<paths["/api/projects/{project_id}/videos/{video_id}/detection-imports"]["post"]>;
     });
 }
 
 export function getCurrentDetectionImport(projectId: number | string, videoId: number | string): Promise<DetectionImport> {
-  return apiFetch<DetectionImport>(`/projects/${projectId}/videos/${videoId}/detection-imports/current`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detection-imports/current"]["get"]>(`/projects/${projectId}/videos/${videoId}/detection-imports/current`);
 }
 
 export function getDetections(projectId: number | string, videoId: number | string, startFrame: number, endFrame: number): Promise<DetectionsResponse> {
@@ -272,8 +296,8 @@ export function getCorrectedTracksExport(projectId: number | string, videoId: nu
  * 视频流需要 Bearer 认证，<video> 无法直接携带请求头，
  * 因此用带 token 的请求拉取 blob 并生成 object URL。
  */
-export async function fetchVideoStreamUrl(videoId: number | string): Promise<string> {
-  const res = await apiRaw(`/videos/${videoId}/stream`);
+export async function fetchVideoStreamUrl(videoId: number | string, signal?: AbortSignal): Promise<string> {
+  const res = await apiRaw(`/videos/${videoId}/stream`, { credentials: "omit", signal });
   if (res.status === 401) {
     // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面仍停留在标注页
     handleUnauthorized();
@@ -287,6 +311,33 @@ export async function fetchVideoStreamUrl(videoId: number | string): Promise<str
     throw new ApiError(404, "视频文件为空");
   }
   return URL.createObjectURL(blob);
+}
+
+/** 获取供原生 <video> 使用的短期同源地址；响应仅暴露白名单字段。 */
+export async function fetchVideoStreamTicket(
+  videoId: number | string,
+  signal?: AbortSignal
+): Promise<StreamTicket> {
+  try {
+    // Reject non-canonical IDs before they can be interpolated into a request path.
+    assertValidVideoStreamUrl(videoId, `/api/videos/${videoId}/stream`);
+    const data = await apiFetch<unknown>(`/videos/${videoId}/stream-ticket`, {
+      method: "POST",
+      credentials: "same-origin",
+      signal,
+    });
+    if (!data || typeof data !== "object") throw new ApiError(502, "媒体地址响应无效，请重试");
+    const { url, expires_at } = data as Record<string, unknown>;
+    if (typeof url !== "string" || typeof expires_at !== "string") {
+      throw new ApiError(502, "媒体地址响应无效，请重试");
+    }
+    assertValidVideoStreamUrl(videoId, url);
+    return { url, expires_at };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    const status = error instanceof ApiError ? error.status : 0;
+    throw new ApiError(status, "无法准备视频播放，请稍后重试");
+  }
 }
 
 // ---------- 标注 ----------
@@ -351,14 +402,14 @@ export function submitVideoForReview(
   projectId: number | string,
   videoId: number | string
 ): Promise<Video> {
-  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/submit`, {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submit"]["post"]>(`/projects/${projectId}/videos/${videoId}/submit`, {
     method: "POST",
   });
 }
 
 /** 审核队列：GET /api/projects/:pid/reviews/queue -> Video[]（仅待审核视频）。 */
 export function listReviewQueue(projectId: number | string): Promise<Video[]> {
-  return apiFetch<Video[]>(`/projects/${projectId}/reviews/queue`);
+  return apiOperation<paths["/api/projects/{project_id}/reviews/queue"]["get"]>(`/projects/${projectId}/reviews/queue`);
 }
 
 /** 视频审核历史：GET /api/projects/:pid/videos/:vid/reviews -> Review[]。 */
@@ -366,7 +417,7 @@ export function listVideoReviews(
   projectId: number | string,
   videoId: number | string
 ): Promise<Review[]> {
-  return apiFetch<Review[]>(`/projects/${projectId}/videos/${videoId}/reviews`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/reviews"]["get"]>(`/projects/${projectId}/videos/${videoId}/reviews`);
 }
 
 /** 提交审核结论：POST /api/projects/:pid/videos/:vid/review -> Review。 */
@@ -375,9 +426,9 @@ export function createVideoReview(
   videoId: number | string,
   input: ReviewCreateInput
 ): Promise<Review> {
-  return apiFetch<Review>(`/projects/${projectId}/videos/${videoId}/review`, {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/review"]["post"]>(`/projects/${projectId}/videos/${videoId}/review`, {
     method: "POST",
-    body: JSON.stringify(input),
+    body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/review"]["post"]>(input),
   });
 }
 
@@ -392,7 +443,7 @@ export function getMediaStatus(
   projectId: number | string,
   videoId: number | string
 ): Promise<MediaStatus> {
-  return apiFetch<MediaStatus>(`/projects/${projectId}/videos/${videoId}/media-status`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/media-status"]["get"]>(`/projects/${projectId}/videos/${videoId}/media-status`);
 }
 
 /** 触发片段生成：POST /api/projects/:pid/videos/:vid/media/generate -> Job。 */
@@ -400,14 +451,14 @@ export function generateMedia(
   projectId: number | string,
   videoId: number | string
 ): Promise<Job> {
-  return apiFetch<Job>(`/projects/${projectId}/videos/${videoId}/media/generate`, {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/media/generate"]["post"]>(`/projects/${projectId}/videos/${videoId}/media/generate`, {
     method: "POST",
   });
 }
 
 /** 查询后台任务：GET /api/projects/:pid/jobs/:jobId -> Job。 */
 export function getJob(projectId: number | string, jobId: number | string): Promise<Job> {
-  return apiFetch<Job>(`/projects/${projectId}/jobs/${jobId}`);
+  return apiOperation<paths["/api/projects/{project_id}/jobs/{job_id}"]["get"]>(`/projects/${projectId}/jobs/${jobId}`);
 }
 
 // ---------- 片段库（批次 5） ----------
@@ -425,23 +476,21 @@ export function listClips(projectId: number | string, params: ClipListParams): P
   if (params.search && params.search.trim().length > 0) qs.set("search", params.search.trim());
   qs.set("page", String(params.page));
   qs.set("page_size", String(params.page_size));
-  return apiFetch<ClipListResponse>(`/projects/${projectId}/clips?${qs.toString()}`);
+  return apiOperation<paths["/api/projects/{project_id}/clips"]["get"]>(`/projects/${projectId}/clips?${qs.toString()}`);
 }
 
 /** 片段类别计数：GET /api/projects/:pid/clips/categories -> ClipCategoryCount[]。 */
 export function listClipCategories(projectId: number | string): Promise<ClipCategoryCount[]> {
-  return apiFetch<ClipCategoryCount[]>(`/projects/${projectId}/clips/categories`);
+  return apiOperation<paths["/api/projects/{project_id}/clips/categories"]["get"]>(`/projects/${projectId}/clips/categories`);
 }
 
-/**
- * 片段缩略图（批次 5）：thumbnail_path 为 thumbnails_dir 内相对文件名，
- * 经 /thumbnails/{name} 以 Bearer 拉取 blob 并生成 object URL（普通 <img> 无法携带
- * 认证请求头，与视频流同理）。缩略图路由尚不存在或拉取失败时返回 null，
- * 由调用方回退到 SVG 占位图——绝不用损坏的图片打断界面。
- */
-export async function fetchClipThumbnailUrl(thumbnailPath: string): Promise<string | null> {
+/** 通过不透明 Clip ID 获取缩略图；前端不接收或拼接服务端文件名。 */
+export async function fetchClipThumbnailUrl(
+  projectId: paths["/api/projects/{project_id}/clips/{clip_id}/thumbnail"]["get"]["parameters"]["path"]["project_id"],
+  clipId: paths["/api/projects/{project_id}/clips/{clip_id}/thumbnail"]["get"]["parameters"]["path"]["clip_id"]
+): Promise<string | null> {
   try {
-    const res = await apiRaw(`/thumbnails/${encodeURIComponent(thumbnailPath)}`);
+    const res = await apiRaw(`/projects/${projectId}/clips/${clipId}/thumbnail`);
     if (res.status === 401) {
       handleUnauthorized();
       return null;
@@ -455,7 +504,7 @@ export async function fetchClipThumbnailUrl(thumbnailPath: string): Promise<stri
   }
 }
 
-export type { User };
+export type { User, StreamTicket };
 
 // ---------- 导出（批次 6） ----------
 
@@ -468,9 +517,9 @@ export function createExport(
   projectId: number | string,
   input: ExportRequestInput
 ): Promise<Job> {
-  return apiFetch<Job>(`/projects/${projectId}/export`, {
+  return apiOperation<paths["/api/projects/{project_id}/export"]["post"]>(`/projects/${projectId}/export`, {
     method: "POST",
-    body: JSON.stringify(input),
+    body: operationJson<paths["/api/projects/{project_id}/export"]["post"]>(input),
   });
 }
 
@@ -479,7 +528,7 @@ export function createExport(
  * 含最近任务（latest_job）与可导出 / 就绪 / 缺失计数，导出中按任务状态轮询本接口。
  */
 export function getExportStatus(projectId: number | string): Promise<ExportStatus> {
-  return apiFetch<ExportStatus>(`/projects/${projectId}/export/status`);
+  return apiOperation<paths["/api/projects/{project_id}/export/status"]["get"]>(`/projects/${projectId}/export/status`);
 }
 
 /** 从 Content-Disposition 解析文件名（优先 RFC 5987 filename*，其次 filename=）。 */
