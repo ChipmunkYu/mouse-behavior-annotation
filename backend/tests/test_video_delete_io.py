@@ -15,6 +15,7 @@ def _io(tmp_path: Path) -> VideoDeleteIO:
     for root in (
         settings.videos_dir, settings.exports_dir, settings.clips_dir,
         settings.thumbnails_dir, settings.import_batches_dir, settings.detection_imports_dir,
+        settings.display_proxies_dir,
     ):
         root.mkdir(parents=True)
     return VideoDeleteIO(settings)
@@ -53,6 +54,23 @@ def test_duplicate_missing_quarantine_restore_and_manifest_privacy(tmp_path):
     io.restore("op7")
     assert source.read_bytes() == b"video"
     assert not (io.quarantine_dir / "op7").exists()
+
+
+def test_display_proxy_root_deduplicates_and_round_trips(tmp_path):
+    io = _io(tmp_path)
+    proxy = io.settings.display_proxies_dir / "proxy.mp4"
+    proxy.write_bytes(b"proxy")
+    manifest = io.prepare(7, [
+        DeletePath("display_proxies", proxy.name),
+        DeletePath("display_proxies", proxy.name),
+    ], operation_id="display-proxy")
+    assert [(entry.root_kind, entry.relative_key) for entry in manifest.entries] == [
+        ("display_proxies", proxy.name)
+    ]
+    io.quarantine(manifest)
+    assert not proxy.exists()
+    io.restore(manifest)
+    assert proxy.read_bytes() == b"proxy"
 
 
 def test_manifest_metadata_round_trip_and_id_validation(tmp_path):

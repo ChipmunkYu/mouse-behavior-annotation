@@ -12,6 +12,7 @@ from typing import Iterable, Mapping
 from sqlalchemy.orm import Session
 
 from .models import BackgroundJob
+from .display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 
 
 ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -215,6 +216,17 @@ def _classify_export(payload: Mapping[str, object], project_id: int, video_id: i
     return related, valid
 
 
+def _classify_display_proxy(payload: Mapping[str, object], project_id: int,
+                            video_id: int) -> tuple[bool, bool]:
+    related = payload.get("video_id") == video_id
+    valid = (set(payload) == {"video_id", "project_id", "source_sha256", "profile_version"}
+             and _integer(payload.get("video_id"))
+             and payload.get("project_id") == project_id
+             and _hex_digest(payload.get("source_sha256"))
+             and payload.get("profile_version") == DISPLAY_PROXY_PROFILE_VERSION)
+    return related, valid
+
+
 def identify_related_video_jobs(
     db: Session,
     *,
@@ -260,10 +272,11 @@ def identify_related_video_jobs(
                                      frozen_submission_annotations)
         dedupe = job.dedupe_key or ""
         possible = (possible or dedupe.startswith(f"media:video:{video_id}:")
+                    or dedupe.startswith(f"display-proxy:video:{video_id}:")
                     or any(dedupe == f"media:submission:{item}"
                            for item in frozen_submissions))
         same_project_job = job.project_id == project_id
-        guarded_type = job.job_type in {"media", "export"}
+        guarded_type = job.job_type in {"media", "export", "display_proxy"}
         if job.job_type == "cleanup":
             continue
         if not isinstance(payload, Mapping):
@@ -278,6 +291,8 @@ def identify_related_video_jobs(
             related, valid = _classify_export(payload, project_id, video_id, frozen_submissions,
                                               frozen_submission_annotations,
                                               live_annotation_ids)
+        elif job.job_type == "display_proxy":
+            related, valid = _classify_display_proxy(payload, project_id, video_id)
         else:
             related, valid = possible, False
         if same_project_job and guarded_type and not valid:

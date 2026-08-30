@@ -41,7 +41,8 @@ backend/
 │ ├── 0012_assignment_members_invites.py # 三角色、审核能力、邀请码与视频负责人
 │ ├── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
 │ ├── 0014_import_batch_ownership_activity.py # 三文件导入批次创建者与活动时间
-│ └── 0015_frame_authority.py # 多帧闭区间帧权威约束
+│ ├── 0015_frame_authority.py # 多帧闭区间帧权威约束
+│ └── 0016_display_proxy.py # 低码率展示代理状态与持久任务 ownership
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -131,7 +132,7 @@ stream 不进入公共 `video_operation_gate`。本地候选边界是：新请�
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0015），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0016），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -160,9 +161,9 @@ baseline（0001）再升级到 head（0015），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0014 已版本化库 → 按迁移链增量 `upgrade head` 到 0015；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
+- 0002～0015 已版本化库 → 按迁移链增量 `upgrade head` 到 0016；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -229,6 +230,12 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 批次 7（生命周期清理）已实现，
 见下文对应章节。
 
+## 低码率展示代理生成（P1 本地候选）
+
+迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定候选 profile、显式内部入队、单 owner、CAS、原子发布和启动恢复。候选 profile 为 1280×720、H.264/libx264、CRF 28、veryfast、yuv420p、固定 30 帧 GOP、SAR 1:1、无音频和 faststart，并严格校验 CFR 时间戳、帧数、时长、旋转和源文件 SHA-256。
+
+该能力由 `DISPLAY_PROXIES_ENABLED=false` 默认关闭；当前没有上传/三文件导入自动入队、历史 backfill、展示下载 API 或前端播放切换。硬删除已纳入代理文件和 terminal job 结果，但启用前仍须在 FFmpeg/ffprobe 4.4.2 环境完成真实 round-trip、长视频、ENOSPC 和并发验证。
+
 ## Demo 账号
 
 | 用户名 | 密码 | 说明 |
@@ -257,10 +264,11 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 
 ## 配置
 
-数据库、上传视频、导出片段、clip/thumbnail 与清理异常日志均从环境变量配置，
+数据库、上传视频、导出片段、clip/thumbnail、display proxy 与清理异常日志均从环境变量配置，
 默认位于 `backend/data/` 下（已被 gitignore）：
 - `DATA_DIR/videos/` 上传视频；`DATA_DIR/exports/` 导出；
   `DATA_DIR/clips/` 与 `DATA_DIR/thumbnails/` 片段产物（批次 4 生成）；
+  `DATA_DIR/display_proxies/` 低码率展示代理；
   `DATA_DIR/cleanup-issues.log` 清理异常 JSONL（越界路径 / 删除失败）。
 
 | 环境变量 | 默认值 | 说明 |
@@ -280,6 +288,10 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
 | `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
+| `DISPLAY_PROXIES_ENABLED` | `false` | 是否启用 P1 代理 worker；默认关闭，当前无自动入队或播放切换 |
+| `DISPLAY_PROXY_TIMEOUT_SECONDS` | `3600` | 单个代理转码/探测命令超时（秒） |
+| `DISPLAY_PROXY_MAX_ATTEMPTS` | `3` | 启动恢复时中断任务的最大 attempts |
+| `DISPLAY_PROXY_SYNCHRONOUS` | `false` | 测试用：代理 worker 同步执行 |
 | `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
 | `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
 | `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件、孤儿导出 ZIP 及未活动 `uploading/failed` 三文件导入批次的保留时间 |
@@ -721,8 +733,8 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
 分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
-以及迁移验收（全新库建至 head 0015 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径按迁移链升级至 head 0015，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检与 downgrade/upgrade /
+以及迁移验收（全新库建至 head 0016 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径按迁移链升级至 head 0016，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检、0015→0016 的展示代理约束与 downgrade/upgrade /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，

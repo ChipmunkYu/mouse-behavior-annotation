@@ -1,11 +1,13 @@
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import BackgroundJob
 from app.related_video_jobs import RelatedJobRef, identify_related_video_jobs
 
 
 def _add(db, *, job_type="media", status="succeeded", project_id=None, payload=None,
-         result_path=None, dedupe_key=None):
+         result_path=None, dedupe_key=None, run_token=None):
     job = BackgroundJob(job_type=job_type, status=status, project_id=project_id,
-                        payload=payload, result_path=result_path, dedupe_key=dedupe_key)
+                        payload=payload, result_path=result_path, dedupe_key=dedupe_key,
+                        run_token=run_token)
     db.add(job)
     db.flush()
     return job.id
@@ -60,6 +62,35 @@ def test_identifies_both_media_generations_and_splits_statuses(ctx):
     assert result.unknown == ()
     assert result.terminal[0] == RelatedJobRef(
         submission, "media", "failed", project_id, "failed.part")
+
+
+def test_display_proxy_job_is_visible_to_delete_guard(ctx):
+    info = ctx.make_project_with_video()
+    project_id, video_id = info["project"]["id"], info["video"]["id"]
+    payload = {"video_id": video_id, "project_id": project_id,
+               "source_sha256": "a" * 64, "profile_version": DISPLAY_PROXY_PROFILE_VERSION}
+    with ctx.session_factory() as db:
+        job_id = _add(db, job_type="display_proxy", status="running", project_id=project_id,
+                      payload=payload, run_token="a" * 32,
+                      dedupe_key=(f"display-proxy:video:{video_id}:source:{'a' * 64}:"
+                                  f"profile:{DISPLAY_PROXY_PROFILE_VERSION}"))
+        db.commit()
+        result = identify_related_video_jobs(db, project_id=project_id, video_id=video_id)
+    assert [job.id for job in result.active] == [job_id]
+
+
+def test_display_proxy_payload_with_persisted_storage_path_is_unknown(ctx):
+    info = ctx.make_project_with_video()
+    project_id, video_id = info["project"]["id"], info["video"]["id"]
+    payload = {"video_id": video_id, "project_id": project_id,
+               "source_sha256": "a" * 64, "storage_path": "must-not-persist.mp4",
+               "profile_version": DISPLAY_PROXY_PROFILE_VERSION}
+    with ctx.session_factory() as db:
+        job_id = _add(db, job_type="display_proxy", status="queued",
+                      project_id=project_id, payload=payload)
+        db.commit()
+        result = identify_related_video_jobs(db, project_id=project_id, video_id=video_id)
+    assert [job.id for job in result.unknown] == [job_id]
 
 
 def test_export_with_any_target_reference_is_related(ctx):

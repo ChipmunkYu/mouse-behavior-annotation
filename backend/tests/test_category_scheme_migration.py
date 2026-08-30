@@ -71,7 +71,7 @@ def test_populated_0012_to_0013_preserves_legacy_rows_and_installs_barriers(tmp_
 
     engine.dispose()
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     db_mod.configure_engine(url)
     with db_mod.engine.connect() as conn:
         row = conn.execute(text(

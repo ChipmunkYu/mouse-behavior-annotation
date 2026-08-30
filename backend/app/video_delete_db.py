@@ -291,12 +291,14 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
             return
         root = {"videos": settings.videos_dir, "detection_imports": settings.detection_imports_dir,
                 "clips": settings.clips_dir, "thumbnails": settings.thumbnails_dir,
-                "exports": settings.exports_dir}[root_kind]
+                "exports": settings.exports_dir,
+                "display_proxies": settings.display_proxies_dir}[root_kind]
         key = _safe_key(stored, root)
         path_items.append(DeletePath(root_kind, key))
         owners.setdefault((root_kind, os.path.normcase(key)), set()).add((table, row_id))
 
     add_path("videos", video.storage_path, "videos", video_id)
+    add_path("display_proxies", video.display_path, "videos", video_id)
     for row in submissions:
         add_path("videos", row.source_storage_key, "submissions", row.id)
     for row in imports:
@@ -312,6 +314,10 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     for job in jobs.terminal:
         if job.job_type == "export":
             add_path("exports", job.result_path, "background_jobs", job.id)
+        elif job.job_type == "display_proxy":
+            # Display-proxy results have their own controlled namespace.  In
+            # particular, never reinterpret one as a legacy Clip artifact.
+            add_path("display_proxies", job.result_path, "background_jobs", job.id)
         elif job.result_path:
             # Current media workers normally leave this NULL.  A legacy value is
             # accepted only when it names one of this job's already-frozen Clip
@@ -434,10 +440,13 @@ def _reject_shared_paths(db: Session, owners: Mapping[tuple[str, str], set[tuple
         "clips": ((Clip, "clip_path", "clips"),),
         "thumbnails": ((Clip, "thumbnail_path", "clips"),),
         "exports": ((BackgroundJob, "result_path", "background_jobs"),),
+        "display_proxies": ((Video, "display_path", "videos"),
+                            (BackgroundJob, "result_path", "background_jobs")),
     }
     roots = {"videos": settings.videos_dir, "detection_imports": settings.detection_imports_dir,
              "clips": settings.clips_dir, "thumbnails": settings.thumbnails_dir,
-             "exports": settings.exports_dir}
+             "exports": settings.exports_dir,
+             "display_proxies": settings.display_proxies_dir}
     wanted = set(owners)
     for root_kind, descriptors in checks.items():
         if not any(root == root_kind for root, _key in wanted):
@@ -445,6 +454,9 @@ def _reject_shared_paths(db: Session, owners: Mapping[tuple[str, str], set[tuple
         for model, field, table_name in descriptors:
             for row in db.query(model).filter(getattr(model, field).is_not(None)).all():
                 if row.id in target_ids.get(table_name, ()):
+                    continue
+                if (root_kind == "display_proxies" and model is BackgroundJob
+                        and row.job_type != "display_proxy"):
                     continue
                 try:
                     key = _safe_key(getattr(row, field), roots[root_kind])

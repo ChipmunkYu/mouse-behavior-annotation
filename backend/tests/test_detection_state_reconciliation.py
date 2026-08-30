@@ -217,7 +217,7 @@ def test_0008_downgrade_reupgrade_preserves_legacy_and_rebackfills(tmp_path):
         assert conn.execute(text("SELECT count(*) FROM clips")).scalar() == 1
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     inspector = inspect(db_mod.engine)
     assert {"participant_mode", "role_definitions"} <= {
         column["name"] for column in inspector.get_columns("behavior_categories")

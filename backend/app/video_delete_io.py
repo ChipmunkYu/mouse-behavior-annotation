@@ -110,6 +110,7 @@ class VideoDeleteIO:
         self.data_dir = Path(settings.data_dir)
         self.roots: Mapping[str, Path] = {
             "videos": settings.videos_dir,
+            "display_proxies": settings.display_proxies_dir,
             "exports": settings.exports_dir,
             "clips": settings.clips_dir,
             "thumbnails": settings.thumbnails_dir,

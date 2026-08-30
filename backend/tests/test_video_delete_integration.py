@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import BackgroundJob, Video
 from app.video_delete_db import VideoDeleteConflictError
 from app.video_delete_io import VideoDeleteIOError
@@ -30,6 +32,72 @@ def test_hard_delete_endpoint_removes_video_and_source(ctx):
     assert not source.exists()
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is None
+
+
+def test_hard_delete_removes_ready_proxy_and_duplicate_terminal_result(ctx):
+    _made_result, project_id, video_id, headers = _made(ctx)
+    settings = ctx.raw_client.app.state.settings
+    source = settings.videos_dir / "proxy-source.mp4"
+    proxy = settings.display_proxies_dir / "proxy-ready.mp4"
+    source.write_bytes(b"video")
+    proxy.write_bytes(b"proxy")
+    with ctx.session_factory() as db:
+        video = db.get(Video, video_id)
+        video.storage_path = source.name
+        video.source_sha256 = "a" * 64
+        video.display_status = "ready"
+        video.display_path = proxy.name
+        video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+        video.display_source_sha256 = video.source_sha256
+        video.display_generated_at = datetime.utcnow()
+        job = BackgroundJob(
+            project_id=project_id, job_type="display_proxy", status="succeeded",
+            progress=100, result_path=proxy.name,
+            payload={"video_id": video_id, "project_id": project_id,
+                     "source_sha256": video.source_sha256,
+                     "profile_version": video.display_profile_version},
+        )
+        db.add(job); db.commit(); job_id = job.id
+
+    response = ctx.client.delete(
+        f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
+    )
+    assert response.status_code == 204, response.text
+    assert not source.exists() and not proxy.exists()
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is None
+        assert db.get(BackgroundJob, job_id) is None
+        assert db.connection().exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+
+def test_database_failure_restores_source_and_ready_proxy(ctx, monkeypatch):
+    _made_result, project_id, video_id, headers = _made(ctx)
+    settings = ctx.raw_client.app.state.settings
+    source = settings.videos_dir / "restore-source.mp4"
+    proxy = settings.display_proxies_dir / "restore-proxy.mp4"
+    source.write_bytes(b"video"); proxy.write_bytes(b"proxy")
+    with ctx.session_factory() as db:
+        video = db.get(Video, video_id)
+        video.storage_path = source.name
+        video.source_sha256 = "b" * 64
+        video.display_status = "ready"
+        video.display_path = proxy.name
+        video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+        video.display_source_sha256 = video.source_sha256
+        video.display_generated_at = datetime.utcnow()
+        db.commit()
+
+    def fail_delete(*_args, **_kwargs):
+        raise VideoDeleteConflictError("injected")
+
+    monkeypatch.setattr(service_module, "delete_frozen_video", fail_delete)
+    response = ctx.client.delete(
+        f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
+    )
+    assert response.status_code == 409
+    assert source.read_bytes() == b"video" and proxy.read_bytes() == b"proxy"
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id).display_path == proxy.name
 
 
 def test_success_log_has_safe_terminal_job_ids_and_no_sensitive_data(ctx, caplog):
@@ -135,6 +203,27 @@ def test_active_job_and_busy_gate_block_with_zero_side_effects(ctx):
     assert busy.status_code == 409
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is not None
+
+
+def test_active_display_proxy_job_returns_conflict(ctx):
+    _made_result, project_id, video_id, headers = _made(ctx)
+    with ctx.session_factory() as db:
+        job = BackgroundJob(
+            project_id=project_id, job_type="display_proxy", status="running",
+            progress=1, run_token="active-display-proxy",
+            payload={"video_id": video_id, "project_id": project_id,
+                     "source_sha256": "a" * 64,
+                     "profile_version": DISPLAY_PROXY_PROFILE_VERSION},
+        )
+        db.add(job); db.commit(); job_id = job.id
+
+    response = ctx.client.delete(
+        f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
+    )
+    assert response.status_code == 409
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is not None
+        assert db.get(BackgroundJob, job_id).status == "running"
 
 
 def test_final_database_conflict_restores_quarantined_source(ctx, monkeypatch):

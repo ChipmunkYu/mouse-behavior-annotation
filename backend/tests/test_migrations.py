@@ -18,6 +18,7 @@ from app.migration import (
     MigrationStateError,
     alembic_config,
     current_revision,
+    downgrade_to,
     inspect_state,
     run_migrations,
     upgrade_to,
@@ -80,6 +81,15 @@ ALL_TABLES = (
 VIDEO_NEW_COLUMNS = {"workflow_status", "annotation_revision", "submitted_at", "approved_at", "approved_by"}
 # v0.6（0005）：检测导入 / 身份 / 媒体三类修订
 PHASE1A_VIDEO_COLUMNS = {"detection_import_revision", "identity_revision", "media_revision"}
+DISPLAY_VIDEO_COLUMNS = {
+    "display_path",
+    "display_status",
+    "display_error",
+    "display_profile_version",
+    "source_sha256",
+    "display_source_sha256",
+    "display_generated_at",
+}
 PHASE1A_ANNOTATION_COLUMNS = {
     "mouse_ids",
     "mouse_id_status",
@@ -250,7 +260,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -260,6 +270,8 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
     columns = {c["name"] for c in insp.get_columns("videos")}
     assert VIDEO_NEW_COLUMNS <= columns
     assert PHASE1A_VIDEO_COLUMNS <= columns
+    assert DISPLAY_VIDEO_COLUMNS <= columns
+    assert "run_token" in {c["name"] for c in insp.get_columns("background_jobs")}
     # 旧 P1 列保留
     for col in ("filename", "status", "storage_path", "created_at"):
         assert col in columns
@@ -318,6 +330,246 @@ def test_0015_blocks_dirty_single_frame_rows_until_explicitly_repaired(tmp_path)
         )
     upgrade_to(url, "0015")
     assert current_revision(url) == "0015"
+
+
+def _display_constraint_names(engine) -> set[str]:
+    return {
+        check["name"]
+        for check in sa_inspect(engine).get_check_constraints("videos")
+        if check["name"] and check["name"].startswith("ck_videos_display_")
+    }
+
+
+def _background_job_constraint_names(engine) -> set[str]:
+    return {
+        check["name"]
+        for check in sa_inspect(engine).get_check_constraints("background_jobs")
+        if check["name"]
+    }
+
+
+def _seed_display_video(engine) -> int:
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as db:
+        owner = User(username="display-owner", password_hash="hash")
+        db.add(owner)
+        db.flush()
+        project = Project(name="display-project", status="active", created_by=owner.id)
+        db.add(project)
+        db.flush()
+        video = Video(project_id=project.id, filename="source.mp4", status="ready")
+        db.add(video)
+        db.commit()
+        db.refresh(video)
+        assert video.display_status == "pending"
+        assert video.source_sha256 is None
+        assert all(
+            getattr(video, field) is None
+            for field in DISPLAY_VIDEO_COLUMNS - {"display_status", "source_sha256"}
+        )
+        return video.id
+
+
+def _assert_display_constraints(engine, video_id: int) -> None:
+    from sqlalchemy import text
+
+    digest = "a" * 64
+
+    def rejected(sql: str, params: dict | None = None) -> None:
+        with pytest.raises(IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(text(sql), {"id": video_id, **(params or {})})
+
+    rejected("UPDATE videos SET display_status='unknown' WHERE id=:id")
+    rejected("UPDATE videos SET display_status='processing' WHERE id=:id")
+    rejected("UPDATE videos SET source_sha256=:hash WHERE id=:id", {"hash": "A" * 64})
+    rejected("UPDATE videos SET source_sha256=:hash WHERE id=:id", {"hash": "a" * 63})
+    rejected("UPDATE videos SET display_error='boom' WHERE id=:id")
+    rejected("UPDATE videos SET display_status='failed' WHERE id=:id")
+    rejected("UPDATE videos SET display_path='proxy.mp4' WHERE id=:id")
+    rejected(
+        "UPDATE videos SET display_status='ready', source_sha256=:hash WHERE id=:id",
+        {"hash": digest},
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE videos SET display_status='ready', display_path='proxy.mp4', "
+                "display_profile_version='v1', source_sha256=:hash, "
+                "display_source_sha256=:hash, display_generated_at=CURRENT_TIMESTAMP "
+                "WHERE id=:id"
+            ),
+            {"id": video_id, "hash": digest},
+        )
+    rejected(
+        "UPDATE videos SET display_source_sha256=:hash WHERE id=:id",
+        {"hash": "b" * 64},
+    )
+    rejected("UPDATE videos SET display_error='boom' WHERE id=:id")
+    for unsafe in (
+        "/proxy.mp4", "dir/proxy.mp4", "dir\\proxy.mp4", "proxy..mp4", "C:proxy.mp4", "nul\x00.mp4"
+    ):
+        rejected("UPDATE videos SET display_path=:path WHERE id=:id", {"path": unsafe})
+
+
+def _assert_background_job_run_token_constraint(engine) -> None:
+    from sqlalchemy import text
+
+    insert_sql = text(
+        "INSERT INTO background_jobs "
+        "(job_type,status,progress,attempts,run_token,created_at) "
+        "VALUES (:job_type,:status,0,0,:run_token,CURRENT_TIMESTAMP)"
+    )
+
+    def accepted(job_type: str, status: str, run_token: str | None) -> None:
+        with engine.begin() as conn:
+            conn.execute(insert_sql, {
+                "job_type": job_type, "status": status, "run_token": run_token,
+            })
+
+    def rejected(job_type: str, status: str, run_token: str | None) -> None:
+        with pytest.raises(IntegrityError):
+            accepted(job_type, status, run_token)
+
+    accepted("display_proxy", "running", "run-1")
+    accepted("display_proxy", "queued", None)
+    accepted("display_proxy", "succeeded", None)
+    # 0016 前的任务均无 run_token；非 display_proxy 的 running 行仍须兼容。
+    accepted("media", "running", None)
+    accepted("export", "queued", None)
+    accepted("media", "running", "legacy-optional-token")
+
+    rejected("display_proxy", "running", None)
+    rejected("display_proxy", "running", "")
+    rejected("display_proxy", "queued", "stale-token")
+    rejected("display_proxy", "failed", "stale-token")
+
+
+def test_0016_fresh_create_all_and_alembic_constraints_match(tmp_path):
+    """create_all 与 Alembic head 均提供同一组 display 默认值和关键 CHECK。"""
+    from sqlalchemy import create_engine
+
+    alembic_url = _settings(tmp_path, "display-alembic.db").resolved_database_url
+    run_migrations(alembic_url)
+    alembic_engine = create_engine(alembic_url)
+    create_all_engine = create_engine(f"sqlite:///{(tmp_path / 'display-create-all.db').as_posix()}")
+    models.Base.metadata.create_all(create_all_engine)
+    try:
+        expected = {
+            "ck_videos_display_status",
+            "ck_videos_display_source_sha256",
+            "ck_videos_display_source_required",
+            "ck_videos_display_ready",
+            "ck_videos_display_nonready",
+            "ck_videos_display_active_error",
+            "ck_videos_display_failed_error",
+            "ck_videos_display_path_safe",
+        }
+        assert expected <= _display_constraint_names(alembic_engine)
+        assert _display_constraint_names(alembic_engine) == _display_constraint_names(create_all_engine)
+        job_check = "ck_background_jobs_display_proxy_run_token"
+        assert job_check in _background_job_constraint_names(alembic_engine)
+        assert (
+            _background_job_constraint_names(alembic_engine)
+            == _background_job_constraint_names(create_all_engine)
+        )
+        for engine in (alembic_engine, create_all_engine):
+            _assert_display_constraints(engine, _seed_display_video(engine))
+            _assert_background_job_run_token_constraint(engine)
+    finally:
+        alembic_engine.dispose()
+        create_all_engine.dispose()
+
+
+def test_0016_historical_row_and_round_trip_preserve_data_and_triggers(tmp_path):
+    """0015→0016→0015→0016 保留视频、子表和 assignee，并始终无 FK 破损。"""
+    from app.assignee_triggers import TRIGGERS as ASSIGNEE_TRIGGERS
+    from app.authority_triggers import TRIGGERS as AUTHORITY_TRIGGERS
+    from sqlalchemy import text
+
+    url = _settings(tmp_path, "display-roundtrip.db").resolved_database_url
+    upgrade_to(url, "0015")
+    db_mod.configure_engine(url)
+    with db_mod.engine.begin() as conn:
+        conn.execute(text("INSERT INTO users(username,password_hash,created_at) VALUES ('owner','h',CURRENT_TIMESTAMP)"))
+        conn.execute(text(
+            "INSERT INTO projects(name,status,created_by,created_at,updated_at,invite_code) "
+            "VALUES ('p','active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'display-roundtrip')"
+        ))
+        conn.execute(text(
+            "INSERT INTO project_memberships(project_id,user_id,role,can_review,status,created_at) "
+            "VALUES (1,1,'owner',1,'active',CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "INSERT INTO behavior_categories(project_id,name,\"group\",sort_order,is_active,"
+            "mouse_count_min,participant_mode,role_definitions,created_at) "
+            "VALUES (1,'run','solo',0,1,1,'unordered','[]',CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "UPDATE projects SET category_scheme_locked_at=CURRENT_TIMESTAMP,"
+            "category_scheme_locked_by=1 WHERE id=1"
+        ))
+        conn.execute(text(
+            "INSERT INTO videos(project_id,filename,status,assignee_membership_id,workflow_status,"
+            "annotation_revision,detection_import_revision,identity_revision,media_revision,created_at) "
+            "VALUES (1,'original.mp4','ready',1,'draft',1,0,0,1,CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "INSERT INTO annotations(video_id,annotator_id,category_id,start_time,end_time,start_frame,end_frame,"
+            "confidence,review_status,mouse_ids,mouse_id_status,detection_import_revision,identity_revision,"
+            "participant_roles,participant_status,created_at,updated_at) "
+            "VALUES (1,1,1,0,1,0,25,'certain','pending','[]','needs_mouse_ids',0,0,'{}','valid',"
+            "CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "INSERT INTO background_jobs(project_id,job_type,status,progress,attempts,created_at) "
+            "VALUES (1,'display','running',0,0,CURRENT_TIMESTAMP)"
+        ))
+
+    expected_triggers = set(AUTHORITY_TRIGGERS) | set(ASSIGNEE_TRIGGERS)
+
+    def assert_integrity(revision: str, has_display: bool) -> None:
+        assert current_revision(url) == revision
+        db_mod.configure_engine(url)
+        with db_mod.engine.connect() as conn:
+            assert conn.execute(text("PRAGMA foreign_key_check")).all() == []
+            triggers = set(conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )).scalars())
+            assert expected_triggers <= triggers
+            assert conn.execute(text("SELECT filename,assignee_membership_id FROM videos")).one() == (
+                "original.mp4", 1
+            )
+            assert conn.execute(text("SELECT count(*) FROM annotations")).scalar_one() == 1
+            assert conn.execute(text(
+                "SELECT job_type,status FROM background_jobs"
+            )).one() == ("display", "running")
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(videos)"))}
+            assert ("display_status" in columns) is has_display
+            job_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(background_jobs)"))
+            }
+            assert ("run_token" in job_columns) is has_display
+            job_checks = _background_job_constraint_names(db_mod.engine)
+            assert (
+                "ck_background_jobs_display_proxy_run_token" in job_checks
+            ) is has_display
+            if has_display:
+                row = conn.execute(text(
+                    "SELECT display_status,source_sha256,display_path,display_error,"
+                    "display_profile_version,display_source_sha256,display_generated_at FROM videos"
+                )).one()
+                assert row == ("pending", None, None, None, None, None, None)
+                assert conn.execute(text("SELECT run_token FROM background_jobs")).scalar_one() is None
+
+    upgrade_to(url, "0016")
+    assert_integrity("0016", True)
+    downgrade_to(url, "0015")
+    assert_integrity("0015", False)
+    upgrade_to(url, "0016")
+    assert_integrity("0016", True)
 
 
 def test_p1_old_db_upgrade_preserves_data(tmp_path):
@@ -441,7 +693,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -460,7 +712,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -534,7 +786,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -566,7 +818,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -758,7 +1010,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -808,7 +1060,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -879,7 +1131,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -935,7 +1187,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0015" in proc.stdout
+    assert "0016" in proc.stdout
 
 
 
@@ -1096,7 +1348,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1141,7 +1393,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1151,7 +1403,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1257,7 +1509,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1551,7 +1803,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1593,7 +1845,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1615,7 +1867,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1725,7 +1977,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
             conn.execute(text(sql), params)
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.engine.connect() as conn:
         imports = conn.execute(
             text(
@@ -1747,7 +1999,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
 
     # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
     db_mod.ensure_schema(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
 
@@ -1860,7 +2112,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
     fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
     run_migrations(fresh_url)
     fresh_engine = create_engine(fresh_url)
-    assert current_revision(fresh_url) == "0015"
+    assert current_revision(fresh_url) == "0016"
     assert {"raw_digest", "state_digest", "metadata_digest"} <= {
         column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
     }
@@ -1895,7 +2147,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         ))
 
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         snapshot = db.get(models.DetectionSnapshot, 93)
         assert all(len(getattr(snapshot, name)) == 64 for name in
@@ -1908,7 +2160,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
     })
     run_migrations(url)
-    assert current_revision(url) == "0015"
+    assert current_revision(url) == "0016"
     with db_mod.SessionLocal() as db:
         assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
 

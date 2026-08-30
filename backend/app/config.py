@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # 不要求系统 ffmpeg，测试可确定性驱动任务流程）。
     media_synchronous: bool = False
 
+    # ---- 播放代理（候选 profile；默认关闭，不改变现有生产行为） ----
+    display_proxies_enabled: bool = False
+    display_proxy_timeout_seconds: int = Field(default=60 * 60, ge=1)
+    display_proxy_max_attempts: int = Field(default=3, ge=1)
+    display_proxy_synchronous: bool = False
+
     # ---- 分类导出（批次 6） ----
     # 导出 ZIP 生成后的保留天数：超过后 `export/download` 拒绝下载（批次 7 清理实体文件）。
     export_retention_days: int = Field(default=7, ge=0)
@@ -152,6 +158,10 @@ class Settings(BaseSettings):
     @property
     def thumbnails_dir(self) -> Path:
         return self.data_dir / "thumbnails"
+
+    @property
+    def display_proxies_dir(self) -> Path:
+        return self.data_dir / "display_proxies"
 
     @property
     def import_batches_dir(self) -> Path:
