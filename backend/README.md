@@ -341,7 +341,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/release` | 当前负责人释放自己的 draft 视频 |
 | `POST` | `/api/projects/{project_id}/videos/assignments` | owner/admin 事务批量分配、改派或清空 draft/rejected 视频 |
 | `GET` | `/api/projects/{project_id}/assignment-stats` | 项目与逐负责人的工作流数量统计；`unassigned` 为全部未分配，`claimable` 为未分配 `draft` |
-| `GET` | `/api/videos/{video_id}/stream` | 若 `storage_path` 解析到配置视频目录内且文件存在则 `FileResponse`，否则 404 |
+| `GET` | `/api/videos/{video_id}/stream` | 使用与 `VideoOut.playback_status` 相同的服务端资源选择器；可播放时返回受控媒体实体，否则 404，公开响应不暴露磁盘路径 |
 
 ### YOLO 检测结果导入与 track 修正
 
@@ -506,17 +506,16 @@ H.264 MP4（`-ss` 定位 + `-t` 片长）；默认 `-an`，启用 `MEDIA_MAP_AUD
 |---|---|---|
 | `GET` | `/api/projects/{project_id}/clips` | 片段库分页列表 → `ClipPageOut`（项目成员可读） |
 | `GET` | `/api/projects/{project_id}/clips/categories` | 审核通过片段的类别统计 → `ClipCategoryCount[]` |
+| `GET` | `/api/projects/{project_id}/clips/{clip_id}/thumbnail` | 按 Clip ID 返回受鉴权缩略图；校验项目 authority、ready 状态及实体边界 |
 
 **入库条件**：标注 `review_status=approved` **且** 所属视频当前 `workflow_status=approved`。
 失效回 draft 后仍残留的 approved 标注一并排除（杜绝库内出现已失效片段）；
 pending/rejected 一律隔离。`review_status` 查询参数仅接受 `approved`（其余值 422）。
 
-**ClipItem 字段**：`annotation_id, video_id, video_filename, category_id, category_name,
-start_time, end_time, start_frame, end_frame, confidence, clip_path, thumbnail_path,
-annotator_name, review_status, created_at`。
-`clip_path` / `thumbnail_path` 取当前修订（`Clip.source_revision == video.annotation_revision`）
-对应 Clip 的相对路径；**Clip 缺失或非 ready（pending/processing/failed）时为 null**，
-不校验实体文件是否存在。
+**ClipItem 字段**：使用不透明 `item_key` 区分 legacy/submission ID 空间；`clip_id` 仅在
+媒体记录存在时返回，`media_status` 表达 `pending/processing/ready/failed/stale`。其余字段为
+标注、视频、类别和参与者元数据。物理 `clip_path` / `thumbnail_path` 不进入公开 DTO；
+ready 状态还会校验片段与缩略图实体，缺失或越界时降级为 pending。
 
 **分页与排序**：默认 `page_size=20`、上限 100（`page<1` 或 `page_size>100` → 422）；
 排序 `start_time ASC, id ASC` 保证稳定分页。响应 `{items, total, pages}`。
@@ -529,8 +528,7 @@ annotator_name, review_status, created_at`。
   取关联列（Video/类别/标注者/当前修订 Clip 一次到位）——**无 N+1**，也不加载
   `crop_region` 等重列。
 - 仅项目成员可访问（与其余只读接口一致，不校验 membership.active）。
-- **不批量加载视频流**：本接口只返回元数据与相对路径，客户端自行按需请求单条 blob
-  （如经 `GET /api/videos/{video_id}/stream` 或后续的 clip 文件接口）。
+- **不批量加载媒体**：列表只返回元数据和资源 ID；客户端按需请求单条视频流或受鉴权缩略图。
 
 ### Phase 4：Submission authority 独立四文件项目 ZIP 导出
 
@@ -703,6 +701,10 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
 cd backend
 .venv\Scripts\activate
 pytest -q
+
+# 生成或核对稳定 OpenAPI 快照（无数据库、seed、worker 副作用）
+python scripts/export_openapi.py
+python scripts/export_openapi.py --check
 ```
 
 当前全局上传任务管理实现的后端相关测试为 **128 passed, 3 skipped, 1 warning**，前端 production build 通过并处理 **66 modules**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题；该结论不等于跨路由、跨项目、取消/重试、退出、401 回收或可访问性的浏览器人工矩阵已经验收。
@@ -727,7 +729,7 @@ pending Clip、rejected 不入队、生成幂等/重试/角色与 approved 状�
 成员权限、进度与部分失败保留成功片段、重试只处理 failed、重启恢复 running 重排/判失败、
 修订失效竞态取消且不复活 Clip、文件原子性与半成品清理、输入源路径安全、实际 DB 迁移 0004），
 批次 5 片段库（仅审核通过且视频 approved 才入库、pending/rejected 与失效残留隔离、
-非 ready Clip 路径为 null、ready 路径与批次 4 产物一致、分页默认 20/上限 100/稳定排序、
+公开 DTO 不含物理路径、`item_key/clip_id/media_status` 与受鉴权缩略图端点、分页默认 20/上限 100/稳定排序、
 category/video/annotator/search 筛选、跨项目隔离、多视频聚合、类别统计、成员权限、
 ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目导出（首次入队、项目 active
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、

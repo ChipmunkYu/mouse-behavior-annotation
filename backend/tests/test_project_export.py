@@ -44,7 +44,9 @@ def _export(ctx, project, headers, category_ids=None):
 
 
 def _archive(ctx, job):
-    return ctx.app.state.settings.exports_dir / job["result_path"]
+    with ctx.session_factory() as db:
+        result_path = db.get(BackgroundJob, job["id"]).result_path
+    return ctx.app.state.settings.exports_dir / result_path
 
 
 def _clip_dirs(archive):
@@ -144,7 +146,9 @@ def test_single_category_is_flat_and_has_exact_four_files(media_ctx):
     headers, project, categories, _video, _annotations = _approved(ctx)
     job = _export(ctx, project, headers)
     assert job["status"] == "succeeded", repr(job)
-    assert job["payload"]["category_ids"] == [categories[0]["id"]]
+    assert "payload" not in job
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job["id"]).payload["category_ids"] == [categories[0]["id"]]
     directories, files = _clip_dirs(_archive(ctx, job))
     assert len(directories) == 1 and "/" not in directories[0]
     assert {name.rsplit("/", 1)[1] for name in files} == FILES
@@ -221,7 +225,7 @@ def test_superseded_frozen_submission_completes_without_current_draft_reads(medi
         worker._run_job(job_id)
         with ctx.session_factory() as db:
             job = db.get(BackgroundJob, job_id); assert job.status == "succeeded"
-        with zipfile.ZipFile(_archive(ctx, {"result_path": job.result_path})) as zf:
+        with zipfile.ZipFile(_archive(ctx, {"id": job_id})) as zf:
             annotation = json.loads(zf.read(next(n for n in zf.namelist() if n.endswith("annotation.json"))))
         assert annotation["behavior"] != "RENAMED"
         assert annotation["time_range"]["start"] == 0.0
@@ -269,7 +273,10 @@ def test_explicit_unrepresented_category_preserves_multi_category_layout(media_c
     ctx = media_ctx
     headers, project, categories, _video, _annotations = _approved(ctx)
     job = _export(ctx, project, headers, [categories[0]["id"], categories[1]["id"]])
-    assert job["payload"]["category_ids"] == [categories[0]["id"], categories[1]["id"]]
+    assert "payload" not in job
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job["id"]).payload["category_ids"] == [
+            categories[0]["id"], categories[1]["id"]]
     directories, _files = _clip_dirs(_archive(ctx, job))
     assert len(directories) == 1 and directories[0].count("/") == 1
 
@@ -333,7 +340,7 @@ def test_probe_mismatch_and_render_failure_publish_no_final(media_ctx):
     ctx.processor.probe_clip = lambda path, expected=None: {
         **expected, "frame_count": 999, "duration": expected["frame_count"] / expected["fps"]}
     job = _export(ctx, project, headers)
-    assert job["status"] == "failed" and job["result_path"] is None
+    assert job["status"] == "failed" and "result_path" not in job
     assert list(ctx.app.state.settings.exports_dir.glob("*.zip")) == []
     assert list(ctx.app.state.settings.exports_dir.glob(".export-*")) == []
     ctx.processor.probe_clip = original
@@ -441,7 +448,7 @@ def test_render_failure_cleans_staging_and_never_publishes_final(media_ctx):
     submission_annotation_id = _remove_submission_clips(ctx)[0]
     ctx.processor.fail_clips.add(submission_annotation_id)
     job = _export(ctx, project, headers)
-    assert job["status"] == "failed" and job["result_path"] is None
+    assert job["status"] == "failed" and "result_path" not in job
     assert list(ctx.app.state.settings.exports_dir.iterdir()) == []
 
 

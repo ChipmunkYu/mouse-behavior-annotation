@@ -41,8 +41,6 @@ def _to_job_out(job: BackgroundJob) -> JobOut:
         job_type=job.job_type,
         status=job.status,
         progress=job.progress,
-        payload=job.payload,
-        result_path=job.result_path,
         error=job.error,
         created_at=job.created_at,
         started_at=job.started_at,

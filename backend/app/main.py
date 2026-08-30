@@ -19,7 +19,7 @@ from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
 from .video_delete_service import VideoDeleteService
 from .video_operation_gate import VideoOperationGateCoordinator
-from .routers import annotations, auth, categories, category_scheme, clips, detection_imports, exports, health, identity_edits, media, projects, reviews, suppressions, videos
+from .factory import register_routers
 
 
 def _default_media_processor(settings: Settings) -> MediaProcessor:
@@ -132,21 +132,7 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(health.router)
-    app.include_router(auth.router)
-    app.include_router(projects.router)
-    app.include_router(category_scheme.router)
-    app.include_router(categories.router)
-    app.include_router(videos.router)
-    app.include_router(annotations.router)
-    app.include_router(reviews.router)
-    app.include_router(clips.router)
-    app.include_router(exports.router)
-    app.include_router(media.router)
-    app.include_router(detection_imports.router)
-    app.include_router(identity_edits.router)
-    app.include_router(suppressions.router)
-    return app
+    return register_routers(app)
 
 
 # uvicorn app.main:app 使用；测试通过 create_app(settings=...) 自行构建

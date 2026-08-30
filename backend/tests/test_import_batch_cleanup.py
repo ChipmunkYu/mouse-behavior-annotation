@@ -56,6 +56,11 @@ def upload(ctx, project_id, batch_id, role, name, content, headers):
     )
 
 
+def batch_path(ctx, batch_id: int, role: str) -> str | None:
+    with ctx.session_factory() as db:
+        return getattr(db.get(VideoImportBatch, batch_id), f"{role}_path")
+
+
 def cancel(ctx, project_id, batch_id, headers):
     return ctx.client.delete(
         f"/api/projects/{project_id}/video-import-batches/{batch_id}", headers=headers
@@ -117,9 +122,11 @@ def test_cancel_preflights_then_deletes_only_batch_files_and_row(ctx, login_head
         body = upload(ctx, project_id, first["id"], role, name, content, headers).json()
         root = (ctx.client.app.state.settings.videos_dir if role == "video"
                 else ctx.client.app.state.settings.detection_imports_dir)
-        paths.append(root / body[f"{role}_path"])
+        assert f"{role}_path" not in body
+        paths.append(root / batch_path(ctx, first["id"], role))
     other = upload(ctx, project_id, second["id"], "video", "other.mp4", b"keep", headers).json()
-    other_path = ctx.client.app.state.settings.videos_dir / other["video_path"]
+    assert "video_path" not in other
+    other_path = ctx.client.app.state.settings.videos_dir / batch_path(ctx, second["id"], "video")
     assert cancel(ctx, project_id, first["id"], headers).status_code == 204
     assert all(not path.exists() for path in paths)
     assert other_path.exists()
@@ -148,7 +155,8 @@ def failed_batch(ctx, project_id, headers):
         headers=headers,
     )
     assert result.status_code == 200 and result.json()["status"] == "failed"
-    return batch["id"], result.json()["video_id"], video["video_path"]
+    assert "video_path" not in video
+    return batch["id"], result.json()["video_id"], batch_path(ctx, batch["id"], "video")
 
 
 def test_failed_batch_removes_pristine_video_but_rejects_consumed_video(ctx, login_headers):
@@ -198,12 +206,14 @@ def test_failed_pristine_video_delete_is_atomic_against_user_change(
 def test_upload_slot_claim_closes_complete_and_explicit_cancel_wins(ctx, login_headers):
     headers, project_id = make_project(ctx, login_headers)
     batch = make_batch(ctx, project_id, headers)
-    first = upload(
+    upload(
         ctx, project_id, batch["id"], "tracks", "tracks.jsonl", tracks_jsonl(), headers
-    ).json()["tracks_path"]
-    second = upload(
+    )
+    first = batch_path(ctx, batch["id"], "tracks")
+    upload(
         ctx, project_id, batch["id"], "tracks", "tracks.jsonl", tracks_jsonl(), headers
-    ).json()["tracks_path"]
+    )
+    second = batch_path(ctx, batch["id"], "tracks")
     root = ctx.client.app.state.settings.detection_imports_dir
     assert first != second and not (root / first).exists() and (root / second).exists()
 
@@ -282,7 +292,8 @@ def test_post_database_file_failure_is_recorded(monkeypatch, ctx, login_headers)
     body = upload(
         ctx, project_id, batch["id"], "video", "clip.mp4", b"video", headers
     ).json()
-    path = ctx.client.app.state.settings.videos_dir / body["video_path"]
+    assert "video_path" not in body
+    path = ctx.client.app.state.settings.videos_dir / batch_path(ctx, batch["id"], "video")
     monkeypatch.setattr(
         batch_cleanup_module, "remove_checked", lambda *args, **kwargs: (False, "injected")
     )
@@ -298,6 +309,8 @@ def test_retention_cleanup_uses_24_hour_cutoff_dry_run_and_records_issue(ctx, lo
     headers, project_id = make_project(ctx, login_headers)
     safe = make_batch(ctx, project_id, headers)
     body = upload(ctx, project_id, safe["id"], "video", "clip.mp4", b"video", headers).json()
+    assert "video_path" not in body
+    safe_video_path = batch_path(ctx, safe["id"], "video")
     failed = make_batch(ctx, project_id, headers)
     unsafe = make_batch(ctx, project_id, headers)
     now = datetime.utcnow()
@@ -318,7 +331,7 @@ def test_retention_cleanup_uses_24_hour_cutoff_dry_run_and_records_issue(ctx, lo
         assert report["import_batches_deleted"] == 2
         assert db.get(VideoImportBatch, unsafe["id"]) is not None
         assert any(issue["kind"] == "import-batch-cleanup-skipped" for issue in report["issues"])
-    assert not (ctx.client.app.state.settings.videos_dir / body["video_path"]).exists()
+    assert not (ctx.client.app.state.settings.videos_dir / safe_video_path).exists()
 
 
 def test_retention_conservatively_skips_stale_batch_with_active_slot(ctx, login_headers):

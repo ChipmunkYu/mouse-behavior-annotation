@@ -2,8 +2,7 @@
 
 覆盖契约：
 - 仅聚合审核通过的标注与对应 ready 的 Clip；pending/rejected 隔离，失效残留排除。
-- Clip 非 ready（缺失/pending/failed）时 clip_path/thumbnail_path 为 null；
-  ready 时返回相对路径（与批次 4 产物命名一致）。
+- Clip 媒体状态通过 media_status 表达，文件路径不进入公开响应。
 - 分页默认 20 / 上限 100 / page≥1；排序 start_time + id 稳定分页。
 - 筛选：category_id / video_id / annotator_id / search（类别名或视频文件名）。
 - 跨项目隔离；不同视频片段聚合；ClipItem 字段完整性。
@@ -85,12 +84,12 @@ def _add_clip(ctx, project_id, annotation_id, status="ready", rev=None) -> None:
         annotation = db.get(Annotation, annotation_id)
         if rev is None:
             rev = db.get(Video, annotation.video_id).media_revision
-        clip = Clip(
-            project_id=project_id,
-            annotation_id=annotation_id,
-            source_revision=rev,
-            status=status,
+        clip = db.query(Clip).filter_by(
+            annotation_id=annotation_id, source_revision=rev
+        ).first() or Clip(
+            project_id=project_id, annotation_id=annotation_id, source_revision=rev,
         )
+        clip.status = status
         if status == "ready":
             clip.clip_path = f"clip_{annotation_id}_rev{rev}.mp4"
             clip.thumbnail_path = f"clip_{annotation_id}_rev{rev}.jpg"
@@ -191,7 +190,7 @@ def test_empty_library_zero_pages(ctx):
 # ---------- ready / 非 ready ----------
 
 
-def test_non_ready_clip_paths_are_null(ctx):
+def test_clip_media_status_without_public_paths(ctx):
     setup = ctx.make_project_with_video()
     headers, project, categories, video = (
         setup["headers"],
@@ -214,17 +213,15 @@ def test_non_ready_clip_paths_are_null(ctx):
     body = _library(ctx, project["id"], headers).json()
     items = {i["annotation_id"]: i for i in body["items"]}
     assert set(items) == {a_ready["id"], a_pending["id"], a_failed["id"], a_noclip["id"]}
-    with ctx.session_factory() as db:
-        revision = db.get(Video, video["id"]).media_revision
-    assert items[a_ready["id"]]["clip_path"] == f"clip_{a_ready['id']}_rev{revision}.mp4"
-    assert items[a_ready["id"]]["thumbnail_path"] == f"clip_{a_ready['id']}_rev{revision}.jpg"
-    for a in (a_pending, a_failed, a_noclip):
-        assert items[a["id"]]["clip_path"] is None
-        assert items[a["id"]]["thumbnail_path"] is None
+    assert items[a_ready["id"]]["media_status"] == "ready"
+    assert items[a_pending["id"]]["media_status"] == "pending"
+    assert items[a_failed["id"]]["media_status"] == "failed"
+    assert items[a_noclip["id"]]["media_status"] == "pending"
+    assert all("clip_path" not in item and "thumbnail_path" not in item for item in items.values())
 
 
-def test_ready_paths_match_media_generation(media_ctx):
-    """真实 media 流程：approve 后 Clip ready，库返回批次 4 产物的相对路径。"""
+def test_ready_media_status_matches_generation(media_ctx):
+    """真实 media 流程：approve 后 Clip ready，库仅返回资源键与状态。"""
     ctx = media_ctx
     headers = auth_headers(ctx.client)
     project = ctx.client.post("/api/projects", json={"name": "片段库媒体"}, headers=headers).json()
@@ -237,13 +234,15 @@ def test_ready_paths_match_media_generation(media_ctx):
         f"/api/projects/{project['id']}/videos",
         json={
             "filename": "src.mp4",
-            "storage_path": "src.mp4",
             "status": "uploaded",
             "duration": 30.0,
             "fps": 25.0,
         },
         headers=headers,
     ).json()
+    with ctx.session_factory() as db:
+        db.get(Video, video["id"]).storage_path = "src.mp4"
+        db.commit()
     anns = [
         _annotate(ctx, headers, project, video, categories[i]["id"], start_time=1.0 + i * 3.0)
         for i in range(2)
@@ -254,10 +253,9 @@ def test_ready_paths_match_media_generation(media_ctx):
     assert body["total"] == 2
     # items 按 start_time 排序，与 anns 创建顺序一致
     for item, ann in zip(body["items"], anns):
-        with ctx.session_factory() as db:
-            revision = db.get(Video, video["id"]).media_revision
-        assert item["clip_path"] == f"clip_{ann['id']}_rev{revision}.mp4"
-        assert item["thumbnail_path"] == f"clip_{ann['id']}_rev{revision}.jpg"
+        assert item["clip_id"]
+        assert item["media_status"] == "ready"
+        assert "clip_path" not in item and "thumbnail_path" not in item
 
 
 # ---------- 分页 / 排序 ----------
@@ -569,6 +567,8 @@ def test_clipitem_field_completeness(ctx):
     assert {
         k: v for k, v in item.items() if k != "created_at"
     } == {
+        "item_key": f"legacy:{ann['id']}",
+        "clip_id": item["clip_id"],
         "annotation_id": ann["id"],
         "video_id": video["id"],
         "video_filename": "session1.mp4",
@@ -579,8 +579,7 @@ def test_clipitem_field_completeness(ctx):
         "start_frame": 25,
         "end_frame": 75,
         "confidence": "certain",
-        "clip_path": item["clip_path"],
-        "thumbnail_path": item["thumbnail_path"],
+        "media_status": "ready",
         "annotator_name": "demo",
         "review_status": "approved",
         "category_group": categories[0]["group"],

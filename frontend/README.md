@@ -55,7 +55,7 @@
   - **类别计数 chips 筛选**（全部 + 各类别计数，颜色来自类别 API）+ **搜索框**（按文件名 / 类别名，服务端过滤，300ms 防抖，输入限长 128 与后端一致）+ **视频选择器**；分页默认 20 条/页（可切 50 / 100），筛选 / 搜索变化自动回到第 1 页，页码超出实际页数时自动回落。
   - **顶部共享预览区**：点击片段后按当前构建制品选择原生媒体或 legacy Blob 路径，跳转到片段 `start_time`，播放范围限制在 `[start_time, end_time]`（到点自动暂停并提示）；一次只播放一个，绝不批量预加载视频。切换片段会终止旧媒体世代，legacy 路径同时撤销旧 object URL。范围条高亮片段区间，点击 / 键盘（←/→）自由跳转。
   - **「跳转到标注」**回 `/projects/:pid/annotate/:vid?t=start`，标注工作台读取 `?t=` 自动定位播放头。
-  - 片段卡片：缩略图（`thumbnail_path` 非空时经 `/thumbnails/{name}` 以 Bearer 拉取 blob，失败 / 为空回退 SVG 占位，深色与透明背景均可读）、类别颜色、视频文件名、起止时间、时长、审核状态徽标、标注者、片段生成状态 chip（由 `clip_path` 推断：已生成 / 待生成）。
+  - 片段卡片：仅在 `clip_id` 存在且 `media_status=ready` 时经 `/api/projects/{pid}/clips/{clipId}/thumbnail` 以 Bearer 拉取缩略图；失败时回退 SVG 占位。卡片身份使用服务端不透明 `item_key`，生成状态完全由 `media_status` 驱动，不读取磁盘路径。
   - **轮询**：仅当当前页存在「待生成」片段时每 5s 静默刷新（不闪 loading），任务落定或离开页面 / 切换筛选即停止。
   - 空态（暂无片段 / 筛选无结果）、加载、错误态齐全；卡片为按钮（Enter / Space 选择预览），全部控件原生可聚焦。
 - **导出** `/projects/:projectId/export`（**批次 6**，owner / admin 可见）：
@@ -75,7 +75,7 @@
 - 四个视频入口（视频库预览、片段库、审核工作台、标注工作台）共用媒体能力层。原生路径先以 Bearer 获取 same-origin stream-ticket，再把严格校验的干净相对 URL `/api/videos/{videoId}/stream` 交给 `<video>`；legacy Blob 始终使用 `credentials: "omit"`，仅显式发送 Bearer。
 - 原生媒体由一个全局和四个页面 Vite 构建时开关控制；总开关与对应页面开关必须同时为严格小写字符串 `true` 才启用，未设置或其他值均为 `false`。每种开关组合都是独立 build artifact，不是运行时即时切换；全 legacy 制品用于回滚。
 - 媒体能力统一处理四入口的加载世代、旧请求清理、最多单次续票与状态恢复。显式注销、业务 401 自动登出和账号切换使用 logout 单飞/递归保护协调器；新登录会等待已有 logout 请求结束，避免旧清理响应覆盖新会话。
-- API 封装与类型集中在 `src/api/`（`client.ts` 统一 fetch + Bearer + 401 处理 + 友好错误补充，`types.ts` 与后端 Pydantic schema 对齐，含审核工作流字段、Review、Job / MediaStatus 类型与任务状态文案；批次 4/5/6 字段以后端最终实现为准，核对时仅在 `types.ts` 修正）。片段列表过滤与分页参数类型化为 `ClipListParams`，仅发送已声明的查询参数；导出（批次 6）新增 `ExportRequestInput` / `MissingClip` / `ExportStatus` 类型、`createExport` / `getExportStatus` / `fetchExportDownload`（Bearer blob + Content-Disposition 文件名解析，与视频流同一模式）。
+- API 封装与类型集中在 `src/api/`：后端提交 `backend/openapi.json`，`openapi-typescript` 生成 `generated/schema.d.ts`；`types.ts` 只保留生成类型别名和纯前端组合类型，关键请求函数直接绑定 generated operation。`client.ts` 继续统一 fetch + Bearer + 401 和友好错误处理。
 - 导出页面 `src/pages/ExportPage.tsx`：统计摘要 + 类别多选范围 + 独立四文件目录预览 + 任务轮询（仅导出中轮询，组件卸载即清理）与下载（blob object URL 延迟回收）。
 - 片段库页面 `src/pages/ClipsPage.tsx`：预览区接入共享媒体能力，缩略图仍经 `fetchClipThumbnailUrl`（Bearer blob，失败回退占位）；轮询仅在有「待生成」片段时进行，组件卸载即清理。
 - 媒体状态面板 `src/components/MediaStatusPanel.tsx`：完整面板（审核 / 标注工作台共用，`retryable` 控制是否可重试）与行内概要（视频库卡片，一次性拉取）；轮询仅在有未完成任务时进行，组件卸载即清理。
@@ -100,8 +100,13 @@ copy .env.example .env
 npm run dev
 
 # 生产构建
+npm run api:check
+npm run typecheck
 npm run build
 npm run preview
+
+# 后端契约变更后更新生成类型
+npm run api:generate
 
 # 单元测试
 npm test -- --run

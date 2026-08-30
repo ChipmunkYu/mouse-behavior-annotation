@@ -72,6 +72,8 @@ class Settings(BaseSettings):
 
     # ---- 播放代理（候选 profile；默认关闭，不改变现有生产行为） ----
     display_proxies_enabled: bool = False
+    # 开启代理后仍允许源文件回退；关闭时进入严格代理模式。
+    display_proxy_allow_source_fallback: bool = True
     display_proxy_timeout_seconds: int = Field(default=60 * 60, ge=1)
     display_proxy_max_attempts: int = Field(default=3, ge=1)
     display_proxy_synchronous: bool = False

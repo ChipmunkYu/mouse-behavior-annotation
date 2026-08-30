@@ -19,6 +19,7 @@ from app.media_auth import (
     encode_media_jwt,
     raw_cookie_values,
 )
+from app.models import Video
 
 
 def _enable(ctx) -> Settings:
@@ -34,8 +35,11 @@ def _video(ctx, tmp_path, headers, content=b"0123456789abcdef"):
     path.write_bytes(content)
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "ticket.mp4", "storage_path": str(path)}, headers=headers,
+        json={"filename": "ticket.mp4"}, headers=headers,
     ).json()
+    with ctx.session_factory() as db:
+        db.get(Video, video["id"]).storage_path = str(path)
+        db.commit()
     return project, video
 
 

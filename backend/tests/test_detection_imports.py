@@ -27,6 +27,10 @@ from fastapi.testclient import TestClient
 # 测试数据工厂
 # ---------------------------------------------------------------------------
 
+def _batch_path(ctx, batch_id: int, field: str) -> str | None:
+    with ctx.session_factory() as db:
+        return getattr(db.get(models.VideoImportBatch, batch_id), field)
+
 SAMPLE_METADATA = {
     "schema_version": "1.0",
     "video_id": "test-mouse-video",
@@ -340,10 +344,12 @@ def test_upload_video_to_batch(ctx, login_headers):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["video_upload_state"] == "uploaded"
-    assert body["video_path"] is not None
+    assert "video_path" not in body
+    video_path = _batch_path(ctx, batch["id"], "video_path")
+    assert video_path is not None
     assert body["video_filename"] == "test.mp4"
     videos_dir = ctx.client.app.state.settings.videos_dir
-    assert (videos_dir / body["video_path"]).is_file()
+    assert (videos_dir / video_path).is_file()
 
 
 def test_upload_tracks_to_batch(ctx, login_headers):
@@ -354,9 +360,11 @@ def test_upload_tracks_to_batch(ctx, login_headers):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["tracks_upload_state"] == "uploaded"
-    assert body["tracks_path"] is not None
+    assert "tracks_path" not in body
+    tracks_path = _batch_path(ctx, batch["id"], "tracks_path")
+    assert tracks_path is not None
     detection_dir = ctx.client.app.state.settings.detection_imports_dir
-    assert (detection_dir / body["tracks_path"]).is_file()
+    assert (detection_dir / tracks_path).is_file()
 
 
 def test_upload_metadata_to_batch(ctx, login_headers):
@@ -367,9 +375,11 @@ def test_upload_metadata_to_batch(ctx, login_headers):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["metadata_upload_state"] == "uploaded"
-    assert body["metadata_path"] is not None
+    assert "metadata_path" not in body
+    metadata_path = _batch_path(ctx, batch["id"], "metadata_path")
+    assert metadata_path is not None
     detection_dir = ctx.client.app.state.settings.detection_imports_dir
-    assert (detection_dir / body["metadata_path"]).is_file()
+    assert (detection_dir / metadata_path).is_file()
 
 
 def test_upload_independent_retry(ctx, login_headers):
@@ -377,10 +387,10 @@ def test_upload_independent_retry(ctx, login_headers):
     batch = _create_batch(ctx.client, pid, headers)
     r1 = _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
     assert r1.status_code == 200
-    p1 = r1.json()["tracks_path"]
+    p1 = _batch_path(ctx, batch["id"], "tracks_path")
     r2 = _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
     assert r2.status_code == 200
-    p2 = r2.json()["tracks_path"]
+    p2 = _batch_path(ctx, batch["id"], "tracks_path")
     assert p1 != p2
 
 
@@ -1269,7 +1279,8 @@ def test_replace_detection_import_new_revision(ctx, login_headers):
         headers=headers,
     )
     assert complete.status_code == 200, complete.text
-    vid = complete.json()["video_id"]
+    initial_completion = complete.json()
+    vid = initial_completion["video_id"]
 
     from app import models
     with ctx.session_factory() as db:
@@ -1328,6 +1339,13 @@ def test_replace_detection_import_new_revision(ctx, login_headers):
             models.RawDetection.detection_import_id == imports[1].id
         ).count()
         assert new_raw == 4
+
+    repeated = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete",
+        headers=headers,
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json() == initial_completion
 
 
 @pytest.mark.parametrize("invalid_id", [-1, TRACK_ID_UPPER_BOUND])

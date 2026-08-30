@@ -5,6 +5,12 @@ from app.models import ProjectMembership, Video
 from app.routers import videos as videos_module
 
 
+def _set_storage_path(ctx, video_id: int, path: str) -> None:
+    with ctx.session_factory() as db:
+        db.get(Video, video_id).storage_path = path
+        db.commit()
+
+
 def test_create_and_list_video(ctx, login_headers):
     headers = login_headers()
     project = ctx.client.post(
@@ -105,9 +111,10 @@ def test_stream_serves_file(ctx, tmp_path, login_headers):
     video_file.write_bytes(b"FAKE-VIDEO-BYTES")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "clip.mp4", "storage_path": str(video_file)},
+        json={"filename": "clip.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], str(video_file))
 
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=headers)
     assert resp.status_code == 200
@@ -126,9 +133,10 @@ def test_stream_relative_path_within_videos_dir(ctx, tmp_path, login_headers):
     video_file.write_bytes(b"REL-BYTES")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "relclip.mp4", "storage_path": "relclip.mp4"},
+        json={"filename": "relclip.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], "relclip.mp4")
 
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=headers)
     assert resp.status_code == 200
@@ -146,9 +154,10 @@ def test_stream_outside_videos_dir_rejected(ctx, tmp_path, login_headers):
     sensitive.write_text("secret")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "evil.mp4", "storage_path": str(sensitive)},
+        json={"filename": "evil.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], str(sensitive))
 
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=headers)
     assert resp.status_code == 404
@@ -165,9 +174,10 @@ def test_stream_traversal_rejected(ctx, tmp_path, login_headers):
     sensitive.write_text("secret")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "evil.mp4", "storage_path": "../sensitive2.txt"},
+        json={"filename": "evil.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], "../sensitive2.txt")
 
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=headers)
     assert resp.status_code == 404
@@ -180,9 +190,10 @@ def test_stream_storage_path_missing_on_disk(ctx, login_headers):
     ).json()
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "ghost.mp4", "storage_path": r"C:\does\not\exist\ghost.mp4"},
+        json={"filename": "ghost.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], r"C:\does\not\exist\ghost.mp4")
     resp = ctx.client.get(f"/api/videos/{video['id']}/stream", headers=headers)
     assert resp.status_code == 404
 
@@ -215,9 +226,10 @@ def test_stream_active_member_allowed(ctx, tmp_path, login_headers):
     video_file.write_bytes(b"MEMBER-BYTES")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "member.mp4", "storage_path": str(video_file)},
+        json={"filename": "member.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], str(video_file))
 
     alice_id = ctx.create_user("alice")
     alice_headers = login_headers(username="alice", password="pw123")
@@ -239,9 +251,10 @@ def test_stream_inactive_membership_rejected(ctx, tmp_path, login_headers):
     video_file.write_bytes(b"SECRET-BYTES")
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
-        json={"filename": "private2.mp4", "storage_path": str(video_file)},
+        json={"filename": "private2.mp4"},
         headers=headers,
     ).json()
+    _set_storage_path(ctx, video["id"], str(video_file))
 
     alice_id = ctx.create_user("alice")
     alice_headers = login_headers(username="alice", password="pw123")

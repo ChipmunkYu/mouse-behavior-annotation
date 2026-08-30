@@ -36,6 +36,7 @@ from ..video_delete_service import VideoDeleteServiceError
 from ..video_operation_gate import VideoOperationBusyError
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_dependency import require_video_operation_gate
+from ..video_playback import public_video, resolve_video_playback
 from ..schemas import (
     AssignmentBatchRequest,
     AssignmentStatsItem,
@@ -198,12 +199,13 @@ def _remove_file(path: Path) -> None:
 @router.get("/api/projects/{project_id}/videos", response_model=list[VideoOut])
 def list_videos(
     project_id: int,
+    request: Request,
     view: Literal["mine", "unassigned", "all"] = "all",
     workflow_status: str | None = None,
     assignee_membership_id: int | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> list[Video]:
+) -> list[dict]:
     query = db.query(Video).filter(Video.project_id == project_id)
     if view == "mine":
         query = query.filter(Video.assignee_membership_id == access[1].id)
@@ -216,16 +218,18 @@ def list_videos(
         query = query.filter(Video.workflow_status == workflow_status)
     if assignee_membership_id is not None:
         query = query.filter(Video.assignee_membership_id == assignee_membership_id)
-    return query.order_by(Video.created_at.desc()).all()
+    return [public_video(video, request.app.state.settings)
+            for video in query.order_by(Video.created_at.desc()).all()]
 
 
 @router.post("/api/projects/{project_id}/videos", response_model=VideoOut, status_code=201)
 def create_video(
     project_id: int,
     body: VideoCreate,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> Video:
+) -> dict:
     filename = body.filename.strip()
     if not filename:
         raise HTTPException(status_code=400, detail="filename must not be empty")
@@ -241,7 +245,6 @@ def create_video(
         width=body.width,
         height=body.height,
         status=body.status or "metadata",
-        storage_path=body.storage_path,
         uploaded_by=access[1].user_id,
         assignee_membership_id=body.assignee_membership_id,
     )
@@ -251,7 +254,7 @@ def create_video(
     except IntegrityError as exc:
         _raise_if_assignee_conflict(db, exc)
     db.refresh(video)
-    return video
+    return public_video(video, request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/upload", response_model=VideoOut, status_code=201)
@@ -262,11 +265,11 @@ async def upload_video(
     assignee_membership_id: int | None = Form(default=None),
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
-) -> Video:
+) -> dict:
     """真实视频流式上传：multipart 字段 `file`，分块写入临时文件后原子 rename。
 
     - 应用层不设文件大小上限；每块写入前校验 videos_dir 可用空间（保留 UPLOAD_DISK_RESERVE_BYTES）。
-    - 磁盘目标为 UUID 名（相对 storage_path），临时 `.part` 成功后原子 rename；
+    - 磁盘目标使用内部 UUID 名，临时 `.part` 成功后原子 rename；
       失败/取消/DB 提交失败均清理临时与最终孤儿文件。
     - 扩展名（大小写不敏感）是唯一校验依据；Content-Type 仅作辅助。
     """
@@ -354,7 +357,7 @@ async def upload_video(
             _remove_file(final_path)
             raise HTTPException(status_code=500, detail=ERR_DB_SAVE)
         db.refresh(video)
-        return video
+        return public_video(video, settings)
     except _InsufficientDiskSpace:
         raise HTTPException(status_code=507, detail=ERR_DISK_SPACE)
     except _EmptyUpload:
@@ -378,6 +381,7 @@ async def upload_video(
 def claim_videos(
     project_id: int,
     body: VideoClaimsRequest,
+    request: Request,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> VideoClaimsResponse:
@@ -398,14 +402,15 @@ def claim_videos(
     by_id = {video.id: video for video in rows}
     return VideoClaimsResponse(
         claimed_count=len(video_ids),
-        videos=[by_id[video_id] for video_id in video_ids],
+        videos=[public_video(by_id[video_id], request.app.state.settings)
+                for video_id in video_ids],
     )
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/claim", response_model=VideoOut,
              dependencies=[Depends(require_video_operation_gate)])
-def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
-                db: Session = Depends(get_db)) -> Video:
+def claim_video(project_id: int, video_id: int, request: Request,
+                access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
     try:
         changed = _claim_videos_cas(db, project_id, [video_id], access[1].id)
     except IntegrityError as exc:
@@ -416,13 +421,13 @@ def claim_video(project_id: int, video_id: int, access: tuple = Depends(project_
             raise HTTPException(status_code=404, detail="Video not found in this project")
         raise HTTPException(status_code=409, detail="Video is no longer claimable")
     db.commit()
-    return db.get(Video, video_id)
+    return public_video(db.get(Video, video_id), request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/release", response_model=VideoOut,
              dependencies=[Depends(require_video_operation_gate)])
-def release_video(project_id: int, video_id: int, access: tuple = Depends(project_access),
-                  db: Session = Depends(get_db)) -> Video:
+def release_video(project_id: int, video_id: int, request: Request,
+                  access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
     changed = db.query(Video).filter(
         Video.id == video_id, Video.project_id == project_id,
         Video.assignee_membership_id == access[1].id, Video.workflow_status == "draft",
@@ -433,13 +438,13 @@ def release_video(project_id: int, video_id: int, access: tuple = Depends(projec
             raise HTTPException(status_code=404, detail="Video not found in this project")
         raise HTTPException(status_code=409, detail="Only the current assignee may release a draft video")
     db.commit()
-    return db.get(Video, video_id)
+    return public_video(db.get(Video, video_id), request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/assignments", response_model=list[VideoOut],
              dependencies=[Depends(_assignment_operation_gate)])
-def batch_assign(project_id: int, body: AssignmentBatchRequest,
-                 access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[Video]:
+def batch_assign(project_id: int, body: AssignmentBatchRequest, request: Request,
+                 access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> list[dict]:
     require_manager(access[1])
     _validate_assignee(db, project_id, body.assignee_membership_id)
     ids = list(dict.fromkeys(body.video_ids))
@@ -462,7 +467,8 @@ def batch_assign(project_id: int, body: AssignmentBatchRequest,
             detail="Assignment conflict: every video must still belong to this project and be draft/rejected",
         )
     db.commit()
-    return db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()
+    return [public_video(video, request.app.state.settings) for video in
+            db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()]
 
 
 @router.get("/api/projects/{project_id}/assignment-stats", response_model=AssignmentStatsOut)
@@ -524,26 +530,10 @@ def _authorized_video_path(
     if membership.status != "active":
         raise HTTPException(status_code=403, detail=ERR_MEMBERSHIP_INACTIVE)
 
-    if not video.storage_path:
-        raise HTTPException(status_code=404, detail="Video file is not available (no storage_path)")
-
-    # 安全边界：只允许提供配置视频目录内的文件，防止任意读取项目外敏感文件。
-    # storage_path 支持“绝对路径”或“相对 data/videos/ 的相对路径”，二者都必须解析到 videos_dir 内。
-    videos_dir = request.app.state.settings.videos_dir.resolve()
-    raw = Path(video.storage_path)
-    path = raw.resolve() if raw.is_absolute() else (videos_dir / raw).resolve()
-
-    if not path.is_relative_to(videos_dir):
-        raise HTTPException(status_code=404, detail="Video file is outside the allowed videos directory")
-
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
-    try:
-        if path.stat().st_size <= 0:
-            raise HTTPException(status_code=404, detail="Video file is empty")
-    except OSError:
-        raise HTTPException(status_code=404, detail="Video file not found on disk") from None
-    return video, path
+    playback = resolve_video_playback(video, request.app.state.settings)
+    if playback.status != "ready" or playback.path is None:
+        raise HTTPException(status_code=404, detail="Video playback is not ready")
+    return video, playback.path
 
 
 def _set_media_cookie(response: Response, name: str, value: str, *, path: str, max_age: int) -> None:

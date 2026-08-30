@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "api:generate": "openapi-typescript ../backend/openapi.json -o src/api/generated/schema.d.ts",
+    "api:check": "openapi-typescript ../backend/openapi.json -o src/api/generated/schema.d.ts --check",
+    "typecheck": "tsc -b --pretty false",
     "preview": "vite preview",
     "test": "vitest"
   },
@@ -20,6 +23,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^29.1.1",
+    "openapi-typescript": "7.13.0",
     "typescript": "~5.6.2",
     "vite": "^5.4.11",
     "vitest": "3.2.7"

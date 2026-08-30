@@ -104,7 +104,7 @@ def normalize_category_scheme(
         try:
             definitions, derived_min, derived_max = canonicalize_role_definitions(
                 request_category.participant_mode,
-                request_category.role_definitions,
+                [definition.model_dump() for definition in request_category.role_definitions],
                 existing_definitions=existing_definitions,
             )
         except ParticipantRoleError as exc:

@@ -1,0 +1,6979 @@
+{
+  "components": {
+    "schemas": {
+      "AnnotationCreate": {
+        "properties": {
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "confidence": {
+            "default": "certain",
+            "title": "Confidence",
+            "type": "string"
+          },
+          "crop_region": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crop Region"
+          },
+          "detection_import_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Import Revision"
+          },
+          "end_frame": {
+            "minimum": 0.0,
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "identity_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity Revision"
+          },
+          "mouse_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Ids"
+          },
+          "participant_roles": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Participant Roles"
+          },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
+          "start_frame": {
+            "minimum": 0.0,
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          }
+        },
+        "required": [
+          "category_id",
+          "start_frame",
+          "end_frame"
+        ],
+        "title": "AnnotationCreate",
+        "type": "object"
+      },
+      "AnnotationOut": {
+        "properties": {
+          "annotator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotator"
+          },
+          "annotator_id": {
+            "title": "Annotator Id",
+            "type": "integer"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Name"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "crop_region": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crop Region"
+          },
+          "detection_import_revision": {
+            "default": 0,
+            "title": "Detection Import Revision",
+            "type": "integer"
+          },
+          "end_frame": {
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "identity_revision": {
+            "default": 0,
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "mouse_id_status": {
+            "default": "needs_mouse_ids",
+            "enum": [
+              "valid",
+              "needs_mouse_ids"
+            ],
+            "title": "Mouse Id Status",
+            "type": "string"
+          },
+          "mouse_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Mouse Ids",
+            "type": "array"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Participant Roles",
+            "type": "object"
+          },
+          "participant_status": {
+            "default": "valid",
+            "enum": [
+              "valid",
+              "needs_participants"
+            ],
+            "title": "Participant Status",
+            "type": "string"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "start_frame": {
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "number"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "video_id",
+          "annotator_id",
+          "category_id",
+          "start_time",
+          "end_time",
+          "start_frame",
+          "end_frame",
+          "confidence",
+          "review_status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AnnotationOut",
+        "type": "object"
+      },
+      "AnnotationUpdate": {
+        "properties": {
+          "category_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Id"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "crop_region": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crop Region"
+          },
+          "detection_import_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Import Revision"
+          },
+          "end_frame": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Frame"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "identity_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity Revision"
+          },
+          "mouse_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Ids"
+          },
+          "participant_roles": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Participant Roles"
+          },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
+          "start_frame": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Frame"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          }
+        },
+        "title": "AnnotationUpdate",
+        "type": "object"
+      },
+      "AssigneeDirectoryItem": {
+        "properties": {
+          "membership_id": {
+            "title": "Membership Id",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "membership_id",
+          "username"
+        ],
+        "title": "AssigneeDirectoryItem",
+        "type": "object"
+      },
+      "AssigneeOut": {
+        "properties": {
+          "can_review": {
+            "title": "Can Review",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "user_id",
+          "username",
+          "role",
+          "can_review",
+          "status",
+          "created_at"
+        ],
+        "title": "AssigneeOut",
+        "type": "object"
+      },
+      "AssignmentBatchRequest": {
+        "properties": {
+          "assignee_membership_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee Membership Id"
+          },
+          "video_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Video Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "video_ids"
+        ],
+        "title": "AssignmentBatchRequest",
+        "type": "object"
+      },
+      "AssignmentStatsItem": {
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "assignee_membership_id": {
+            "title": "Assignee Membership Id",
+            "type": "integer"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "submitted": {
+            "title": "Submitted",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignee_membership_id",
+          "username",
+          "total",
+          "draft",
+          "submitted",
+          "approved",
+          "rejected"
+        ],
+        "title": "AssignmentStatsItem",
+        "type": "object"
+      },
+      "AssignmentStatsOut": {
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "by_assignee": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentStatsItem"
+            },
+            "title": "By Assignee",
+            "type": "array"
+          },
+          "claimable": {
+            "title": "Claimable",
+            "type": "integer"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "submitted": {
+            "title": "Submitted",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "unassigned": {
+            "title": "Unassigned",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "draft",
+          "submitted",
+          "approved",
+          "rejected",
+          "unassigned",
+          "claimable",
+          "by_assignee"
+        ],
+        "title": "AssignmentStatsOut",
+        "type": "object"
+      },
+      "BatchStatusOut": {
+        "description": "批次状态（含文件上传状态与已创建视频 ID）。",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_video_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created Video Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "metadata_upload_state": {
+            "title": "Metadata Upload State",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tracks_upload_state": {
+            "title": "Tracks Upload State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "validation_errors": {
+            "title": "Validation Errors"
+          },
+          "video_filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Filename"
+          },
+          "video_upload_state": {
+            "title": "Video Upload State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "status",
+          "video_upload_state",
+          "tracks_upload_state",
+          "metadata_upload_state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "BatchStatusOut",
+        "type": "object"
+      },
+      "Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post": {
+        "properties": {
+          "metadata_file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "Metadata File",
+            "type": "string"
+          },
+          "tracks_file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "Tracks File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tracks_file",
+          "metadata_file"
+        ],
+        "title": "Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post",
+        "type": "object"
+      },
+      "Body_upload_batch_file_api_projects__project_id__video_import_batches__batch_id__files__role__put": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_batch_file_api_projects__project_id__video_import_batches__batch_id__files__role__put",
+        "type": "object"
+      },
+      "Body_upload_video_api_projects__project_id__videos_upload_post": {
+        "properties": {
+          "assignee_membership_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee Membership Id"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_video_api_projects__project_id__videos_upload_post",
+        "type": "object"
+      },
+      "CategoryOut": {
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "group": {
+            "title": "Group",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "mouse_count_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Count Max"
+          },
+          "mouse_count_min": {
+            "default": 1,
+            "title": "Mouse Count Min",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "participant_mode": {
+            "default": "unordered",
+            "enum": [
+              "unordered",
+              "role_based"
+            ],
+            "title": "Participant Mode",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "role_definitions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RoleDefinitionOut"
+            },
+            "title": "Role Definitions",
+            "type": "array"
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "name",
+          "group",
+          "sort_order",
+          "is_active"
+        ],
+        "title": "CategoryOut",
+        "type": "object"
+      },
+      "CategorySchemeAuditOut": {
+        "properties": {
+          "action": {
+            "enum": [
+              "replace",
+              "lock"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "integer"
+          },
+          "after_json": {
+            "additionalProperties": true,
+            "title": "After Json",
+            "type": "object"
+          },
+          "before_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Json"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "scheme_hash": {
+            "title": "Scheme Hash",
+            "type": "string"
+          },
+          "scheme_version": {
+            "title": "Scheme Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "actor_id",
+          "action",
+          "scheme_version",
+          "after_json",
+          "scheme_hash",
+          "created_at"
+        ],
+        "title": "CategorySchemeAuditOut",
+        "type": "object"
+      },
+      "CategorySchemeCategoryIn": {
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "group": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Group",
+            "type": "string"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "mouse_count_max": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Count Max"
+          },
+          "mouse_count_min": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Count Min"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "participant_mode": {
+            "default": "unordered",
+            "enum": [
+              "unordered",
+              "role_based"
+            ],
+            "title": "Participant Mode",
+            "type": "string"
+          },
+          "role_definitions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RoleDefinitionIn"
+            },
+            "title": "Role Definitions",
+            "type": "array"
+          },
+          "sort_order": {
+            "minimum": 0.0,
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "group",
+          "sort_order"
+        ],
+        "title": "CategorySchemeCategoryIn",
+        "type": "object"
+      },
+      "CategorySchemeLock": {
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "CategorySchemeLock",
+        "type": "object"
+      },
+      "CategorySchemeOut": {
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "category_scheme_locked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Scheme Locked At"
+          },
+          "category_scheme_locked_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Scheme Locked By"
+          },
+          "category_scheme_version": {
+            "title": "Category Scheme Version",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_id",
+          "category_scheme_version",
+          "categories"
+        ],
+        "title": "CategorySchemeOut",
+        "type": "object"
+      },
+      "CategorySchemePut": {
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CategorySchemeCategoryIn"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version",
+          "categories"
+        ],
+        "title": "CategorySchemePut",
+        "type": "object"
+      },
+      "ClipCategoryCount": {
+        "description": "分类筛选 chip：类别 + 审核通过片段计数。",
+        "properties": {
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category_id",
+          "category_name",
+          "count"
+        ],
+        "title": "ClipCategoryCount",
+        "type": "object"
+      },
+      "ClipItem": {
+        "description": "库中的一条审核通过标注及其不透明媒体资源键。",
+        "properties": {
+          "annotation_id": {
+            "title": "Annotation Id",
+            "type": "integer"
+          },
+          "annotator_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotator Name"
+          },
+          "category_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Group"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "category_participant_mode": {
+            "default": "unordered",
+            "enum": [
+              "unordered",
+              "role_based"
+            ],
+            "title": "Category Participant Mode",
+            "type": "string"
+          },
+          "clip_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clip Id"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "end_frame": {
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "number"
+          },
+          "item_key": {
+            "title": "Item Key",
+            "type": "string"
+          },
+          "media_status": {
+            "enum": [
+              "pending",
+              "processing",
+              "ready",
+              "failed",
+              "stale"
+            ],
+            "title": "Media Status",
+            "type": "string"
+          },
+          "mouse_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Mouse Ids",
+            "type": "array"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Participant Roles",
+            "type": "object"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "role_definitions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RoleDefinitionOut"
+            },
+            "title": "Role Definitions",
+            "type": "array"
+          },
+          "start_frame": {
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "number"
+          },
+          "video_filename": {
+            "title": "Video Filename",
+            "type": "string"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "item_key",
+          "annotation_id",
+          "video_id",
+          "video_filename",
+          "category_id",
+          "category_name",
+          "start_time",
+          "end_time",
+          "start_frame",
+          "end_frame",
+          "confidence",
+          "media_status",
+          "review_status",
+          "created_at"
+        ],
+        "title": "ClipItem",
+        "type": "object"
+      },
+      "ClipPageOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ClipItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pages": {
+            "title": "Pages",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "pages"
+        ],
+        "title": "ClipPageOut",
+        "type": "object"
+      },
+      "DetectionImportCurrentOut": {
+        "description": "当前活动 DetectionImport 摘要。",
+        "properties": {
+          "detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Count"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "frame_range": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame Range"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tracker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tracker"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "schema_version",
+          "status"
+        ],
+        "title": "DetectionImportCurrentOut",
+        "type": "object"
+      },
+      "DetectionImportReplacementConfirmedOut": {
+        "description": "检测替换完成摘要；标注状态必须通过标注列表重新获取。",
+        "properties": {
+          "affected_annotations_count": {
+            "title": "Affected Annotations Count",
+            "type": "integer"
+          },
+          "annotations_must_be_refetched": {
+            "const": true,
+            "title": "Annotations Must Be Refetched",
+            "type": "boolean"
+          },
+          "detection_count": {
+            "title": "Detection Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "preview": {
+            "const": false,
+            "default": false,
+            "title": "Preview",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "track_count": {
+            "title": "Track Count",
+            "type": "integer"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "video_id",
+          "revision",
+          "detection_count",
+          "track_count",
+          "status",
+          "affected_annotations_count",
+          "annotations_must_be_refetched",
+          "message"
+        ],
+        "title": "DetectionImportReplacementConfirmedOut",
+        "type": "object"
+      },
+      "DetectionImportReplacementPreviewOut": {
+        "description": "检测替换确认前的结构化影响预览，不预测 role-based 最终状态。",
+        "properties": {
+          "affected_annotations_count": {
+            "title": "Affected Annotations Count",
+            "type": "integer"
+          },
+          "current_revision": {
+            "title": "Current Revision",
+            "type": "integer"
+          },
+          "detection_count": {
+            "title": "Detection Count",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "new_revision": {
+            "title": "New Revision",
+            "type": "integer"
+          },
+          "preview": {
+            "const": true,
+            "title": "Preview",
+            "type": "boolean"
+          },
+          "role_based_revalidation_count": {
+            "title": "Role Based Revalidation Count",
+            "type": "integer"
+          },
+          "unique_track_count": {
+            "title": "Unique Track Count",
+            "type": "integer"
+          },
+          "unordered_force_reselection_count": {
+            "title": "Unordered Force Reselection Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "preview",
+          "message",
+          "current_revision",
+          "new_revision",
+          "affected_annotations_count",
+          "unordered_force_reselection_count",
+          "role_based_revalidation_count",
+          "detection_count",
+          "unique_track_count"
+        ],
+        "title": "DetectionImportReplacementPreviewOut",
+        "type": "object"
+      },
+      "ExportRequest": {
+        "description": "导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。",
+        "properties": {
+          "category_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Ids"
+          }
+        },
+        "title": "ExportRequest",
+        "type": "object"
+      },
+      "ExportStatusOut": {
+        "description": "导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。",
+        "properties": {
+          "exportable_count": {
+            "title": "Exportable Count",
+            "type": "integer"
+          },
+          "latest_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing_clips": {
+            "items": {
+              "$ref": "#/components/schemas/MissingClipOut"
+            },
+            "title": "Missing Clips",
+            "type": "array"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "ready_count": {
+            "title": "Ready Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "exportable_count",
+          "ready_count",
+          "missing_count",
+          "missing_clips"
+        ],
+        "title": "ExportStatusOut",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IdentityEditCheckRequest": {
+        "properties": {
+          "base_detection_import_revision": {
+            "minimum": 1.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          },
+          "frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame"
+          },
+          "operation": {
+            "enum": [
+              "split",
+              "merge"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "track_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Track Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operation",
+          "track_ids",
+          "base_identity_revision",
+          "base_detection_import_revision"
+        ],
+        "title": "IdentityEditCheckRequest",
+        "type": "object"
+      },
+      "IdentityEditCommitRequest": {
+        "properties": {
+          "base_detection_import_revision": {
+            "minimum": 1.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          },
+          "frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame"
+          },
+          "operation": {
+            "enum": [
+              "split",
+              "merge"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "track_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Track Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operation",
+          "track_ids",
+          "base_identity_revision",
+          "base_detection_import_revision"
+        ],
+        "title": "IdentityEditCommitRequest",
+        "type": "object"
+      },
+      "IdentityEditRevertRequest": {
+        "properties": {
+          "base_detection_import_revision": {
+            "minimum": 1.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_identity_revision",
+          "base_detection_import_revision"
+        ],
+        "title": "IdentityEditRevertRequest",
+        "type": "object"
+      },
+      "InviteOut": {
+        "properties": {
+          "invite_code": {
+            "title": "Invite Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_code"
+        ],
+        "title": "InviteOut",
+        "type": "object"
+      },
+      "JobOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "const": "processing_failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "job_type": {
+            "enum": [
+              "media",
+              "export",
+              "cleanup",
+              "display_proxy"
+            ],
+            "title": "Job Type",
+            "type": "string"
+          },
+          "progress": {
+            "title": "Progress",
+            "type": "integer"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "job_type",
+          "status",
+          "progress",
+          "created_at"
+        ],
+        "title": "JobOut",
+        "type": "object"
+      },
+      "JoinProjectRequest": {
+        "properties": {
+          "invite_code": {
+            "maxLength": 64,
+            "minLength": 20,
+            "title": "Invite Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_code"
+        ],
+        "title": "JoinProjectRequest",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "token_type": {
+            "default": "bearer",
+            "title": "Token Type",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "access_token",
+          "user"
+        ],
+        "title": "LoginResponse",
+        "type": "object"
+      },
+      "MediaStatusOut": {
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "latest_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "processing": {
+            "title": "Processing",
+            "type": "integer"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "integer"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          },
+          "workflow_status": {
+            "title": "Workflow Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "video_id",
+          "revision",
+          "workflow_status",
+          "total",
+          "ready",
+          "processing",
+          "failed",
+          "pending"
+        ],
+        "title": "MediaStatusOut",
+        "type": "object"
+      },
+      "MembershipOut": {
+        "properties": {
+          "can_review": {
+            "title": "Can Review",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "user_id",
+          "username",
+          "role",
+          "can_review",
+          "status",
+          "created_at"
+        ],
+        "title": "MembershipOut",
+        "type": "object"
+      },
+      "MembershipUpdate": {
+        "properties": {
+          "can_review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Review"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "admin",
+                  "member"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "title": "MembershipUpdate",
+        "type": "object"
+      },
+      "MissingClipOut": {
+        "description": "状态接口中缺失（未 ready）片段的标注信息。",
+        "properties": {
+          "annotation_id": {
+            "title": "Annotation Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "video_filename": {
+            "title": "Video Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "annotation_id",
+          "category_name",
+          "video_filename"
+        ],
+        "title": "MissingClipOut",
+        "type": "object"
+      },
+      "ProjectCreate": {
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CategorySchemeCategoryIn"
+            },
+            "minItems": 1,
+            "title": "Categories",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "categories"
+        ],
+        "title": "ProjectCreate",
+        "type": "object"
+      },
+      "ProjectOut": {
+        "properties": {
+          "can_review": {
+            "title": "Can Review",
+            "type": "boolean"
+          },
+          "category_scheme_locked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Scheme Locked At"
+          },
+          "category_scheme_locked_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Scheme Locked By"
+          },
+          "category_scheme_version": {
+            "default": 0,
+            "title": "Category Scheme Version",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "membership_id": {
+            "title": "Membership Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "created_at",
+          "role",
+          "membership_id",
+          "can_review"
+        ],
+        "title": "ProjectOut",
+        "type": "object"
+      },
+      "ReviewCreate": {
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "result": {
+            "enum": [
+              "approved",
+              "rejected"
+            ],
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "ReviewCreate",
+        "type": "object"
+      },
+      "ReviewOut": {
+        "properties": {
+          "annotation_revision": {
+            "title": "Annotation Revision",
+            "type": "integer"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "detection_import_revision": {
+            "default": 0,
+            "title": "Detection Import Revision",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "identity_revision": {
+            "default": 0,
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "result": {
+            "enum": [
+              "approved",
+              "rejected"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "reviewer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer"
+          },
+          "reviewer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer Id"
+          },
+          "submission_annotations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SubmissionAnnotationSnapshotOut"
+            },
+            "title": "Submission Annotations",
+            "type": "array"
+          },
+          "submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submission Id"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "video_id",
+          "result",
+          "annotation_revision",
+          "created_at"
+        ],
+        "title": "ReviewOut",
+        "type": "object"
+      },
+      "RoleDefinitionIn": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "max_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Count"
+          },
+          "min_count": {
+            "title": "Min Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role_sort_order": {
+            "title": "Role Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "min_count",
+          "role_sort_order"
+        ],
+        "title": "RoleDefinitionIn",
+        "type": "object"
+      },
+      "RoleDefinitionOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "max_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Count"
+          },
+          "min_count": {
+            "title": "Min Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role_sort_order": {
+            "title": "Role Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "min_count",
+          "role_sort_order"
+        ],
+        "title": "RoleDefinitionOut",
+        "type": "object"
+      },
+      "StreamTicketResponse": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "expires_at"
+        ],
+        "title": "StreamTicketResponse",
+        "type": "object"
+      },
+      "SubmissionAnnotationSnapshotOut": {
+        "properties": {
+          "category_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Group"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "category_participant_mode": {
+            "default": "unordered",
+            "enum": [
+              "unordered",
+              "role_based"
+            ],
+            "title": "Category Participant Mode",
+            "type": "string"
+          },
+          "end_frame": {
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mouse_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Mouse Ids",
+            "type": "array"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Participant Roles",
+            "type": "object"
+          },
+          "role_definitions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RoleDefinitionOut"
+            },
+            "title": "Role Definitions",
+            "type": "array"
+          },
+          "source_annotation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Annotation Id"
+          },
+          "start_frame": {
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "category_id",
+          "category_name",
+          "start_time",
+          "end_time",
+          "start_frame",
+          "end_frame"
+        ],
+        "title": "SubmissionAnnotationSnapshotOut",
+        "type": "object"
+      },
+      "SuppressionCreateRequest": {
+        "properties": {
+          "base_detection_import_revision": {
+            "minimum": 1.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "const": "corrected_track",
+            "title": "Scope",
+            "type": "string"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "track_id",
+          "base_identity_revision",
+          "base_detection_import_revision"
+        ],
+        "title": "SuppressionCreateRequest",
+        "type": "object"
+      },
+      "SuppressionRevertRequest": {
+        "properties": {
+          "base_detection_import_revision": {
+            "minimum": 1.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_identity_revision",
+          "base_detection_import_revision"
+        ],
+        "title": "SuppressionRevertRequest",
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "created_at"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VideoClaimsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "video_ids": {
+            "items": {
+              "exclusiveMinimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Video Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "video_ids"
+        ],
+        "title": "VideoClaimsRequest",
+        "type": "object"
+      },
+      "VideoClaimsResponse": {
+        "properties": {
+          "claimed_count": {
+            "title": "Claimed Count",
+            "type": "integer"
+          },
+          "videos": {
+            "items": {
+              "$ref": "#/components/schemas/VideoOut"
+            },
+            "title": "Videos",
+            "type": "array"
+          }
+        },
+        "required": [
+          "claimed_count",
+          "videos"
+        ],
+        "title": "VideoClaimsResponse",
+        "type": "object"
+      },
+      "VideoCreate": {
+        "properties": {
+          "assignee_membership_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee Membership Id"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "filename": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          }
+        },
+        "required": [
+          "filename"
+        ],
+        "title": "VideoCreate",
+        "type": "object"
+      },
+      "VideoImportBatchOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_video_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created Video Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "metadata_upload_state": {
+            "title": "Metadata Upload State",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tracks_upload_state": {
+            "title": "Tracks Upload State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "validation_errors": {
+            "title": "Validation Errors"
+          },
+          "video_filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Filename"
+          },
+          "video_upload_state": {
+            "title": "Video Upload State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "status",
+          "video_upload_state",
+          "tracks_upload_state",
+          "metadata_upload_state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "VideoImportBatchOut",
+        "type": "object"
+      },
+      "VideoImportCompletionOut": {
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "integer"
+          },
+          "created_video_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created Video Id"
+          },
+          "detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Count"
+          },
+          "detection_import_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Import Id"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "video_only",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "validation_errors": {
+            "title": "Validation Errors"
+          },
+          "video_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Id"
+          }
+        },
+        "required": [
+          "batch_id",
+          "status",
+          "message"
+        ],
+        "title": "VideoImportCompletionOut",
+        "type": "object"
+      },
+      "VideoOut": {
+        "properties": {
+          "annotation_revision": {
+            "default": 1,
+            "title": "Annotation Revision",
+            "type": "integer"
+          },
+          "approved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "assignee": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AssigneeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assignee_membership_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee Membership Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "detection_import_revision": {
+            "default": 0,
+            "title": "Detection Import Revision",
+            "type": "integer"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "identity_revision": {
+            "default": 0,
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "playback_status": {
+            "enum": [
+              "ready",
+              "pending",
+              "failed",
+              "unavailable"
+            ],
+            "title": "Playback Status",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "submission_annotations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SubmissionAnnotationSnapshotOut"
+            },
+            "title": "Submission Annotations",
+            "type": "array"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "workflow_status": {
+            "default": "draft",
+            "title": "Workflow Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "filename",
+          "playback_status",
+          "status",
+          "created_at"
+        ],
+        "title": "VideoOut",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Behavior Annotation Backend",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "description": "无认证幂等清理；不读取 Bearer，也不执行数据操作。",
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "me_api_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Api Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "operationId": "list_projects_api_projects_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectOut"
+                  },
+                  "title": "Response List Projects Api Projects Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Projects",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "operationId": "create_project_api_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/join": {
+      "post": {
+        "operationId": "join_project_api_projects_join_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Join Project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/assignees": {
+      "get": {
+        "operationId": "list_assignees_api_projects__project_id__assignees_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AssigneeDirectoryItem"
+                  },
+                  "title": "Response List Assignees Api Projects  Project Id  Assignees Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Assignees",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/assignment-stats": {
+      "get": {
+        "operationId": "assignment_stats_api_projects__project_id__assignment_stats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentStatsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Assignment Stats",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/categories": {
+      "get": {
+        "operationId": "list_categories_api_projects__project_id__categories_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CategoryOut"
+                  },
+                  "title": "Response List Categories Api Projects  Project Id  Categories Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Categories",
+        "tags": [
+          "categories"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/category-scheme": {
+      "get": {
+        "operationId": "get_category_scheme_api_projects__project_id__category_scheme_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategorySchemeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Category Scheme",
+        "tags": [
+          "category-scheme"
+        ]
+      },
+      "put": {
+        "operationId": "replace_category_scheme_api_projects__project_id__category_scheme_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategorySchemePut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategorySchemeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Replace Category Scheme",
+        "tags": [
+          "category-scheme"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/category-scheme/audit": {
+      "get": {
+        "operationId": "list_category_scheme_audit_api_projects__project_id__category_scheme_audit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CategorySchemeAuditOut"
+                  },
+                  "title": "Response List Category Scheme Audit Api Projects  Project Id  Category Scheme Audit Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Category Scheme Audit",
+        "tags": [
+          "category-scheme"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/category-scheme/lock": {
+      "post": {
+        "operationId": "lock_category_scheme_api_projects__project_id__category_scheme_lock_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategorySchemeLock"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategorySchemeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Lock Category Scheme",
+        "tags": [
+          "category-scheme"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/clips": {
+      "get": {
+        "description": "项目成员分页浏览跨视频审核通过片段库（仅成员；不校验 active）。",
+        "operationId": "list_clips_api_projects__project_id__clips_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "video_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Video Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "annotator_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Annotator Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "review_status",
+            "required": false,
+            "schema": {
+              "const": "approved",
+              "default": "approved",
+              "title": "Review Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipPageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Clips",
+        "tags": [
+          "clips"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/clips/categories": {
+      "get": {
+        "description": "审核通过片段的类别统计（分类筛选 chip）：仅含计数 > 0 的类别，按 sort_order 排序。",
+        "operationId": "clip_categories_api_projects__project_id__clips_categories_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ClipCategoryCount"
+                  },
+                  "title": "Response Clip Categories Api Projects  Project Id  Clips Categories Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Clip Categories",
+        "tags": [
+          "clips"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/clips/{clip_id}/thumbnail": {
+      "get": {
+        "description": "Serve a ready thumbnail by Clip identity without exposing its disk name.",
+        "operationId": "get_clip_thumbnail_api_projects__project_id__clips__clip_id__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "clip_id",
+            "required": true,
+            "schema": {
+              "title": "Clip Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Clip Thumbnail",
+        "tags": [
+          "clips"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/export": {
+      "post": {
+        "description": "owner/admin 发起导出；同项目 active 导出排他。",
+        "operationId": "create_export_api_projects__project_id__export_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Export",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/export/download": {
+      "get": {
+        "description": "下载项目最近成功且未过期的安全导出文件。",
+        "operationId": "download_export_api_projects__project_id__export_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Export",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/export/status": {
+      "get": {
+        "description": "返回最近任务范围内可导出、实体就绪和缺失片段统计。",
+        "operationId": "export_status_api_projects__project_id__export_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Status",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/invite": {
+      "get": {
+        "operationId": "get_invite_api_projects__project_id__invite_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Invite",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/invite/reset": {
+      "post": {
+        "operationId": "reset_invite_api_projects__project_id__invite_reset_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reset Invite",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/jobs/{job_id}": {
+      "get": {
+        "description": "项目任务隔离查询；导出任务仅 owner/admin，其他任务保持成员可读。",
+        "operationId": "get_job_api_projects__project_id__jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Job",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/members": {
+      "get": {
+        "operationId": "list_members_api_projects__project_id__members_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MembershipOut"
+                  },
+                  "title": "Response List Members Api Projects  Project Id  Members Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Members",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/members/{membership_id}": {
+      "delete": {
+        "operationId": "remove_member_api_projects__project_id__members__membership_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "membership_id",
+            "required": true,
+            "schema": {
+              "title": "Membership Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Remove Member",
+        "tags": [
+          "projects"
+        ]
+      },
+      "patch": {
+        "operationId": "update_member_api_projects__project_id__members__membership_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "membership_id",
+            "required": true,
+            "schema": {
+              "title": "Membership Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MembershipUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Member",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/reviews/queue": {
+      "get": {
+        "operationId": "review_queue_api_projects__project_id__reviews_queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VideoOut"
+                  },
+                  "title": "Response Review Queue Api Projects  Project Id  Reviews Queue Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Review Queue",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/video-import-batches": {
+      "post": {
+        "operationId": "create_import_batch_api_projects__project_id__video_import_batches_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoImportBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Import Batch",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/video-import-batches/{batch_id}": {
+      "delete": {
+        "operationId": "cancel_import_batch_api_projects__project_id__video_import_batches__batch_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Cancel Import Batch",
+        "tags": [
+          "detection-imports"
+        ]
+      },
+      "get": {
+        "operationId": "get_import_batch_api_projects__project_id__video_import_batches__batch_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Import Batch",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/video-import-batches/{batch_id}/complete": {
+      "post": {
+        "operationId": "complete_import_batch_api_projects__project_id__video_import_batches__batch_id__complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assignee_membership_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Assignee Membership Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoImportCompletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Complete Import Batch",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/video-import-batches/{batch_id}/files/{role}": {
+      "put": {
+        "operationId": "upload_batch_file_api_projects__project_id__video_import_batches__batch_id__files__role__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "title": "Role",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_batch_file_api_projects__project_id__video_import_batches__batch_id__files__role__put"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoImportBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upload Batch File",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos": {
+      "get": {
+        "operationId": "list_videos_api_projects__project_id__videos_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "mine",
+                "unassigned",
+                "all"
+              ],
+              "title": "View",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workflow_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workflow Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assignee_membership_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Assignee Membership Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VideoOut"
+                  },
+                  "title": "Response List Videos Api Projects  Project Id  Videos Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Videos",
+        "tags": [
+          "videos"
+        ]
+      },
+      "post": {
+        "operationId": "create_video_api_projects__project_id__videos_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/assignments": {
+      "post": {
+        "operationId": "batch_assign_api_projects__project_id__videos_assignments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VideoOut"
+                  },
+                  "title": "Response Batch Assign Api Projects  Project Id  Videos Assignments Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Batch Assign",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/claims": {
+      "post": {
+        "operationId": "claim_videos_api_projects__project_id__videos_claims_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoClaimsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoClaimsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Claim Videos",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/upload": {
+      "post": {
+        "description": "真实视频流式上传：multipart 字段 `file`，分块写入临时文件后原子 rename。\n\n- 应用层不设文件大小上限；每块写入前校验 videos_dir 可用空间（保留 UPLOAD_DISK_RESERVE_BYTES）。\n- 磁盘目标使用内部 UUID 名，临时 `.part` 成功后原子 rename；\n  失败/取消/DB 提交失败均清理临时与最终孤儿文件。\n- 扩展名（大小写不敏感）是唯一校验依据；Content-Type 仅作辅助。",
+        "operationId": "upload_video_api_projects__project_id__videos_upload_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_video_api_projects__project_id__videos_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upload Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}": {
+      "delete": {
+        "description": "Synchronously hard-delete one draft/rejected video under the app gate.",
+        "operationId": "hard_delete_video_api_projects__project_id__videos__video_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Hard Delete Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/annotations": {
+      "get": {
+        "operationId": "list_annotations_api_projects__project_id__videos__video_id__annotations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AnnotationOut"
+                  },
+                  "title": "Response List Annotations Api Projects  Project Id  Videos  Video Id  Annotations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Annotations",
+        "tags": [
+          "annotations"
+        ]
+      },
+      "post": {
+        "operationId": "create_annotation_api_projects__project_id__videos__video_id__annotations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnotationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Annotation",
+        "tags": [
+          "annotations"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/annotations/export": {
+      "get": {
+        "description": "导出符合需求文档的统一事件格式 JSON 列表。",
+        "operationId": "export_annotations_api_projects__project_id__videos__video_id__annotations_export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Export Annotations Api Projects  Project Id  Videos  Video Id  Annotations Export Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Annotations",
+        "tags": [
+          "annotations"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/annotations/{annotation_id}": {
+      "delete": {
+        "operationId": "delete_annotation_api_projects__project_id__videos__video_id__annotations__annotation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "title": "Annotation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Annotation",
+        "tags": [
+          "annotations"
+        ]
+      },
+      "patch": {
+        "operationId": "update_annotation_api_projects__project_id__videos__video_id__annotations__annotation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "title": "Annotation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnotationUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Annotation",
+        "tags": [
+          "annotations"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/claim": {
+      "post": {
+        "operationId": "claim_video_api_projects__project_id__videos__video_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Claim Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/corrected-tracks": {
+      "get": {
+        "operationId": "get_corrected_tracks_api_projects__project_id__videos__video_id__corrected_tracks_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "current_frame",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Current Frame"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Corrected Tracks",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detection-imports": {
+      "post": {
+        "operationId": "replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Confirmation required to proceed with replacement",
+            "in": "query",
+            "name": "confirm",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Confirmation required to proceed with replacement",
+              "title": "Confirm",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/DetectionImportReplacementPreviewOut"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DetectionImportReplacementConfirmedOut"
+                    }
+                  ],
+                  "title": "Response Replace Detection Import Api Projects  Project Id  Videos  Video Id  Detection Imports Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Replace Detection Import",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detection-imports/current": {
+      "get": {
+        "operationId": "get_current_detection_import_api_projects__project_id__videos__video_id__detection_imports_current_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionImportCurrentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Current Detection Import",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detection-suppressions": {
+      "get": {
+        "operationId": "list_active_suppressions_api_projects__project_id__videos__video_id__detection_suppressions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Active Suppressions Api Projects  Project Id  Videos  Video Id  Detection Suppressions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Active Suppressions",
+        "tags": [
+          "detection-suppressions"
+        ]
+      },
+      "post": {
+        "operationId": "create_suppression_api_projects__project_id__videos__video_id__detection_suppressions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuppressionCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Suppression Api Projects  Project Id  Videos  Video Id  Detection Suppressions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Suppression",
+        "tags": [
+          "detection-suppressions"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert": {
+      "post": {
+        "operationId": "revert_suppression_api_projects__project_id__videos__video_id__detection_suppressions__suppression_id__revert_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "suppression_id",
+            "required": true,
+            "schema": {
+              "title": "Suppression Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuppressionRevertRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revert Suppression Api Projects  Project Id  Videos  Video Id  Detection Suppressions  Suppression Id  Revert Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revert Suppression",
+        "tags": [
+          "detection-suppressions"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detections": {
+      "get": {
+        "operationId": "get_detections_api_projects__project_id__videos__video_id__detections_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_frame",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Start Frame",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_frame",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Frame"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Detections",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/detections/export": {
+      "get": {
+        "operationId": "export_corrected_detections_api_projects__project_id__videos__video_id__detections_export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "import_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Import Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "identity_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Identity Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Corrected Detections",
+        "tags": [
+          "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/identity-edits": {
+      "post": {
+        "operationId": "commit_identity_edit_api_projects__project_id__videos__video_id__identity_edits_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentityEditCommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Commit Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Commit Identity Edit",
+        "tags": [
+          "identity-edits"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/identity-edits/check": {
+      "post": {
+        "operationId": "check_identity_edit_api_projects__project_id__videos__video_id__identity_edits_check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentityEditCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Check Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits Check Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Identity Edit",
+        "tags": [
+          "identity-edits"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/identity-edits/history": {
+      "get": {
+        "operationId": "get_identity_edit_history_api_projects__project_id__videos__video_id__identity_edits_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Get Identity Edit History Api Projects  Project Id  Videos  Video Id  Identity Edits History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Identity Edit History",
+        "tags": [
+          "identity-edits"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert": {
+      "post": {
+        "operationId": "revert_identity_edit_api_projects__project_id__videos__video_id__identity_edits__edit_id__revert_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "edit_id",
+            "required": true,
+            "schema": {
+              "title": "Edit Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentityEditRevertRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revert Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits  Edit Id  Revert Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revert Identity Edit",
+        "tags": [
+          "identity-edits"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/media-status": {
+      "get": {
+        "description": "项目成员可读：当前修订的片段生成进度与该视频对应任务。",
+        "operationId": "media_status_api_projects__project_id__videos__video_id__media_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Media Status",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/media/generate": {
+      "post": {
+        "description": "仅 approved 视频可触发；幂等或重试（见模块 docstring）。",
+        "operationId": "generate_media_api_projects__project_id__videos__video_id__media_generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate Media",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/release": {
+      "post": {
+        "operationId": "release_video_api_projects__project_id__videos__video_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Release Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/review": {
+      "post": {
+        "operationId": "create_review_api_projects__project_id__videos__video_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Review",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/reviews": {
+      "get": {
+        "operationId": "review_history_api_projects__project_id__videos__video_id__reviews_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewOut"
+                  },
+                  "title": "Response Review History Api Projects  Project Id  Videos  Video Id  Reviews Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Review History",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/submit": {
+      "post": {
+        "operationId": "submit_video_api_projects__project_id__videos__video_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Submit Video",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/withdraw": {
+      "post": {
+        "operationId": "withdraw_video_api_projects__project_id__videos__video_id__withdraw_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Withdraw Video",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/videos/{video_id}/stream": {
+      "get": {
+        "operationId": "stream_video_api_videos__video_id__stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Video",
+        "tags": [
+          "videos"
+        ]
+      },
+      "head": {
+        "operationId": "stream_video_api_videos__video_id__stream_head",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/videos/{video_id}/stream-ticket": {
+      "post": {
+        "operationId": "create_stream_ticket_api_videos__video_id__stream_ticket_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamTicketResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Stream Ticket",
+        "tags": [
+          "videos"
+        ]
+      }
+    }
+  }
+}

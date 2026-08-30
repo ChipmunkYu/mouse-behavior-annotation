@@ -978,9 +978,9 @@ export default function AnnotatePage() {
     elementDuration > 0 ? elementDuration : video?.duration && video.duration > 0 ? video.duration : null;
   const videoReady = media.status === "ready";
   const effectiveFps = detectionImport?.fps && detectionImport.fps > 0 ? detectionImport.fps : video?.fps && video.fps > 0 ? video.fps : null;
-  const authoritativeFrameCount = detectionImport?.frame_count && detectionImport.frame_count > 0
-    ? detectionImport.frame_count
-    : effectiveFps && timelineDuration ? Math.max(1, Math.ceil(timelineDuration * effectiveFps)) : null;
+  const authoritativeFrameCount = effectiveFps && timelineDuration
+    ? Math.max(1, Math.ceil(timelineDuration * effectiveFps))
+    : null;
   const startDisplayTime = startPoint && effectiveFps ? frameToStartTime(startPoint.frame, effectiveFps) : null;
   const endDisplayTime = endPoint && effectiveFps ? frameToEndTime(endPoint.frame, effectiveFps) : null;
   const hasRoleAssignments = roleSelectedIds.length > 0;

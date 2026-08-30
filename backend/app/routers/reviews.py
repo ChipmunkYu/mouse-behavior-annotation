@@ -19,6 +19,7 @@ from ..schemas import ReviewCreate, ReviewOut, VideoOut
 from ..submission_service import (create_submission, resolve_and_hash_source,
                                   validate_snapshot_integrity)
 from ..video_write_gate import video_write_gate
+from ..video_playback import public_video
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reviews"])
@@ -107,7 +108,7 @@ def submit_video(project_id: int, video_id: int, request: Request,
                           source_identity=source_identity)
         db.commit()
         db.refresh(video)
-        return video
+        return public_video(video, request.app.state.settings)
 
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/withdraw", response_model=VideoOut)
@@ -140,18 +141,20 @@ def withdraw_video(project_id: int, video_id: int, request: Request,
         state.video.workflow_status = "draft"
         state.video.submitted_at = None
         db.commit(); db.refresh(state.video)
-        return state.video
+        return public_video(state.video, request.app.state.settings)
 
 
 @router.get("/api/projects/{project_id}/reviews/queue", response_model=list[VideoOut])
-def review_queue(project_id: int, access: tuple = Depends(project_access),
+def review_queue(project_id: int, request: Request, access: tuple = Depends(project_access),
                  db: Session = Depends(get_db)) -> list[dict]:
     require_reviewer(access[1], "Review permission is required to view the review queue")
     rows = db.query(Video, Submission).join(Submission, Submission.video_id == Video.id).filter(
         Video.project_id == project_id, Submission.status == "submitted"
     ).order_by(Submission.submitted_at.desc(), Submission.id.desc()).all()
-    return [{**VideoOut.model_validate(video, from_attributes=True).model_dump(),
-             "submission_annotations": [_snapshot_annotation(item) for item in submission.annotations]}
+    return [public_video(
+                video, request.app.state.settings,
+                submission_annotations=[_snapshot_annotation(item) for item in submission.annotations],
+            )
             for video, submission in rows]
 
 

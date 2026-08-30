@@ -1,676 +1,127 @@
-/**
- * 与 backend/app/schemas.py 及 backend/app/routers/* 返回结构对应的类型定义。
- * 字段命名与后端 Pydantic 输出一致（snake_case）。
- */
+/** API DTO 以 openapi-typescript 生成结果为唯一契约来源。 */
+import type { components } from "./generated/schema";
 
-// ---------- 认证 ----------
-export interface User {
-  id: number;
-  username: string;
-  created_at: string;
-}
+type Schemas = components["schemas"];
 
-export interface LoginResponse {
-  access_token: string;
-  token_type: string;
-  user: User;
-}
+export type User = Schemas["UserOut"];
+export type LoginResponse = Schemas["LoginResponse"];
+export type StreamTicket = Schemas["StreamTicketResponse"];
 
-/** 短期、同源媒体地址。调用方不得持久化或记录 url。 */
-export interface StreamTicket {
-  url: string;
-  expires_at: string;
-}
+export type ProjectRole = Schemas["MembershipOut"]["role"];
+export type Project = Schemas["ProjectOut"];
+export type Membership = Schemas["MembershipOut"];
+export type AssigneeDirectoryItem = Schemas["AssigneeDirectoryItem"];
+export type Assignee = Schemas["AssigneeOut"];
+export type MembershipUpdateInput = Schemas["MembershipUpdate"];
+export type Invite = Schemas["InviteOut"];
+export type AssignmentStatsItem = Schemas["AssignmentStatsItem"];
+export type AssignmentStats = Schemas["AssignmentStatsOut"];
+export type VideoClaimsInput = Schemas["VideoClaimsRequest"];
+export type VideoClaimsResponse = Schemas["VideoClaimsResponse"];
 
-// ---------- 项目 ----------
-export interface Project {
-  id: number;
-  name: string;
-  description: string | null;
-  status: string;
-  created_at: string;
-  role: ProjectRole;
-  membership_id: number;
-  can_review: boolean;
-  category_scheme_version: number;
-  category_scheme_locked_at: string | null;
-  category_scheme_locked_by: number | null;
-}
+export type ParticipantMode = Schemas["CategoryOut"]["participant_mode"];
+export type RoleDefinition = Schemas["RoleDefinitionOut"];
+export type RoleDefinitionInput = Schemas["RoleDefinitionIn"];
+export type Category = Schemas["CategoryOut"];
+export type CategorySchemeCategoryInput = Schemas["CategorySchemeCategoryIn"];
+export type CategoryScheme = Schemas["CategorySchemeOut"];
+export type CategorySchemePut = Schemas["CategorySchemePut"];
+export type CategorySchemeLock = Schemas["CategorySchemeLock"];
+export type CategorySchemeAudit = Schemas["CategorySchemeAuditOut"];
+export type ProjectCreateInput = Schemas["ProjectCreate"];
 
-export type ProjectRole = "owner" | "admin" | "member";
-
-export interface Membership {
-  id: number;
-  project_id: number;
-  user_id: number;
-  username: string;
-  role: ProjectRole;
-  can_review: boolean;
-  status: string;
-  created_at: string;
-}
-
-/** 所有 active 项目成员都可读取的负责人精简目录。 */
-export interface AssigneeDirectoryItem {
-  membership_id: number;
-  username: string;
-}
-
-/** VideoOut.assignee 的完整嵌套结构；can_review 为后端计算后的有效权限。 */
-export interface Assignee {
-  id: number;
-  project_id: number;
-  user_id: number;
-  username: string;
-  role: ProjectRole;
-  can_review: boolean;
-  status: string;
-  created_at: string;
-}
-
-export interface MembershipUpdateInput {
-  role?: "admin" | "member";
-  can_review?: boolean;
-}
-
-export interface Invite { invite_code: string }
-export interface AssignmentStatsItem {
-  assignee_membership_id: number;
-  username: string;
-  total: number;
-  draft: number;
-  submitted: number;
-  approved: number;
-  rejected: number;
-}
-export interface AssignmentStats {
-  total: number;
-  draft: number;
-  submitted: number;
-  approved: number;
-  rejected: number;
-  unassigned: number;
-  /** 未分配且处于 draft，可由项目成员领取的视频数。 */
-  claimable: number;
-  by_assignee: AssignmentStatsItem[];
-}
+export type SubmissionAnnotationSnapshot = Schemas["SubmissionAnnotationSnapshotOut"];
+export type Video = Schemas["VideoOut"];
+export type VideoCreateInput = Schemas["VideoCreate"];
+export type WorkflowStatus = "draft" | "submitted" | "approved" | "rejected";
 export type VideoView = "mine" | "unassigned" | "all";
 export interface VideoListParams { view?: VideoView; workflow_status?: string; assignee_membership_id?: number }
 
-export interface ProjectCreateInput {
-  name: string;
-  description?: string | null;
-  categories: CategorySchemeCategoryInput[];
-}
-
-// ---------- 行为类别 ----------
-export interface Category {
-  id: number;
-  project_id: number;
-  name: string;
-  group: string;
-  color: string | null;
-  sort_order: number;
-  is_active: boolean;
-  mouse_count_min: number;
-  mouse_count_max: number | null;
-  participant_mode: ParticipantMode;
-  role_definitions: RoleDefinition[];
-}
-
-export type ParticipantMode = "unordered" | "role_based";
-export interface RoleDefinition {
-  key: string;
-  name: string;
-  min_count: number;
-  max_count: number | null;
-  role_sort_order: number;
-}
-export interface RoleDefinitionInput {
-  key?: string;
-  name: string;
-  min_count: number;
-  max_count: number | null;
-  role_sort_order: number;
-}
-export interface CategorySchemeCategoryInput {
-  id?: number;
-  name: string;
-  group: string;
-  color: string | null;
-  sort_order: number;
-  is_active: boolean;
-  participant_mode: ParticipantMode;
-  role_definitions: RoleDefinitionInput[];
-  mouse_count_min?: number;
-  mouse_count_max?: number | null;
-}
-export interface CategoryScheme {
-  project_id: number;
-  category_scheme_version: number;
-  category_scheme_locked_at: string | null;
-  category_scheme_locked_by: number | null;
-  categories: Category[];
-}
-export interface CategorySchemePut { expected_version: number; categories: CategorySchemeCategoryInput[] }
-export interface CategorySchemeLock { expected_version: number }
-export interface CategorySchemeAudit {
-  id: number; project_id: number; actor_id: number; action: "replace" | "lock";
-  scheme_version: number; before_json: Record<string, unknown> | null;
-  after_json: Record<string, unknown>; scheme_hash: string; created_at: string;
-}
-
-// ---------- 视频 ----------
-export interface Video {
-  id: number;
-  project_id: number;
-  filename: string;
-  duration: number | null;
-  fps: number | null;
-  width: number | null;
-  height: number | null;
-  storage_path: string | null;
-  status: string;
-  // 审核工作流字段（批次 3）
-  workflow_status: string;
-  annotation_revision: number;
-  detection_import_revision?: number;
-  identity_revision?: number;
-  submitted_at: string | null;
-  approved_at: string | null;
-  approved_by: number | null;
-  assignee_membership_id: number | null;
-  assignee: Assignee | null;
-  created_at: string;
-  submission_annotations: SubmissionAnnotationSnapshot[];
-}
-
-export interface VideoClaimsInput {
-  video_ids: number[];
-}
-
-export interface VideoClaimsResponse {
-  claimed_count: number;
-  videos: Video[];
-}
-
-export interface VideoCreateInput {
-  filename: string;
-  duration?: number | null;
-  fps?: number | null;
-  width?: number | null;
-  height?: number | null;
-  status?: string | null;
-  storage_path?: string | null;
-  assignee_membership_id?: number | null;
-}
-
-// ---------- 标注 ----------
-export interface Annotation {
-  id: number;
-  video_id: number;
-  annotator_id: number;
-  category_id: number;
-  start_time: number;
-  end_time: number;
-  start_frame: number;
-  end_frame: number;
-  confidence: string;
-  review_status: string;
-  crop_region: unknown;
-  mouse_ids: number[];
-  mouse_id_status: "valid" | "needs_mouse_ids";
-  participant_roles: Record<string, number[]>;
-  participant_status: "valid" | "needs_participants";
-  detection_import_revision: number;
-  identity_revision: number;
-  created_at: string;
-  updated_at: string;
-  /** 便捷字段：标注者用户名 / 类别名（后端返回） */
-  annotator: string | null;
-  category_name: string | null;
-}
-
-export interface AnnotationCreateInput {
-  category_id: number;
-  start_time: number;
-  end_time: number;
-  start_frame: number;
-  end_frame: number;
-  confidence?: string;
-  crop_region?: unknown;
-  mouse_ids?: number[];
-  participant_roles?: Record<string, number[]>;
-  detection_import_revision?: number;
-  identity_revision?: number;
-}
-
-export interface AnnotationPatchInput {
-  category_id?: number;
-  start_time?: number;
-  end_time?: number;
-  start_frame?: number;
-  end_frame?: number;
-  confidence?: string;
-  crop_region?: unknown;
-  mouse_ids?: number[];
-  participant_roles?: Record<string, number[]>;
-  detection_import_revision?: number;
-  identity_revision?: number;
-}
-
-// ---------- 审核工作流 ----------
-/** 视频审核工作流状态：draft → submitted → approved / rejected */
-export type WorkflowStatus = "draft" | "submitted" | "approved" | "rejected";
-
-export interface Review {
-  id: number;
-  project_id: number;
-  video_id: number;
-  reviewer_id: number | null;
-  result: "approved" | "rejected";
-  comment: string | null;
-  annotation_revision: number;
-  detection_import_revision: number;
-  identity_revision: number;
-  created_at: string;
-  /** 便捷字段：审核人用户名（后端返回时显示） */
-  reviewer: string | null;
-  submission_id: number | null;
-  submission_annotations: SubmissionAnnotationSnapshot[];
-}
-
-export interface SubmissionAnnotationSnapshot {
-  id: number;
-  source_annotation_id: number | null;
-  category_id: number;
-  category_name: string;
-  category_group: string | null;
-  category_participant_mode: ParticipantMode;
-  role_definitions: RoleDefinition[];
-  participant_roles: Record<string, number[]>;
-  mouse_ids: number[];
-  start_time: number; end_time: number; start_frame: number; end_frame: number;
-}
-
-export interface ReviewCreateInput {
-  result: "approved" | "rejected";
-  comment?: string | null;
-}
+export type Annotation = Schemas["AnnotationOut"];
+export type AnnotationCreateInput = Schemas["AnnotationCreate"];
+export type AnnotationPatchInput = Schemas["AnnotationUpdate"];
+export type Review = Schemas["ReviewOut"];
+export type ReviewCreateInput = Schemas["ReviewCreate"];
 
 export const WORKFLOW_LABELS: Record<string, string> = {
-  draft: "草稿",
-  submitted: "待审核",
-  approved: "已通过",
-  rejected: "已退回",
+  draft: "草稿", submitted: "待审核", approved: "已通过", rejected: "已退回",
 };
 
-// ---------- 后台任务与媒体（片段）生成（批次 4） ----------
-/**
- * 后台任务（与 backend/app/models.py BackgroundJob 对齐）：
- * 状态枚举 queued / running / succeeded / failed / cancelled。
- * 字段命名以当前后端基础模型为准，核对最终实现字段时在此处修正即可。
- */
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-
-export interface Job {
-  id: number;
-  project_id: number | null;
-  job_type: string;
-  status: JobStatus;
-  /** 0–100 整数进度 */
-  progress: number;
-  payload: unknown;
-  result_path: string | null;
-  error: string | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-  expires_at: string | null;
-}
-
-/** 单个视频的媒体（片段）生成状态汇总（GET /media-status）。 */
-export interface MediaStatus {
-  video_id: number;
-  revision: number;
-  workflow_status: string;
-  /** 片段总数 */
-  total: number;
-  ready: number;
-  processing: number;
-  failed: number;
-  pending: number;
-  /** 最近一次生成任务（尚未生成过则为 null） */
-  latest_job: Job | null;
-}
-
+export type JobStatus = Schemas["JobOut"]["status"];
+export type Job = Schemas["JobOut"];
+export type MediaStatus = Schemas["MediaStatusOut"];
 export const JOB_LABELS: Record<string, string> = {
-  queued: "排队中",
-  running: "处理中",
-  succeeded: "已完成",
-  failed: "生成失败",
-  cancelled: "已取消",
+  queued: "排队中", running: "处理中", succeeded: "已完成", failed: "生成失败", cancelled: "已取消",
 };
 
-// ---------- 导出 ----------
 export interface ExportEvent {
-  annotation_id: number;
-  video_id: string;
-  clip_file: string | null;
-  start_time: number;
-  end_time: number;
-  start_frame: number;
-  end_frame: number;
-  behavior: string | null;
-  mouse_ids: number[];
-  detection_import_revision: number;
-  identity_revision: number;
-  crop_region: unknown;
-  confidence: string;
-  annotator: string | null;
-  reviewer: string | null;
-  review_status: string;
+  annotation_id: number; video_id: string; clip_file: string | null;
+  start_time: number; end_time: number; start_frame: number; end_frame: number;
+  behavior: string | null; mouse_ids: number[]; detection_import_revision: number;
+  identity_revision: number; crop_region: unknown; confidence: string;
+  annotator: string | null; reviewer: string | null; review_status: string;
 }
 
-// ---------- 检测结果导入与 track 修正 ----------
 export type ImportFileRole = "video" | "tracks" | "metadata";
-export type VideoImportBatchStatus = "uploading" | "processing" | "ready" | "video_only" | "failed" | "cancelling";
-
-export interface VideoImportBatch {
-  id: number;
-  project_id: number;
-  status: VideoImportBatchStatus;
-  video_upload_state: string;
-  tracks_upload_state: string;
-  metadata_upload_state: string;
-  video_path?: string | null;
-  video_filename?: string | null;
-  tracks_path?: string | null;
-  metadata_path?: string | null;
-  created_video_id: number | null;
-  validation_errors: Record<string, unknown> | null;
-  created_at?: string;
-}
-
-export interface DetectionImport {
-  id: number;
-  video_id: number;
-  revision: number;
-  schema_version: string;
-  tracks_path: string | null;
-  tracks_sha256: string | null;
-  metadata_path: string | null;
-  metadata_sha256: string | null;
-  model: string | null;
-  model_weights_sha256: string | null;
-  tracker: string | null;
-  tracker_params: Record<string, unknown> | null;
-  frame_range: Record<string, unknown> | null;
-  detection_count: number | null;
-  status: string;
-  fps: number | null;
-  width: number | null;
-  height: number | null;
-  frame_count: number | null;
-  source_relative: string | null;
-  error: string | null;
-  active: boolean;
-  created_by: number | null;
-  created_at: string;
-}
-
-/** 替换当前检测导入的预检响应（confirm=false）。 */
-export interface DetectionReplacementPreview {
-  preview: true;
-  current_revision: number;
-  new_revision: number;
-  affected_annotations_count: number;
-  unordered_force_reselection_count: number;
-  role_based_revalidation_count: number;
-  detection_count: number;
-  unique_track_count: number;
-  message: string;
-}
-
-/** 替换当前检测导入的确认响应（confirm=true）。 */
-export interface DetectionReplacementConfirmed {
-  preview: false;
-  id: number;
-  video_id: number;
-  revision: number;
-  detection_count: number;
-  track_count: number;
-  status: string;
-  affected_annotations_count: number;
-  annotations_must_be_refetched: true;
-  message: string;
-}
-
+export type VideoImportBatch = Schemas["VideoImportBatchOut"];
+export type VideoImportCompletion = Schemas["VideoImportCompletionOut"];
+export type DetectionImport = Schemas["DetectionImportCurrentOut"];
+export type DetectionReplacementPreview = Schemas["DetectionImportReplacementPreviewOut"];
+export type DetectionReplacementConfirmed = Schemas["DetectionImportReplacementConfirmedOut"];
 export type DetectionReplacementResponse = DetectionReplacementPreview | DetectionReplacementConfirmed;
 
-export interface Keypoint {
-  x_px?: number;
-  y_px?: number;
-  x?: number;
-  y?: number;
-  confidence?: number;
-}
-
+export interface Keypoint { x_px?: number; y_px?: number; x?: number; y?: number; confidence?: number }
 export interface DetectionWithTrack {
-  detection_id: number;
-  frame_index: number;
-  raw_track_id: number;
-  display_track_id: number;
-  box_xyxy_px: number[] | null;
-  keypoints: Keypoint[] | null;
-  confidence?: number | null;
-  import_revision: number;
-  identity_revision: number;
+  detection_id: number; frame_index: number; raw_track_id: number; display_track_id: number;
+  box_xyxy_px: number[] | null; keypoints: Keypoint[] | null; confidence?: number | null;
+  import_revision: number; identity_revision: number;
 }
-
 export interface DetectionsResponse { detections: DetectionWithTrack[]; total: number }
-
 export interface CorrectedTrackSummary {
-  display_track_id: number;
-  first_frame: number | null;
-  last_frame: number | null;
-  detection_count: number;
-  visible_in_current_frame: boolean | null;
+  display_track_id: number; first_frame: number | null; last_frame: number | null;
+  detection_count: number; visible_in_current_frame: boolean | null;
 }
-
-export interface CorrectedTracksResponse {
-  items: CorrectedTrackSummary[];
-  total: number;
-  page: number;
-  page_size: number;
-  pages: number;
-}
-
-export interface CorrectedTracksParams {
-  current_frame?: number;
-  search?: string;
-  page?: number;
-  page_size?: number;
-}
-
-export interface IdentityEditCheckRequest {
-  operation: "split" | "merge";
-  track_ids: number[];
-  frame?: number | null;
-  base_identity_revision: number;
-  base_detection_import_revision: number;
-}
-
-export interface IdentityEditCheckResponse {
-  operation: "split" | "merge";
-  old_display_track_id?: number;
-  new_display_track_id?: number;
-  split_frame?: number;
-  detections_before?: number;
-  detections_after?: number;
-  retained_display_track_id?: number;
-  merged_display_track_ids?: number[];
-  affected_detection_count?: number;
-  affected_annotation_count: number;
-  conflict_frames?: number[];
-  message?: string;
-  conflicts?: TrackRoleConflict[];
-}
-
+export interface CorrectedTracksResponse { items: CorrectedTrackSummary[]; total: number; page: number; page_size: number; pages: number }
+export interface CorrectedTracksParams { current_frame?: number; search?: string; page?: number; page_size?: number }
+export type IdentityEditCheckRequest = Schemas["IdentityEditCheckRequest"];
 export interface TrackRoleConflict {
-  annotation_id: number; start_time: number; end_time: number;
-  start_frame: number; end_frame: number; role_key: string; role_name: string | null; track_id: number;
+  annotation_id: number; start_time: number; end_time: number; start_frame: number; end_frame: number;
+  role_key: string; role_name: string | null; track_id: number;
 }
-
-export type IdentityEditCommitRequest = IdentityEditCheckRequest;
-
+export interface IdentityEditCheckResponse {
+  operation: "split" | "merge"; old_display_track_id?: number; new_display_track_id?: number;
+  split_frame?: number; detections_before?: number; detections_after?: number;
+  retained_display_track_id?: number; merged_display_track_ids?: number[];
+  affected_detection_count?: number; affected_annotation_count: number; conflict_frames?: number[];
+  message?: string; conflicts?: TrackRoleConflict[];
+}
+export type IdentityEditCommitRequest = Schemas["IdentityEditCommitRequest"];
 export interface IdentityEditResult {
-  edit_id?: number;
-  identity_revision: number;
-  new_display_track_id?: number;
-  retained_display_track_id?: number;
-  affected_detection_count?: number;
-  affected_annotation_count?: number;
-  needs_mouse_ids_annotation_ids?: number[];
+  edit_id?: number; identity_revision: number; new_display_track_id?: number;
+  retained_display_track_id?: number; affected_detection_count?: number;
+  affected_annotation_count?: number; needs_mouse_ids_annotation_ids?: number[];
 }
-
 export interface IdentityEdit {
-  id: number;
-  video_id: number;
-  detection_import_id: number;
-  operation: string;
-  base_identity_revision: number;
-  result_identity_revision: number;
-  params: Record<string, unknown> | null;
-  affected_detections: unknown[] | null;
-  affected_annotations: unknown[] | null;
-  operator_id: number | null;
-  created_at: string;
-  reverted_edit_id: number | null;
+  id: number; video_id: number; detection_import_id: number; operation: string;
+  base_identity_revision: number; result_identity_revision: number; params: Record<string, unknown> | null;
+  affected_detections: unknown[] | null; affected_annotations: unknown[] | null;
+  operator_id: number | null; created_at: string; reverted_edit_id: number | null;
 }
+export type SuppressionCreateRequest = Schemas["SuppressionCreateRequest"];
+export interface SuppressionResult { suppression_id?: number; identity_revision: number; frozen_detection_count?: number; freed_detection_count?: number; affected_track_ids?: number[] }
+export interface DetectionSuppression { id: number; scope: string; result_identity_revision: number; created_at: string; frozen_detection_count: number }
+export interface CorrectedTracksExport { tracks_corrected: string[]; manifest: Record<string, unknown> }
 
-export interface SuppressionCreateRequest {
-  scope: "corrected_track";
-  track_id: number;
-  base_identity_revision: number;
-  base_detection_import_revision: number;
-}
-
-export interface SuppressionResult {
-  suppression_id?: number;
-  identity_revision: number;
-  frozen_detection_count?: number;
-  freed_detection_count?: number;
-  affected_track_ids?: number[];
-}
-
-export interface DetectionSuppression {
-  id: number;
-  scope: string;
-  result_identity_revision: number;
-  created_at: string;
-  frozen_detection_count: number;
-}
-
-export interface CorrectedTracksExport {
-  tracks_corrected: string[];
-  manifest: Record<string, unknown>;
-}
-
-// ---------- 导出（批次 6） ----------
-/** 发起导出请求体：category_ids 为空数组 / 缺省表示导出全部类别（POST /api/projects/:pid/export）。 */
-export interface ExportRequestInput {
-  category_ids?: number[];
-}
-
-/** 缺失片段条目（导出 status 返回）：标注已审核通过、但剪辑文件尚未生成的片段。 */
-export interface MissingClip {
-  annotation_id: number;
-  category_name: string;
-  video_filename: string;
-}
-
-/**
- * 导出状态汇总（GET /api/projects/:pid/export/status）。
- * 计数均为项目级：可导出 = 审核通过标注总数；就绪 = 片段已生成可打包；缺失 = 待生成。
- */
-export interface ExportStatus {
-  /** 最近一次导出任务（尚未发起过则为 null） */
-  latest_job: Job | null;
-  /** 可导出（审核通过）标注总数 */
-  exportable_count: number;
-  /** 片段已就绪、可打包进 ZIP 的数量 */
-  ready_count: number;
-  /** 片段缺失（未生成）数量 */
-  missing_count: number;
-  /** 缺失片段明细（仅缺失时非空） */
-  missing_clips: MissingClip[];
-}
-
-/** 导出 ZIP 在服务器端的保留时长（天），下载提示文案用。 */
+export type ExportRequestInput = Schemas["ExportRequest"];
+export type MissingClip = Schemas["MissingClipOut"];
+export type ExportStatus = Schemas["ExportStatusOut"];
 export const EXPORT_RETENTION_DAYS = 7;
 
-// ---------- 片段库（批次 5） ----------
-/**
- * 片段列表条目（GET /api/projects/:pid/clips 返回的 ClipItem）。
- * 字段与后端 Planned ClipOut 对齐：clip_path / thumbnail_path 为空表示片段尚未生成。
- */
-export interface ClipItem {
-  annotation_id: number;
-  video_id: number;
-  video_filename: string;
-  category_id: number;
-  category_name: string;
-  start_time: number;
-  end_time: number;
-  start_frame: number;
-  end_frame: number;
-  confidence: string;
-  clip_path: string | null;
-  thumbnail_path: string | null;
-  annotator_name: string | null;
-  /** 标注审核状态：pending / approved / rejected */
-  review_status: string;
-  created_at: string;
-  category_group: string | null;
-  category_participant_mode: ParticipantMode;
-  role_definitions: RoleDefinition[];
-  participant_roles: Record<string, number[]>;
-  mouse_ids: number[];
-}
-
-/** 分页响应：{items, total, pages}。 */
-export interface ClipListResponse {
-  items: ClipItem[];
-  total: number;
-  pages: number;
-}
-
-/** 类别计数（GET /api/projects/:pid/clips/categories），用于筛选 chips。 */
-export interface ClipCategoryCount {
-  category_id: number;
-  category_name: string;
-  count: number;
-}
-
-/** 片段列表的过滤与分页参数（与 GET /clips 查询参数一一对应，全部类型化）。 */
-export interface ClipListParams {
-  category_id?: number | null;
-  video_id?: number | null;
-  /** 搜索关键词：匹配类别名或视频文件名（大小写不敏感，服务端过滤）。 */
-  search?: string | null;
-  page: number;
-  page_size: number;
-}
-
-/** 片段库默认每页条数（后端默认值一致）。 */
+export type ClipItem = Schemas["ClipItem"];
+export type ClipListResponse = Schemas["ClipPageOut"];
+export type ClipCategoryCount = Schemas["ClipCategoryCount"];
+export interface ClipListParams { category_id?: number | null; video_id?: number | null; search?: string | null; page: number; page_size: number }
 export const DEFAULT_PAGE_SIZE = 20;
 
-// ---------- 通用 ----------
-export const ROLE_LABELS: Record<string, string> = {
-  owner: "所有者",
-  admin: "管理员",
-  member: "成员",
-};
-
+export const ROLE_LABELS: Record<string, string> = { owner: "所有者", admin: "管理员", member: "成员" };
 export const DEFAULT_FPS = 30;
