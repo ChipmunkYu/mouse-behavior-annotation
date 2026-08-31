@@ -14,6 +14,7 @@ from .config import Settings, get_settings
 from .cleanup import RetentionCleaner
 from .export_jobs import ExportWorker
 from .display_proxy_jobs import DisplayProxyWorker
+from .display_proxy_observability import configure_display_proxy_observability
 from .display_proxy_processor import DisplayProxyProcessor
 from .media import FfmpegMediaProcessor, MediaProcessor
 from .media_jobs import MediaWorker
@@ -61,6 +62,7 @@ def create_app(
 
     db_mod.configure_engine(s.resolved_database_url)
     db_mod.ensure_schema(s.resolved_database_url)
+    configure_display_proxy_observability()
 
     with db_mod.SessionLocal() as db:
         seed.ensure_demo_user(db, s)

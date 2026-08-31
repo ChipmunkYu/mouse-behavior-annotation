@@ -9,7 +9,9 @@ from threading import Event
 import pytest
 
 from app.cleanup import run_retention_cleanup
-from app.models import ProjectMembership, Video, VideoImportBatch
+from app.display_proxy_jobs import display_proxy_names
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
+from app.models import BackgroundJob, ProjectMembership, Video, VideoImportBatch
 from app.routers import detection_imports
 import app.import_batch_cleanup as batch_cleanup_module
 
@@ -159,15 +161,49 @@ def failed_batch(ctx, project_id, headers):
     return batch["id"], result.json()["video_id"], batch_path(ctx, batch["id"], "video")
 
 
+def terminal_proxy(ctx, video_id: int, status: str = "failed", *, artifacts: bool = False):
+    with ctx.session_factory() as db:
+        video = db.get(Video, video_id)
+        assert video is not None
+        job = next((row for row in db.query(BackgroundJob).filter(
+            BackgroundJob.job_type == "display_proxy"
+        ) if isinstance(row.payload, dict) and row.payload.get("video_id") == video_id), None)
+        if job is None:
+            source_sha256 = video.source_sha256 or "a" * 64
+            video.source_sha256 = source_sha256
+            job = BackgroundJob(
+                project_id=video.project_id, job_type="display_proxy", status="queued",
+                payload={"video_id": video_id, "project_id": video.project_id,
+                         "source_sha256": source_sha256,
+                         "profile_version": DISPLAY_PROXY_PROFILE_VERSION},
+                dedupe_key=f"display-proxy:video:{video_id}:test",
+            )
+            db.add(job)
+            db.flush()
+        job.status = status
+        job.run_token = "owned" if status == "running" else None
+        names = display_proxy_names(job.payload)
+        assert names is not None
+        if artifacts:
+            root = ctx.client.app.state.settings.display_proxies_dir
+            for name in names:
+                (root / name).write_bytes(b"proxy")
+            job.result_path = names[1]
+        db.commit()
+        return job.id, names
+
+
 def test_failed_batch_removes_pristine_video_but_rejects_consumed_video(ctx, login_headers):
     headers, project_id = make_project(ctx, login_headers)
     batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    terminal_proxy(ctx, video_id)
     assert cancel(ctx, project_id, batch_id, headers).status_code == 204
     assert not (ctx.client.app.state.settings.videos_dir / video_path).exists()
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is None
 
     batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    terminal_proxy(ctx, video_id)
     with ctx.session_factory() as db:
         video = db.get(Video, video_id)
         video.workflow_status = "submitted"
@@ -185,6 +221,7 @@ def test_failed_pristine_video_delete_is_atomic_against_user_change(
 ):
     headers, project_id = make_project(ctx, login_headers)
     batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    terminal_proxy(ctx, video_id)
 
     def consume_video_before_delete():
         with ctx.session_factory() as other_db:
@@ -347,3 +384,73 @@ def test_retention_conservatively_skips_stale_batch_with_active_slot(ctx, login_
         assert report["import_batches_deleted"] == 0
         assert db.get(VideoImportBatch, active["id"]) is not None
         assert any(issue["kind"] == "import-batch-cleanup-skipped" for issue in report["issues"])
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+def test_failed_batch_retention_is_blocked_by_active_display_job(
+    ctx, login_headers, status
+):
+    headers, project_id = make_project(ctx, login_headers)
+    batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    job_id, _ = terminal_proxy(ctx, video_id, status)
+    now = datetime.utcnow()
+    with ctx.session_factory() as db:
+        batch = db.get(VideoImportBatch, batch_id)
+        batch.updated_at = now - timedelta(hours=25)
+        job = db.get(BackgroundJob, job_id)
+        job.status = status
+        job.run_token = "owned" if status == "running" else None
+        db.commit()
+        report = run_retention_cleanup(db, ctx.client.app.state.settings, now=now)
+        assert report["import_batches_deleted"] == 0
+        assert db.get(VideoImportBatch, batch_id) is not None
+        assert db.get(Video, video_id) is not None
+        assert db.get(BackgroundJob, job.id) is not None
+    assert (ctx.client.app.state.settings.videos_dir / video_path).exists()
+
+
+@pytest.mark.parametrize("status", ["failed", "succeeded"])
+def test_failed_batch_terminal_proxy_graph_is_cleaned_and_repeat_is_idempotent(
+    ctx, login_headers, status
+):
+    headers, project_id = make_project(ctx, login_headers)
+    batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    job_id, names = terminal_proxy(ctx, video_id, status, artifacts=True)
+    now = datetime.utcnow()
+    with ctx.session_factory() as db:
+        db.get(VideoImportBatch, batch_id).updated_at = now - timedelta(hours=25)
+        db.commit()
+        first = run_retention_cleanup(db, ctx.client.app.state.settings, now=now)
+        second = run_retention_cleanup(db, ctx.client.app.state.settings, now=now)
+        assert first["import_batches_deleted"] == 1
+        assert second["import_batches_deleted"] == 0
+        assert db.get(VideoImportBatch, batch_id) is None
+        assert db.get(Video, video_id) is None
+        assert db.get(BackgroundJob, job_id) is None
+    assert not (ctx.client.app.state.settings.videos_dir / video_path).exists()
+    assert all(not (ctx.client.app.state.settings.display_proxies_dir / name).exists()
+               for name in names)
+
+
+def test_failed_batch_quarantine_failure_keeps_database_and_is_retryable(
+    monkeypatch, ctx, login_headers
+):
+    headers, project_id = make_project(ctx, login_headers)
+    batch_id, video_id, video_path = failed_batch(ctx, project_id, headers)
+    job_id, _names = terminal_proxy(ctx, video_id, artifacts=True)
+    original = batch_cleanup_module.VideoDeleteIO.quarantine
+
+    def fail_quarantine(self, manifest):
+        raise batch_cleanup_module.VideoDeleteIOError("injected")
+
+    monkeypatch.setattr(batch_cleanup_module.VideoDeleteIO, "quarantine", fail_quarantine)
+    with pytest.raises(batch_cleanup_module.VideoDeleteIOError, match="injected"):
+        cancel(ctx, project_id, batch_id, headers)
+    with ctx.session_factory() as db:
+        assert db.get(VideoImportBatch, batch_id).status == "failed"
+        assert db.get(Video, video_id) is not None
+        assert db.get(BackgroundJob, job_id) is not None
+    assert (ctx.client.app.state.settings.videos_dir / video_path).exists()
+
+    monkeypatch.setattr(batch_cleanup_module.VideoDeleteIO, "quarantine", original)
+    assert cancel(ctx, project_id, batch_id, headers).status_code == 204

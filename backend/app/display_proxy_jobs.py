@@ -1,8 +1,13 @@
 """Explicit enqueue and single-owner worker lane for candidate display proxies."""
 from __future__ import annotations
 
+import errno
 import hashlib
+import logging
+import math
 import os
+import shutil
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,14 +19,21 @@ from sqlalchemy.orm import Session
 
 from .display_proxy_processor import (DISPLAY_PROXY_PROFILE_VERSION, DisplayProxyError,
                                       sanitize_error)
+from .display_proxy_observability import error_category, log_display_event
 from .models import BackgroundJob, Video
 from .process_lock import ProcessLock
 
 JOB_TYPE_DISPLAY_PROXY = "display_proxy"
+DISPLAY_PROXY_ESTIMATED_SIZE_RATIO = 0.30
+DISPLAY_PROXY_DISK_SPACE_ERROR = "display proxy disk space unavailable"
 
 
 class DisplayProxyOwnershipLost(RuntimeError):
     pass
+
+
+class DisplayProxyDiskSpaceError(DisplayProxyError):
+    """Stable, path-free terminal category for reserve and ENOSPC failures."""
 
 
 class DisplayProcessor(Protocol):
@@ -52,6 +64,16 @@ def _valid_payload(payload: object) -> bool:
             and payload["profile_version"] == DISPLAY_PROXY_PROFILE_VERSION)
 
 
+def display_proxy_names(payload: object) -> tuple[str, str] | None:
+    """Return the only P1 temp/final names accepted for a frozen job payload."""
+    if not _valid_payload(payload):
+        return None
+    stem = (f"video-{payload['video_id']}-{payload['source_sha256'][:16]}-"
+            f"{payload['profile_version']}")
+    final = f"{stem}.mp4"
+    return f".{final}.part", final
+
+
 def enqueue_display_proxy(db: Session, video: Video) -> BackgroundJob:
     """Explicit internal capability; callers must first establish stable source identity."""
     if not video.id or not _valid_sha(video.source_sha256):
@@ -77,6 +99,10 @@ def enqueue_display_proxy(db: Session, video: Video) -> BackgroundJob:
         video.display_path = video.display_error = video.display_profile_version = None
         video.display_source_sha256 = video.display_generated_at = None
     db.flush()
+    if inserted or requeued:
+        log_display_event(logging.INFO, "display_proxy_enqueue", job_id=job.id,
+                          video_id=video.id, project_id=video.project_id, profile=profile,
+                          status="queued")
     return job
 
 
@@ -105,10 +131,29 @@ class DisplayProxyWorker:
         self._lock = ProcessLock(settings.display_proxies_dir / ".worker.lock")
 
     def _paths(self, payload: dict) -> tuple[Path, Path]:
-        stem = (f"video-{payload['video_id']}-{payload['source_sha256'][:16]}-"
-                f"{payload['profile_version']}")
-        final = self.settings.display_proxies_dir / f"{stem}.mp4"
-        return final.with_name(f".{final.name}.part"), final
+        names = display_proxy_names(payload)
+        if names is None:
+            raise DisplayProxyError("invalid frozen display proxy payload")
+        temp_name, final_name = names
+        return (self.settings.display_proxies_dir / temp_name,
+                self.settings.display_proxies_dir / final_name)
+
+    def _require_disk_space(self, additional_bytes: int) -> None:
+        try:
+            free = shutil.disk_usage(self.settings.display_proxies_dir).free
+        except OSError as exc:
+            raise DisplayProxyDiskSpaceError(DISPLAY_PROXY_DISK_SPACE_ERROR) from exc
+        if free - additional_bytes < self.settings.display_proxy_disk_reserve_bytes:
+            raise DisplayProxyDiskSpaceError(DISPLAY_PROXY_DISK_SPACE_ERROR)
+
+    @staticmethod
+    def _safe_processing_error(exc: Exception) -> Exception:
+        text = str(exc).lower()
+        if (getattr(exc, "errno", None) == errno.ENOSPC
+                or "no space left on device" in text
+                or "not enough space on the disk" in text):
+            return DisplayProxyDiskSpaceError(DISPLAY_PROXY_DISK_SPACE_ERROR)
+        return exc
 
     def _source_path(self, storage_path: str | None) -> Path:
         root = self.settings.videos_dir.resolve()
@@ -141,7 +186,7 @@ class DisplayProxyWorker:
             db.commit()
 
     def _fail(self, job_id: int, token: str, payload: dict, exc: Exception,
-              source: Path | None = None) -> None:
+              source: Path | None = None, elapsed_ms: int | None = None) -> None:
         error = (sanitize_error(exc, source or "", self.settings.videos_dir,
                                 self.settings.display_proxies_dir)
                  or "display proxy processing failed")
@@ -160,6 +205,11 @@ class DisplayProxyWorker:
                         "display_status": "failed", "display_error": error},
                         synchronize_session=False)
             db.commit()
+        identity = ({"video_id": payload["video_id"], "project_id": payload["project_id"],
+                     "profile": payload["profile_version"]} if _valid_payload(payload) else {})
+        log_display_event(logging.ERROR, "display_proxy_failed", job_id=job_id,
+                          status="failed", elapsed_ms=elapsed_ms,
+                          error_category=error_category(exc), **identity)
 
     def _claim(self, job_id: int) -> tuple[str, dict] | None:
         token = uuid.uuid4().hex
@@ -190,6 +240,9 @@ class DisplayProxyWorker:
                     "cancelled", "display proxy ownership changed", _now(), None)
                 db.commit(); return None
             db.commit()
+        log_display_event(logging.INFO, "display_proxy_claim", job_id=job_id,
+                          video_id=payload["video_id"], project_id=payload["project_id"],
+                          profile=payload["profile_version"], status="running")
         return token, payload
 
     def _after_terminal_commit(self, job_id: int, payload: dict, final: Path) -> None:
@@ -225,6 +278,7 @@ class DisplayProxyWorker:
         claim = self._claim(job_id)
         if claim is None: return
         token, payload = claim
+        started = time.monotonic()
         temp, final = self._paths(payload); source = None; replaced = False
         try:
             temp.unlink(missing_ok=True)
@@ -234,11 +288,16 @@ class DisplayProxyWorker:
                 source = self._source_path(db.get(Video, payload["video_id"]).storage_path)
             if _hash(source) != payload["source_sha256"]:
                 raise DisplayProxyError("source SHA-256 mismatch before transcoding")
+            estimated = math.ceil(source.stat().st_size * DISPLAY_PROXY_ESTIMATED_SIZE_RATIO)
+            self._require_disk_space(estimated)
             self.processor.render(input_path=str(source), output_path=str(temp))
             if _hash(source) != payload["source_sha256"]:
                 raise DisplayProxyError("source SHA-256 changed during transcoding")
             with temp.open("rb+") as handle:
                 handle.flush(); os.fsync(handle.fileno())
+            # rename itself is allocation-free, but publishing while already below the
+            # reserve would make the generated final compete with recovery/deletion IO.
+            self._require_disk_space(0)
             with self.session_factory() as db:
                 if not self._owns(db, job_id, token, payload):
                     temp.unlink(missing_ok=True); self._cancel_if_owned_job(job_id, token); return
@@ -267,6 +326,11 @@ class DisplayProxyWorker:
                         "display proxy ownership changed during commit")
                 self._commit_terminal(db)
                 self._after_terminal_commit(job_id, payload, final)
+            log_display_event(logging.INFO, "display_proxy_ready", job_id=job_id,
+                              video_id=payload["video_id"], project_id=payload["project_id"],
+                              profile=payload["profile_version"], status="ready",
+                              elapsed_ms=round((time.monotonic() - started) * 1000),
+                              bytes=final.stat().st_size)
         except DisplayProxyOwnershipLost:
             temp.unlink(missing_ok=True)
             if replaced and self._terminal_commit_is_visible(job_id, payload, final):
@@ -280,7 +344,9 @@ class DisplayProxyWorker:
                 return
             if replaced and not self._final_is_referenced(final):
                 final.unlink(missing_ok=True)
-            self._fail(job_id, token, payload, exc, source)
+            safe_exc = self._safe_processing_error(exc)
+            self._fail(job_id, token, payload, safe_exc, source,
+                       round((time.monotonic() - started) * 1000))
 
     def submit(self, job_id: int) -> None:
         if self.settings.display_proxy_synchronous:
@@ -291,6 +357,7 @@ class DisplayProxyWorker:
     def recover(self) -> None:
         """Recover only this lane; never creates work by scanning videos."""
         queued: list[int] = []
+        recovery_events: list[dict] = []
         with self.session_factory() as db:
             jobs = db.query(BackgroundJob).filter(
                 BackgroundJob.job_type == JOB_TYPE_DISPLAY_PROXY,
@@ -306,10 +373,25 @@ class DisplayProxyWorker:
                             and video.display_source_sha256 is None
                             and video.display_profile_version is None):
                         video.display_status = "pending"
-                    queued.append(job.id); continue
+                    queued.append(job.id)
+                    recovery_events.append({"job_id": job.id, "status": "queued",
+                                            **({"video_id": payload["video_id"],
+                                                "project_id": payload["project_id"],
+                                                "profile": payload["profile_version"]}
+                                               if _valid_payload(payload) else {})})
+                    continue
+                if not _valid_payload(payload):
+                    # A malformed frozen payload cannot establish ownership of any
+                    # filesystem path. Fail it without touching candidate outputs so
+                    # one corrupt row cannot block recovery or delete another job's
+                    # temp/final file.
+                    job.status, job.error, job.finished_at, job.run_token = (
+                        "failed", "invalid frozen display proxy payload", _now(), None)
+                    recovery_events.append({"job_id": job.id, "status": "failed",
+                                            "error_category": "invalid_payload"})
+                    continue
                 temp = final = None
-                try: temp, final = self._paths(payload)
-                except (KeyError, TypeError): pass
+                temp, final = self._paths(payload)
                 video = db.get(Video, payload.get("video_id"))
                 owns = bool(video and _valid_payload(payload)
                             and video.display_status == "processing"
@@ -323,10 +405,19 @@ class DisplayProxyWorker:
                     job.status, job.run_token, job.error = "queued", None, None
                     if owns: video.display_status = "pending"
                     queued.append(job.id)
+                    recovery_events.append({"job_id": job.id, "video_id": payload["video_id"],
+                                            "project_id": payload["project_id"],
+                                            "profile": payload["profile_version"],
+                                            "status": "queued"})
                 else:
                     job.status, job.error, job.finished_at, job.run_token = (
                         "failed", "display proxy retry limit exhausted", _now(), None)
                     if owns: video.display_status, video.display_error = "failed", job.error
+                    recovery_events.append({"job_id": job.id, "video_id": payload["video_id"],
+                                            "project_id": payload["project_id"],
+                                            "profile": payload["profile_version"],
+                                            "status": "failed",
+                                            "error_category": "retry_exhausted"})
             active_ids = set()
             for job in jobs:
                 payload = job.payload
@@ -343,7 +434,11 @@ class DisplayProxyWorker:
                 if video.id not in active_ids:
                     video.display_status = "failed"
                     video.display_error = "display proxy owner missing after restart"
+                    recovery_events.append({"video_id": video.id, "project_id": video.project_id,
+                                            "status": "failed", "error_category": "owner_missing"})
             db.commit()
+        for fields in recovery_events:
+            log_display_event(logging.WARNING, "display_proxy_recovery", **fields)
         for job_id in queued: self.submit(job_id)
 
     def start(self) -> None:

@@ -545,6 +545,34 @@ def test_complete_with_all_files_creates_detection_import(ctx, login_headers):
         assert video.detection_import_revision == 1
 
 
+def test_complete_with_all_files_enqueues_display_proxy(ctx, login_headers):
+    import hashlib
+
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    source = b"FAKE-MP4"
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", source, headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+    submitted = []
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = type(
+        "Worker", (), {"submit": lambda self, job_id: submitted.append(job_id)}
+    )()
+
+    resp = ctx.client.post(
+        f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ready"
+    with ctx.session_factory() as db:
+        video = db.get(models.Video, resp.json()["video_id"])
+        job = db.query(models.BackgroundJob).one()
+        assert video.source_sha256 == hashlib.sha256(source).hexdigest()
+        assert job.status == "queued"
+        assert submitted == [job.id]
+
+
 def test_complete_holds_delete_gate_from_first_visible_commit(
     ctx, login_headers, monkeypatch
 ):
@@ -625,6 +653,7 @@ def test_complete_gate_busy_rolls_back_video_and_restores_batch(
     batch = _create_batch(ctx.client, pid, headers)
     _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
     gate = ctx.client.app.state.video_operation_gate
+    ctx.client.app.state.settings.display_proxies_enabled = True
     original_acquire = gate.acquire
 
     def busy(video_id):
@@ -642,6 +671,7 @@ def test_complete_gate_busy_rolls_back_video_and_restores_batch(
         assert stored.created_video_id is None
         assert stored.validation_errors == {"video_operation_busy": True}
         assert db.query(models.Video).filter_by(project_id=pid).count() == 0
+        assert db.query(models.BackgroundJob).count() == 0
 
     monkeypatch.setattr(gate, "acquire", original_acquire)
     retried = ctx.client.post(
@@ -653,6 +683,40 @@ def test_complete_gate_busy_rolls_back_video_and_restores_batch(
         stored = db.get(models.VideoImportBatch, batch["id"])
         assert stored.status == "video_only"
         assert db.get(models.Video, stored.created_video_id) is not None
+
+
+def test_complete_visible_transaction_failure_leaves_no_video_or_proxy_job(
+    ctx, login_headers, monkeypatch
+):
+    headers, pid = _create_project_for_test(ctx, login_headers)
+    batch = _create_batch(ctx.client, pid, headers)
+    _upload_file(ctx.client, pid, batch["id"], "video", "clip.mp4", b"FAKE-MP4", headers)
+    _upload_file(ctx.client, pid, batch["id"], "tracks", "tracks.jsonl", make_tracks_jsonl(), headers)
+    _upload_file(ctx.client, pid, batch["id"], "metadata", "metadata.json", make_metadata_json(), headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+
+    original_commit = Session.commit
+    completion_commits = 0
+
+    def fail_visible_commit(session):
+        nonlocal completion_commits
+        completion_commits += 1
+        if completion_commits == 2:
+            raise RuntimeError("visible transaction failed")
+        return original_commit(session)
+
+    monkeypatch.setattr(Session, "commit", fail_visible_commit)
+    with pytest.raises(RuntimeError, match="visible transaction failed"):
+        ctx.client.post(
+            f"/api/projects/{pid}/video-import-batches/{batch['id']}/complete", headers=headers,
+        )
+
+    with ctx.session_factory() as db:
+        stored = db.get(models.VideoImportBatch, batch["id"])
+        assert stored.status == "failed"
+        assert stored.created_video_id is None
+        assert db.query(models.Video).filter_by(project_id=pid).count() == 0
+        assert db.query(models.BackgroundJob).filter_by(project_id=pid).count() == 0
 
 
 def test_three_file_complete_assignee_race_is_retryable_409(monkeypatch, ctx, login_headers):
@@ -721,6 +785,8 @@ def test_three_file_complete_assignee_race_is_retryable_409(monkeypatch, ctx, lo
 def test_complete_video_only_creates_playable_video(ctx, login_headers):
     headers, pid = _create_project_for_test(ctx, login_headers)
     batch = _create_batch(ctx.client, pid, headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = None
     _upload_file(ctx.client, pid, batch["id"], "video", "only-video.mp4", b"fake", headers)
 
     resp = ctx.client.post(
@@ -739,6 +805,8 @@ def test_complete_video_only_creates_playable_video(ctx, login_headers):
         assert video is not None
         assert video.filename == "only-video.mp4"
         assert video.detection_import_revision == 0
+        assert video.source_sha256 is not None
+        assert db.query(models.BackgroundJob).filter_by(project_id=pid).count() == 1
         imp_count = db.query(models.DetectionImport).filter(
             models.DetectionImport.video_id == video.id
         ).count()

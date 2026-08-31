@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from .cleanup_io import (
     update_cleanup_log,
 )
 from .import_batch_cleanup import BatchCleanupConflict, cleanup_import_batch
+from .display_proxy_jobs import JOB_TYPE_DISPLAY_PROXY, display_proxy_names
 from .models import Annotation, BackgroundJob, Clip, Video, VideoImportBatch
 
 TERMINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
@@ -31,6 +33,12 @@ _SUBMISSION_STAGING = re.compile(
 )
 _EXPORT_ZIP = re.compile(r"^export_project_\d+_\d+\.zip$")
 _MEDIA_NAME = re.compile(r"^clip_(?P<annotation_id>\d+)_rev(?P<revision>\d+)\.(?P<ext>mp4|jpg)$")
+_DISPLAY_FINAL = re.compile(
+    r"^video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1\.mp4$"
+)
+_DISPLAY_TEMP = re.compile(
+    r"^\.video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1\.mp4\.part$"
+)
 
 
 def _safe_path(
@@ -203,6 +211,98 @@ def _valid_export_path(job: BackgroundJob, settings, now: datetime) -> Path | No
     return path
 
 
+def _display_delete_manifest_refs(settings, report: dict[str, Any]) -> tuple[set[str], bool]:
+    """Read only relative display keys; uncertainty disables orphan-final deletion."""
+    root_dir = settings.data_dir / "video-delete-quarantine"
+    root, reason = trusted_root(settings.data_dir, root_dir)
+    if root is None:
+        report["issues"].append(_root_issue(root_dir, reason or "unsafe"))
+        return set(), False
+    if not root.exists():
+        return set(), True
+    refs: set[str] = set()
+    safe = True
+    try:
+        children = list(root.iterdir())
+    except OSError as exc:
+        report["issues"].append(_issue("display-manifest-scan-failed", str(root), str(exc)))
+        return refs, False
+    for child in children:
+        try:
+            mode = child.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                continue
+            raw = json.loads((child / "manifest.json").read_text(encoding="utf-8"))
+            entries = raw.get("entries")
+            if not isinstance(entries, list):
+                raise ValueError("invalid entries")
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("root_kind") != "display_proxies":
+                    continue
+                key = entry.get("relative_key")
+                if (isinstance(key, str) and Path(key).name == key
+                        and (_DISPLAY_FINAL.fullmatch(key) or _DISPLAY_TEMP.fullmatch(key))):
+                    refs.add(key)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            safe = False
+            report["issues"].append(_issue(
+                "display-manifest-unreadable", str(child), str(exc)
+            ))
+    return refs, safe
+
+
+def _cleanup_display_proxies(
+    db: Session, settings, cutoff: datetime, report: dict[str, Any], *, dry_run: bool
+) -> None:
+    root, root_reason = trusted_root(settings.data_dir, settings.display_proxies_dir)
+    if root is None:
+        report["issues"].append(_root_issue(settings.display_proxies_dir, root_reason or "unsafe"))
+        return
+    if not root.exists():
+        return
+    protected: set[str] = {
+        value for (value,) in db.query(Video.display_path).filter(
+            Video.display_status == "ready", Video.display_path.is_not(None)
+        ).all() if isinstance(value, str)
+    }
+    jobs = db.query(BackgroundJob).filter(BackgroundJob.job_type == JOB_TYPE_DISPLAY_PROXY).all()
+    for job in jobs:
+        if job.status in {"queued", "running"}:
+            names = display_proxy_names(job.payload)
+            if names is not None:
+                protected.update(names)
+        if job.status in TERMINAL_JOB_STATUSES and isinstance(job.result_path, str):
+            protected.add(job.result_path)
+    manifest_refs, manifests_safe = _display_delete_manifest_refs(settings, report)
+    protected.update(manifest_refs)
+    for candidate in root.iterdir():
+        path, reason = _safe_path(candidate.name, settings.display_proxies_dir, settings.data_dir)
+        recognized = bool(_DISPLAY_TEMP.fullmatch(candidate.name) or _DISPLAY_FINAL.fullmatch(candidate.name))
+        if path is None:
+            if recognized:
+                report["issues"].append(_issue("unsafe-path", str(candidate), reason or "unsafe"))
+            continue
+        is_temp = _DISPLAY_TEMP.fullmatch(path.name) is not None
+        is_final = _DISPLAY_FINAL.fullmatch(path.name) is not None
+        if (not (is_temp or is_final) or path.name in protected
+                or not manifests_safe or not _older_than(path, cutoff)):
+            continue
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+        except OSError:
+            continue
+        if dry_run:
+            report["would_delete"] += 1
+            continue
+        deleted, delete_reason = remove_checked(
+            path, root_dir=settings.display_proxies_dir, data_dir=settings.data_dir
+        )
+        report["deleted"] += int(deleted)
+        if delete_reason is not None:
+            report["issues"].append(_issue("delete-failed", str(path), delete_reason))
+
+
 def run_retention_cleanup(
     db: Session,
     settings,
@@ -355,6 +455,8 @@ def run_retention_cleanup(
             dry_run=dry_run,
         )
 
+    _cleanup_display_proxies(db, settings, temp_cutoff, report, dry_run=dry_run)
+
     all_result_jobs = db.query(BackgroundJob).filter(BackgroundJob.result_path.is_not(None)).all()
     referenced_exports = {
         path for job in all_result_jobs if (path := _valid_export_path(job, settings, now)) is not None
@@ -389,6 +491,7 @@ def run_retention_cleanup(
         job
         for job in all_result_jobs
         if job.id not in expired_ids
+        and job.job_type != JOB_TYPE_DISPLAY_PROXY
         and job.status in TERMINAL_JOB_STATUSES
         and _valid_export_path(job, settings, now) is None
     ]

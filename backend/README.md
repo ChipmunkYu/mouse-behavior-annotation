@@ -93,17 +93,11 @@ uvicorn app.main:app --reload --port 8000
 
 健康检查：`GET /api/health`。接口文档（Swagger）：`http://127.0.0.1:8000/docs`。
 
-Linux resolved lock 已从服务器 Ubuntu 22.04 / Python 3.10.12 隔离环境保存为
-`constraints-py310-linux.txt`。该环境基于提交 `28cdba6765b119a74fc16e6e608969f4927bf3e9`
-安装 `requirements-dev.txt`，`pip check` 通过，完整后端测试为
-`688 passed, 1 skipped in 441.10s`，并由此形成已推送至 `origin/docs/http-range-plan` 的 Linux lock
-提交 `971c056d7f6257eb7f29ab8a3fe81e731ecdd387`。服务器已创建该提交的最终隔离 release；其
-runtime `.venv` 按提交内 constraints 与 requirements 安装且 `pip check` 通过，Linux 同文件系统
-`os.replace` 后已打开 FD 继续读完整 payload 的门禁也通过。该 release 未启动候选服务、未切换
-`current`，本功能尚未部署；真实 Nginx/HTTPS/日志、浏览器、Firefox、约 2 GB 量化及 native
-Preview 制品仍是 P3/部署前门禁。
+Linux resolved lock 保存在 `constraints-py310-linux.txt`；目标 release 必须按该提交重新执行
+runtime 依赖安装与 `pip check`。生产 release 和运行状态只以仓库外“网站服务器文件清单”为准，
+本 README 不复制易过期的当前提交号。
 
-## 原生视频流媒体票据（P1 本地候选）
+## 原生视频流媒体票据（历史实现背景）
 
 `MEDIA_TICKET_ENABLED` 安全默认 `false`，`MEDIA_LEGACY_BEARER_ENABLED` 默认 `true` 以支持回滚。
 启用后，登录设置 host-only 的 Secure/HttpOnly/Strict binding Cookie；Bearer 调用
@@ -230,11 +224,18 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 批次 7（生命周期清理）已实现，
 见下文对应章节。
 
-## 低码率展示代理生成（P1 本地候选）
+## 低码率展示代理播放（P4 本地候选）
 
-迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定候选 profile、显式内部入队、单 owner、CAS、原子发布和启动恢复。候选 profile 为 1280×720、H.264/libx264、CRF 28、veryfast、yuv420p、固定 30 帧 GOP、SAR 1:1、无音频和 faststart，并严格校验 CFR 时间戳、帧数、时长、旋转和源文件 SHA-256。
+迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定 profile、单 owner、CAS、原子发布和启动恢复。新 file-backed Video 仅在 `DISPLAY_PROXIES_ENABLED=true` 时计算原片 SHA-256，并在创建事务内入队；metadata-only Video 明确排除。四个展示入口都经完整认证 GET 读取资源，前端等待 `response.blob()` 后创建 object URL。开启时 pending/failed 严格返回 409，绝不按页面或状态回退原片；片段生成、Submission 冻结、补生成和项目导出始终读取 `Video.storage_path` 原片。
 
-该能力由 `DISPLAY_PROXIES_ENABLED=false` 默认关闭；当前没有上传/三文件导入自动入队、历史 backfill、展示下载 API 或前端播放切换。硬删除已纳入代理文件和 terminal job 结果，但启用前仍须在 FFmpeg/ffprobe 4.4.2 环境完成真实 round-trip、长视频、ENOSPC 和并发验证。
+唯一开关默认 `false`：关闭时展示读取原片，而且新 Video 不 hash、不入队；开启时新视频生成代理且展示严格只读 ready 代理。不支持历史回填，也没有独立 fallback 或 `PROXIES_DIR` 配置，代理目录固定由 `DATA_DIR` 派生。故关闭期间必须冻结新视频写入；启用前须在维护窗口清空/重置旧 file-backed 数据（实际执行须再次明确确认并留证），并运行只读预检：
+
+生产执行不得直接依赖工作目录 `.env`，必须使用部署指南中带显式
+`--env-file /home/jinghan/.config/mouse-annotation/backend.env` 的安全 Python wrapper；禁止
+`source backend.env`、`. backend.env` 或 `set -a`，且不得打印配置值或 secret。本地开发才可直接运行
+`python scripts/display_proxy_preflight.py`。
+
+预检不写数据库、不计算 hash、不运行 ffprobe：退出码 `0` 表示可切 strict，`1` 表示存在未 ready/不一致数据，`2` 表示配置、数据库或检查过程出错。上线 strict 前必须为 `0`。生产仅允许单实例、单 Uvicorn worker，不得滚动双实例。
 
 ## Demo 账号
 
@@ -288,10 +289,11 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 | `MEDIA_MAP_AUDIO` | `false` | 片段是否映射音频（`-map 0:a:0?` + aac；默认仅视频） |
 | `MEDIA_MAX_ATTEMPTS` | `3` | 重启恢复时 running 任务被重排/判失败的 attempts 阈值 |
 | `MEDIA_SYNCHRONOUS` | `false` | 测试用：媒体 worker 在请求线程内同步执行（配合可替换执行器） |
-| `DISPLAY_PROXIES_ENABLED` | `false` | 是否启用 P1 代理 worker；默认关闭，当前无自动入队或播放切换 |
+| `DISPLAY_PROXIES_ENABLED` | `false` | 唯一展示代理开关；false=原片且不 hash/入队，true=新视频入队且严格只读 ready 代理 |
 | `DISPLAY_PROXY_TIMEOUT_SECONDS` | `3600` | 单个代理转码/探测命令超时（秒） |
 | `DISPLAY_PROXY_MAX_ATTEMPTS` | `3` | 启动恢复时中断任务的最大 attempts |
 | `DISPLAY_PROXY_SYNCHRONOUS` | `false` | 测试用：代理 worker 同步执行 |
+| `DISPLAY_PROXY_DISK_RESERVE_BYTES` | `1073741824`（1 GiB） | 代理转码开始及发布前必须保留的磁盘安全余量 |
 | `CLEANUP_ENABLED` | `true` | 是否启动生命周期清理 worker；关闭时仍可手工运行脚本 |
 | `CLEANUP_INTERVAL_SECONDS` | `3600` | 启动清理一次后的周期秒数 |
 | `TEMP_RETENTION_HOURS` | `24` | 已知程序临时文件、孤儿导出 ZIP 及未活动 `uploading/failed` 三文件导入批次的保留时间 |
@@ -709,11 +711,11 @@ python scripts/export_openapi.py --check
 
 当前全局上传任务管理实现的后端相关测试为 **128 passed, 3 skipped, 1 warning**，前端 production build 通过并处理 **66 modules**。Oracle 仅确认普通 1–2 人上传场景未发现阻断问题；该结论不等于跨路由、跨项目、取消/重试、退出、401 回收或可访问性的浏览器人工矩阵已经验收。
 
-2026-08-24，生产功能提交 `93606031d1977fdd39e76bdbf678996a30b19e17` 的 Linux/Python 3.10 候选通过 descriptor capability 关键 3 tests、候选聚焦回归 `277 passed`、真实 FFmpeg/ffprobe 4.4.2 集成测试 `5 passed`、`pip check` 与前端 production build（66 modules），并已部署为 `current=9360603`、SQLite schema `0015`。后续 docs-only 提交不改变运行时 release。首个 `310e2f3` 候选虽构建成功，但回归为 `274 passed, 2 failed`，因 descriptor capability 动态误判而未迁移、未切换；该失败 release 保留。
+2026-08-24 的 Linux/Python 3.10 候选曾通过 descriptor capability 关键 3 tests、聚焦回归 `277 passed`、真实 FFmpeg/ffprobe 4.4.2 集成测试 `5 passed`、`pip check` 与前端 production build（66 modules）；这是历史候选证据，不表示当前 P4 release 或服务器状态。生产提交、schema 与服务实时事实只查仓库外“网站服务器文件清单”。
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-当前修复已推送 `origin/main` 并部署；上述自动验收及服务器本机 health 不替代人工浏览器硬删除/上传任务回归或本次来源的公网验收。候选 `npm audit` 报告 3 moderate、2 high，尚待评估且未自动修改依赖。
+上述历史自动验收及服务器本机 health 不替代人工浏览器硬删除/上传任务回归或本次来源的公网验收。当前 P4 分支尚未提交、推送或部署；候选 `npm audit` 报告 3 moderate、2 high，尚待评估且未自动修改依赖。
 
 覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，

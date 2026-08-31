@@ -292,11 +292,14 @@ export function getCorrectedTracksExport(projectId: number | string, videoId: nu
   return apiFetch<CorrectedTracksExport>(`/projects/${projectId}/videos/${videoId}/detections/export`);
 }
 
-/**
- * 视频流需要 Bearer 认证，<video> 无法直接携带请求头，
- * 因此用带 token 的请求拉取 blob 并生成 object URL。
- */
-export async function fetchVideoStreamUrl(videoId: number | string, signal?: AbortSignal): Promise<string> {
+export interface VideoStreamBlob {
+  blob: Blob;
+  /** 响应声明的完整字节数；缺失或无效时为 null。 */
+  contentLength: number | null;
+}
+
+/** 用一次带 Bearer 认证的完整 GET 下载媒体；object URL 由媒体控制器统一管理。 */
+export async function fetchVideoStreamBlob(videoId: number | string, signal?: AbortSignal): Promise<VideoStreamBlob> {
   const res = await apiRaw(`/videos/${videoId}/stream`, { credentials: "omit", signal });
   if (res.status === 401) {
     // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面仍停留在标注页
@@ -304,13 +307,23 @@ export async function fetchVideoStreamUrl(videoId: number | string, signal?: Abo
     throw new ApiError(401, "登录已过期，请重新登录");
   }
   if (!res.ok) {
-    throw new ApiError(res.status, `视频流不可用（HTTP ${res.status}）`);
+    let detail: unknown;
+    try {
+      const body = await res.json() as { detail?: unknown };
+      detail = body.detail;
+    } catch {
+      // 非 JSON 错误响应按状态码分类。
+    }
+    throw new ApiError(res.status, `视频流不可用（HTTP ${res.status}）`, detail);
   }
+  const rawLength = res.headers.get("Content-Length");
+  const parsedLength = rawLength == null ? NaN : Number(rawLength);
+  const contentLength = Number.isSafeInteger(parsedLength) && parsedLength >= 0 ? parsedLength : null;
   const blob = await res.blob();
   if (blob.size === 0) {
     throw new ApiError(404, "视频文件为空");
   }
-  return URL.createObjectURL(blob);
+  return { blob, contentLength };
 }
 
 /** 获取供原生 <video> 使用的短期同源地址；响应仅暴露白名单字段。 */

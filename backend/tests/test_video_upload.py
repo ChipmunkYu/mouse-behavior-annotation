@@ -7,8 +7,12 @@ Content-Type 仅辅助、无固定大小限制配置、JSON Mock 接口并存。
 from __future__ import annotations
 
 import collections
+import asyncio
+import hashlib
+import io
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import starlette.datastructures as sd
@@ -18,6 +22,21 @@ from sqlalchemy.orm import Session
 from app import models
 from app.models import ProjectMembership
 from app.routers import videos as videos_module
+
+
+class _RecordingDisplayWorker:
+    def __init__(self, *, fail=False):
+        self.job_ids = []
+        self.fail = fail
+
+    def submit(self, job_id):
+        self.job_ids.append(job_id)
+        if self.fail:
+            raise RuntimeError("submit unavailable")
+
+
+class _UploadBaseAbort(BaseException):
+    pass
 
 DU = collections.namedtuple("DiskUsage", "total used free")
 
@@ -88,6 +107,91 @@ def test_upload_mp4_sets_fields_and_streams(ctx, login_headers):
     assert resp2.status_code == 200
     assert resp2.content == data
     assert not list(videos_dir.glob("*.part"))  # 无 .part 残留
+
+
+def test_upload_enabled_hashes_and_enqueues_before_submit(ctx, login_headers):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    data = b"display-proxy-source"
+    worker = _RecordingDisplayWorker()
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = worker
+
+    resp = _upload(ctx.client, pid, headers, data=data)
+    assert resp.status_code == 201, resp.text
+    with ctx.session_factory() as db:
+        video = db.get(models.Video, resp.json()["id"])
+        jobs = db.query(models.BackgroundJob).all()
+        assert video.source_sha256 == hashlib.sha256(data).hexdigest()
+        assert len(jobs) == 1
+        assert jobs[0].payload["source_sha256"] == video.source_sha256
+        assert worker.job_ids == [jobs[0].id]
+
+
+def test_upload_hash_failure_cleans_file_and_database(ctx, login_headers, monkeypatch):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    monkeypatch.setattr(videos_module, "hash_display_proxy_source",
+                        lambda _path: (_ for _ in ()).throw(OSError("hash failed")))
+
+    resp = _upload(ctx.client, pid, headers, data=b"source")
+    assert resp.status_code == 500
+    assert _files_in(_videos_dir(ctx)) == []
+    with ctx.session_factory() as db:
+        assert db.query(models.Video).count() == 0
+        assert db.query(models.BackgroundJob).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("abort", "expected"),
+    [
+        (_UploadBaseAbort("base abort"), _UploadBaseAbort),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+)
+def test_upload_hash_wait_abort_after_rename_cleans_final(
+    ctx, login_headers, monkeypatch, abort, expected,
+):
+    pid = _make_project(ctx, login_headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+
+    async def abort_hash(*_args, **_kwargs):
+        raise abort
+
+    monkeypatch.setattr(videos_module.to_thread, "run_sync", abort_hash)
+    with ctx.session_factory() as db:
+        project = db.get(models.Project, pid)
+        membership = db.query(ProjectMembership).filter_by(project_id=pid).one()
+        upload = sd.UploadFile(file=io.BytesIO(b"renamed-source"), filename="abort.mp4")
+        with pytest.raises(expected):
+            asyncio.run(videos_module.upload_video(
+                project_id=pid,
+                request=SimpleNamespace(app=ctx.client.app),
+                file=upload,
+                assignee_membership_id=None,
+                access=(project, membership),
+                db=db,
+            ))
+    assert _files_in(_videos_dir(ctx)) == []
+    with ctx.session_factory() as db:
+        assert db.query(models.Video).count() == 0
+        assert db.query(models.BackgroundJob).count() == 0
+
+
+def test_upload_submit_failure_keeps_committed_job_queued(ctx, login_headers):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    worker = _RecordingDisplayWorker(fail=True)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = worker
+
+    resp = _upload(ctx.client, pid, headers, data=b"source")
+    assert resp.status_code == 201, resp.text
+    with ctx.session_factory() as db:
+        job = db.query(models.BackgroundJob).one()
+        assert job.status == "queued"
+        assert worker.job_ids == [job.id]
 
 
 @pytest.mark.parametrize(
@@ -373,6 +477,85 @@ def test_upload_db_failure_cleans_orphan(ctx, login_headers, monkeypatch):
     assert _video_rows(ctx) == []
 
 
+def test_upload_enabled_db_failure_rolls_back_proxy_job(ctx, login_headers, monkeypatch):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+
+    def boom(self):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(Session, "commit", boom)
+    resp = _upload(ctx.client, pid, headers, data=b"bytes")
+    assert resp.status_code == 500
+    assert _files_in(_videos_dir(ctx)) == []
+    with ctx.session_factory() as db:
+        assert db.query(models.Video).count() == 0
+        assert db.query(models.BackgroundJob).count() == 0
+
+
+def test_upload_commit_effect_then_exception_keeps_authoritative_file_and_job_without_submit(
+    ctx, login_headers, monkeypatch,
+):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    data = b"committed-display-source"
+    worker = _RecordingDisplayWorker()
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = worker
+    original_commit = Session.commit
+
+    def commit_then_boom(session):
+        is_upload = any(
+            isinstance(item, models.Video) and item.storage_path
+            for item in session.identity_map.values()
+        )
+        result = original_commit(session)
+        if is_upload:
+            raise RuntimeError("driver lost commit acknowledgement")
+        return result
+
+    monkeypatch.setattr(Session, "commit", commit_then_boom)
+    resp = _upload(ctx.client, pid, headers, data=data)
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == videos_module.ERR_DB_SAVE
+    assert worker.job_ids == []
+    with ctx.session_factory() as db:
+        video = db.query(models.Video).one()
+        job = db.query(models.BackgroundJob).one()
+        assert video.source_sha256 == hashlib.sha256(data).hexdigest()
+        assert (_videos_dir(ctx) / video.storage_path).read_bytes() == data
+        assert job.payload["video_id"] == video.id
+        assert job.payload["source_sha256"] == video.source_sha256
+
+
+def test_upload_disabled_commit_effect_then_exception_keeps_file_by_video_visibility(
+    ctx, login_headers, monkeypatch,
+):
+    headers = login_headers()
+    pid = _make_project(ctx, login_headers)
+    original_commit = Session.commit
+
+    def commit_then_boom(session):
+        is_upload = any(
+            isinstance(item, models.Video) and item.storage_path
+            for item in session.identity_map.values()
+        )
+        result = original_commit(session)
+        if is_upload:
+            raise RuntimeError("driver lost commit acknowledgement")
+        return result
+
+    monkeypatch.setattr(Session, "commit", commit_then_boom)
+    resp = _upload(ctx.client, pid, headers, data=b"committed-source")
+    assert resp.status_code == 500
+    with ctx.session_factory() as db:
+        video = db.query(models.Video).one()
+        assert video.source_sha256 is None
+        assert (_videos_dir(ctx) / video.storage_path).read_bytes() == b"committed-source"
+        assert db.query(models.BackgroundJob).count() == 0
+
+
 def test_upload_assignee_race_returns_409_cleans_file_and_retries(ctx, login_headers, monkeypatch):
     headers = login_headers()
     pid = _make_project(ctx, login_headers)
@@ -391,7 +574,7 @@ def test_upload_assignee_race_returns_409_cleans_file_and_retries(ctx, login_hea
         nonlocal fail_once
         if fail_once and any(
             isinstance(item, models.Video) and item.assignee_membership_id == alice_mid
-            for item in session.new
+            for item in session.identity_map.values()
         ):
             fail_once = False
             raise IntegrityError(
@@ -461,6 +644,8 @@ def test_upload_missing_file_field_422(ctx, login_headers):
 def test_mock_json_endpoint_still_works(ctx, login_headers):
     headers = login_headers()
     pid = _make_project(ctx, login_headers)
+    ctx.client.app.state.settings.display_proxies_enabled = True
+    ctx.client.app.state.display_proxy_worker = None
     resp = ctx.client.post(
         f"/api/projects/{pid}/videos",
         json={"filename": "mock.mp4", "status": "metadata"},
@@ -470,3 +655,7 @@ def test_mock_json_endpoint_still_works(ctx, login_headers):
     assert resp.json()["status"] == "metadata"
     assert "storage_path" not in resp.json()
     assert _storage_path(ctx, resp.json()["id"]) is None
+    with ctx.session_factory() as db:
+        video = db.get(models.Video, resp.json()["id"])
+        assert video.source_sha256 is None
+        assert db.query(models.BackgroundJob).count() == 0

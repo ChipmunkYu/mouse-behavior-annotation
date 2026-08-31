@@ -1,5 +1,7 @@
 import hashlib
+import errno
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,6 +110,60 @@ def test_failure_is_redacted_and_source_change_is_detected(ctx):
         assert job.status == video.display_status == "failed"
         assert job.run_token is None
         assert str(source) not in job.error and "<media-path>" in job.error
+
+
+def test_start_reserve_shortage_fails_without_render_or_source_damage(ctx, monkeypatch):
+    settings, source, _digest, job_id, video_id, _ = _queued(ctx, b"x" * 100)
+    settings.display_proxy_disk_reserve_bytes = 1000
+    processor = FakeDisplayProcessor()
+    monkeypatch.setattr(
+        "app.display_proxy_jobs.shutil.disk_usage", lambda _path: SimpleNamespace(free=1029)
+    )
+    worker = DisplayProxyWorker(processor=processor, session_factory=ctx.session_factory,
+                                settings=settings)
+    worker.start(); worker.shutdown()
+    with ctx.session_factory() as db:
+        job, video = db.get(BackgroundJob, job_id), db.get(Video, video_id)
+        assert job.status == video.display_status == "failed"
+        assert job.error == video.display_error == "display proxy disk space unavailable"
+    assert processor.calls == [] and source.read_bytes() == b"x" * 100
+    assert not list(settings.display_proxies_dir.glob("*.part"))
+
+
+def test_publish_reserve_shortage_cleans_temp_and_never_replaces_ready(ctx, monkeypatch):
+    settings, source, _digest, job_id, video_id, _ = _queued(ctx, b"source")
+    settings.display_proxy_disk_reserve_bytes = 1000
+    calls = iter((SimpleNamespace(free=2000), SimpleNamespace(free=999)))
+    monkeypatch.setattr("app.display_proxy_jobs.shutil.disk_usage", lambda _path: next(calls))
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    worker.start(); worker.shutdown()
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job_id).status == "failed"
+        assert db.get(Video, video_id).display_status == "failed"
+    assert source.read_bytes() == b"source"
+    assert not list(settings.display_proxies_dir.glob("*.part"))
+    assert not list(settings.display_proxies_dir.glob("*.mp4"))
+
+
+def test_enospc_is_stable_and_cleans_partial_output(ctx):
+    settings, source, _digest, job_id, video_id, _ = _queued(ctx)
+    settings.display_proxy_disk_reserve_bytes = 0
+
+    class EnospcProcessor:
+        def render(self, *, output_path, **_kwargs):
+            Path(output_path).write_bytes(b"partial")
+            raise OSError(errno.ENOSPC, "No space left on device", output_path)
+
+    worker = DisplayProxyWorker(processor=EnospcProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    worker.start(); worker.shutdown()
+    with ctx.session_factory() as db:
+        job, video = db.get(BackgroundJob, job_id), db.get(Video, video_id)
+        assert job.status == video.display_status == "failed"
+        assert job.error == video.display_error == "display proxy disk space unavailable"
+        assert str(settings.display_proxies_dir) not in job.error
+    assert source.exists() and not list(settings.display_proxies_dir.glob("*.part"))
 
 
 def test_empty_runtime_error_persists_nonempty_terminal_failure(ctx):
@@ -261,6 +317,36 @@ def test_recovery_wrong_source_job_does_not_mask_orphan_processing(ctx):
         assert db.get(Video, video_id).display_status == "failed"
         job = db.get(BackgroundJob, job_id)
         assert job.status == "cancelled" and job.run_token is None
+
+
+def test_recovery_malformed_running_job_fails_safe_and_continues(ctx):
+    settings, _source, _digest, malformed_id, malformed_video_id, _ = _queued(ctx)
+    _settings, _source, _digest, valid_id, valid_video_id, _ = _queued(ctx)
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    with ctx.session_factory() as db:
+        malformed = db.get(BackgroundJob, malformed_id)
+        malformed.status, malformed.run_token, malformed.attempts = "running", "stale-token", 1
+        malformed.payload = {"video_id": malformed_video_id, "unexpected": "private/path.mp4"}
+        db.get(Video, malformed_video_id).display_status = "processing"
+        db.commit()
+
+    ready = settings.display_proxies_dir / "already-ready.mp4"
+    foreign_temp = settings.display_proxies_dir / ".another-job.mp4.part"
+    ready.write_bytes(b"ready")
+    foreign_temp.write_bytes(b"foreign")
+
+    worker.start(); worker.shutdown()
+
+    with ctx.session_factory() as db:
+        malformed = db.get(BackgroundJob, malformed_id)
+        assert malformed.status == "failed" and malformed.run_token is None
+        assert malformed.error == "invalid frozen display proxy payload"
+        assert "private" not in malformed.error
+        assert db.get(BackgroundJob, valid_id).status == "succeeded"
+        assert db.get(Video, valid_video_id).display_status == "ready"
+    assert ready.read_bytes() == b"ready"
+    assert foreign_temp.read_bytes() == b"foreign"
 
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])

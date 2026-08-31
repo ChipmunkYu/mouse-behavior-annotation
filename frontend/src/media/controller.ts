@@ -1,16 +1,30 @@
-import type { StreamTicket } from "../api/types";
+import type { VideoStreamBlob } from "../api";
 
 export type MediaReadyReason = "initial" | "retry-restored";
-export type MediaHttpStatus = 401 | 403 | 404 | null;
+export type MediaHttpStatus = 401 | 403 | 404 | 409 | null;
+export type MediaPendingReason = "display-pending";
+export type MediaFailureReason = "display-failed" | "http" | "network";
+
+interface MediaStateBase {
+  generation: number;
+  readyReason: MediaReadyReason | null;
+}
+
 export type MediaControllerState =
-  | { status: "idle"; generation: number; readyReason: null }
-  | { status: "loading"; generation: number; readyReason: null }
-  | { status: "ready"; generation: number; readyReason: MediaReadyReason }
-  | { status: "error"; generation: number; readyReason: null; message: string; canRetry: true; httpStatus: MediaHttpStatus };
+  | (MediaStateBase & { status: "idle" })
+  | (MediaStateBase & { status: "downloading" })
+  | (MediaStateBase & { status: "ready"; readyReason: MediaReadyReason; contentLength: number | null; blobSize: number })
+  | (MediaStateBase & { status: "pending"; message: string; canRetry: true; reason: MediaPendingReason })
+  | (MediaStateBase & { status: "failed"; message: string; canRetry: true; httpStatus: MediaHttpStatus; reason: MediaFailureReason })
+  | (MediaStateBase & { status: "cancelled"; message: string; canRetry: true });
 
-export const MEDIA_LOAD_ERROR = "视频加载失败，请检查网络后重试。";
+export const MEDIA_DOWNLOAD_MESSAGE = "正在下载，完成后才能播放。";
+export const MEDIA_CANCELLED_MESSAGE = "已取消下载。";
+export const MEDIA_PENDING_MESSAGE = "播放资源正在处理中，请稍后重试。";
+export const MEDIA_PROXY_FAILED_MESSAGE = "播放资源处理失败，请联系项目管理员。";
+export const MEDIA_LOAD_ERROR = "视频下载失败，请检查网络后重试。";
 
-const MEDIA_HTTP_ERROR_MESSAGES: Record<Exclude<MediaHttpStatus, null>, string> = {
+const MEDIA_HTTP_ERROR_MESSAGES: Record<401 | 403 | 404, string> = {
   401: "登录已过期，请重新登录后重试。",
   403: "你没有权限访问此视频，请联系项目管理员。",
   404: "视频不存在或已被删除，请返回视频列表。",
@@ -18,10 +32,7 @@ const MEDIA_HTTP_ERROR_MESSAGES: Record<Exclude<MediaHttpStatus, null>, string> 
 
 export interface MediaElementLike {
   src: string;
-  currentTime: number;
-  paused: boolean;
   pause(): void;
-  play(): Promise<void>;
   load(): void;
   removeAttribute(name: string): void;
   addEventListener(type: "loadedmetadata" | "canplay" | "error", listener: () => void): void;
@@ -30,9 +41,8 @@ export interface MediaElementLike {
 
 export interface MediaControllerDependencies {
   element: MediaElementLike;
-  native: boolean;
-  fetchTicket: (videoId: number | string, signal: AbortSignal) => Promise<StreamTicket>;
-  fetchLegacyUrl: (videoId: number | string, signal: AbortSignal) => Promise<string>;
+  fetchBlob: (videoId: number | string, signal: AbortSignal) => Promise<VideoStreamBlob>;
+  createObjectUrl: (blob: Blob) => string;
   revokeObjectUrl: (url: string) => void;
   onState: (state: MediaControllerState) => void;
   onReady?: (reason: MediaReadyReason, element: MediaElementLike) => void;
@@ -40,6 +50,7 @@ export interface MediaControllerDependencies {
 
 export interface MediaController {
   load(videoId: number | string): number;
+  cancel(): void;
   dispose(): void;
   getState(): MediaControllerState;
 }
@@ -47,9 +58,8 @@ export interface MediaController {
 interface ActiveGeneration {
   id: number;
   videoId: number | string;
-  abort: AbortController;
   operation: number;
-  retryUsed: boolean;
+  abort: AbortController | null;
   objectUrl: string | null;
   removeListeners: (() => void) | null;
 }
@@ -58,29 +68,38 @@ function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
-function classifyHttpStatus(error: unknown): MediaHttpStatus {
-  if (!error || typeof error !== "object") return null;
+function errorFields(error: unknown): { status: MediaHttpStatus; detail: unknown } {
+  if (!error || typeof error !== "object") return { status: null, detail: null };
   try {
-    if (!Object.prototype.hasOwnProperty.call(error, "status")) return null;
-    const status = (error as { status?: unknown }).status;
-    return status === 401 || status === 403 || status === 404 ? status : null;
+    const value = error as { status?: unknown; detail?: unknown };
+    const status = value.status;
+    return {
+      status: status === 401 || status === 403 || status === 404 || status === 409 ? status : null,
+      detail: value.detail,
+    };
   } catch {
-    return null;
+    return { status: null, detail: null };
   }
 }
 
-function errorState(generation: number, httpStatus: MediaHttpStatus): MediaControllerState {
+function classifiedError(generation: number, error: unknown): MediaControllerState {
+  const { status, detail } = errorFields(error);
+  if (status === 409 && detail === "DISPLAY_PROXY_PENDING") {
+    return { status: "pending", generation, readyReason: null, message: MEDIA_PENDING_MESSAGE, canRetry: true, reason: "display-pending" };
+  }
+  const displayFailed = status === 409 && detail === "DISPLAY_PROXY_FAILED";
   return {
-    status: "error",
+    status: "failed",
     generation,
     readyReason: null,
-    message: httpStatus === null ? MEDIA_LOAD_ERROR : MEDIA_HTTP_ERROR_MESSAGES[httpStatus],
+    message: displayFailed ? MEDIA_PROXY_FAILED_MESSAGE : status === 401 || status === 403 || status === 404 ? MEDIA_HTTP_ERROR_MESSAGES[status] : MEDIA_LOAD_ERROR,
     canRetry: true,
-    httpStatus,
+    httpStatus: status,
+    reason: displayFailed ? "display-failed" : status === null ? "network" : "http",
   };
 }
 
-/** DOM 无关框架之外的纯生命周期控制器；状态和错误绝不包含媒体 URL。 */
+/** 完整下载、generation、取消和 object URL 所有权都集中在此控制器。 */
 export function createMediaController(deps: MediaControllerDependencies): MediaController {
   let sequence = 0;
   let active: ActiveGeneration | null = null;
@@ -92,101 +111,75 @@ export function createMediaController(deps: MediaControllerDependencies): MediaC
   };
 
   const cleanElement = (): void => {
-    try { deps.element.pause(); } catch { /* best-effort cleanup */ }
+    try { deps.element.pause(); } catch { /* best effort */ }
     deps.element.removeAttribute("src");
-    try { deps.element.load(); } catch { /* best-effort cleanup */ }
+    try { deps.element.load(); } catch { /* best effort */ }
+  };
+
+  const releaseGeneration = (generation: ActiveGeneration): void => {
+    generation.operation += 1;
+    generation.abort?.abort();
+    generation.abort = null;
+    generation.removeListeners?.();
+    generation.removeListeners = null;
+    const url = generation.objectUrl;
+    generation.objectUrl = null;
+    cleanElement();
+    if (url) deps.revokeObjectUrl(url);
   };
 
   const invalidate = (): void => {
     const old = active;
-    // 先使 generation 失效并清控制器引用，再取消请求和触碰旧 element。
     active = null;
-    if (!old) return;
-    const objectUrl = old.objectUrl;
-    old.objectUrl = null;
-    old.abort.abort();
-    old.operation += 1;
-    old.removeListeners?.();
-    old.removeListeners = null;
-    cleanElement();
-    if (objectUrl) deps.revokeObjectUrl(objectUrl);
+    if (old) releaseGeneration(old);
   };
 
-  const installSource = (
-    generation: ActiveGeneration,
-    operation: number,
-    url: string,
-    reason: MediaReadyReason,
-    restore?: { time: number; wasPlaying: boolean }
-  ): void => {
-    if (active !== generation || generation.operation !== operation) {
-      if (!deps.native) deps.revokeObjectUrl(url);
-      return;
-    }
-    let readyHandled = false;
-    const onReady = (): void => {
-      if (active !== generation || generation.operation !== operation || readyHandled) return;
-      readyHandled = true;
-      if (restore) {
-        try { deps.element.currentTime = restore.time; } catch { /* media may reject an invalid seek */ }
-        if (restore.wasPlaying) void deps.element.play().catch(() => undefined);
-      }
-      deps.onReady?.(reason, deps.element);
-      publish({ status: "ready", generation: generation.id, readyReason: reason });
-    };
-    const onError = (): void => {
-      if (active !== generation || generation.operation !== operation) return;
-      if (!deps.native || generation.retryUsed) {
-        // 原生媒体错误不暴露可靠的 HTTP 状态，不能从 MediaError 推断分类。
-        publish(errorState(generation.id, null));
-        return;
-      }
-      generation.retryUsed = true;
-      const resume = { time: deps.element.currentTime, wasPlaying: !deps.element.paused };
-      void requestSource(generation, "retry-restored", resume);
-    };
-    deps.element.addEventListener("loadedmetadata", onReady);
-    deps.element.addEventListener("canplay", onReady);
-    deps.element.addEventListener("error", onError);
-    generation.removeListeners = () => {
-      deps.element.removeEventListener("loadedmetadata", onReady);
-      deps.element.removeEventListener("canplay", onReady);
-      deps.element.removeEventListener("error", onError);
-    };
-    if (!deps.native) generation.objectUrl = url;
-    deps.element.src = url;
-    deps.element.load();
+  const failGeneration = (generation: ActiveGeneration, operation: number, error: unknown): void => {
+    if (active !== generation || generation.operation !== operation) return;
+    const failedState = classifiedError(generation.id, error);
+    releaseGeneration(generation);
+    publish(failedState);
   };
 
-  const requestSource = async (
-    generation: ActiveGeneration,
-    reason: MediaReadyReason,
-    restore?: { time: number; wasPlaying: boolean }
-  ): Promise<void> => {
+  const request = async (generation: ActiveGeneration): Promise<void> => {
     if (active !== generation) return;
-    generation.operation += 1;
-    const operation = generation.operation;
-    generation.abort.abort();
-    generation.abort = new AbortController();
-    generation.removeListeners?.();
-    generation.removeListeners = null;
-    const oldObjectUrl = generation.objectUrl;
-    generation.objectUrl = null;
-    cleanElement();
-    if (oldObjectUrl) deps.revokeObjectUrl(oldObjectUrl);
-    publish({ status: "loading", generation: generation.id, readyReason: null });
+    const operation = ++generation.operation;
+    const abort = new AbortController();
+    generation.abort = abort;
+    publish({ status: "downloading", generation: generation.id, readyReason: null });
     try {
-      const url = deps.native
-        ? (await deps.fetchTicket(generation.videoId, generation.abort.signal)).url
-        : await deps.fetchLegacyUrl(generation.videoId, generation.abort.signal);
+      const result = await deps.fetchBlob(generation.videoId, abort.signal);
+      if (active !== generation || generation.operation !== operation) return;
+      generation.abort = null;
+      const objectUrl = deps.createObjectUrl(result.blob);
       if (active !== generation || generation.operation !== operation) {
-        if (!deps.native) deps.revokeObjectUrl(url);
+        deps.revokeObjectUrl(objectUrl);
         return;
       }
-      installSource(generation, operation, url, reason, restore);
+      generation.objectUrl = objectUrl;
+      let readyHandled = false;
+      const onReady = (): void => {
+        if (active !== generation || generation.operation !== operation || readyHandled) return;
+        readyHandled = true;
+        deps.onReady?.("initial", deps.element);
+        publish({ status: "ready", generation: generation.id, readyReason: "initial", contentLength: result.contentLength, blobSize: result.blob.size });
+      };
+      const onError = (): void => {
+        failGeneration(generation, operation, null);
+      };
+      deps.element.addEventListener("loadedmetadata", onReady);
+      deps.element.addEventListener("canplay", onReady);
+      deps.element.addEventListener("error", onError);
+      generation.removeListeners = () => {
+        deps.element.removeEventListener("loadedmetadata", onReady);
+        deps.element.removeEventListener("canplay", onReady);
+        deps.element.removeEventListener("error", onError);
+      };
+      deps.element.src = objectUrl;
+      deps.element.load();
     } catch (error) {
       if (active !== generation || generation.operation !== operation || isAbort(error)) return;
-      publish(errorState(generation.id, classifyHttpStatus(error)));
+      failGeneration(generation, operation, error);
     }
   };
 
@@ -194,17 +187,17 @@ export function createMediaController(deps: MediaControllerDependencies): MediaC
     load(videoId) {
       invalidate();
       const generation: ActiveGeneration = {
-        id: ++sequence,
-        videoId,
-        abort: new AbortController(),
-        operation: 0,
-        retryUsed: false,
-        objectUrl: null,
-        removeListeners: null,
+        id: ++sequence, videoId, operation: 0, abort: null, objectUrl: null, removeListeners: null,
       };
       active = generation;
-      void requestSource(generation, "initial");
+      void request(generation);
       return generation.id;
+    },
+    cancel() {
+      const generation = active;
+      if (!generation || state.status !== "downloading") return;
+      releaseGeneration(generation);
+      publish({ status: "cancelled", generation: generation.id, readyReason: null, message: MEDIA_CANCELLED_MESSAGE, canRetry: true });
     },
     dispose() {
       invalidate();

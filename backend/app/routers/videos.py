@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from typing import Literal
 
 import jwt
+from anyio import to_thread
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import case, func
@@ -22,8 +23,9 @@ from sqlalchemy.orm import Session
 from ..auth import AuthContext, authenticate_token, get_auth_context, get_current_user
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..database import get_db
+from ..display_proxy_enqueue import enqueue_for_video, hash_display_proxy_source, submit_after_commit
 from ..deps import project_access
-from ..models import ProjectMembership, User, Video
+from ..models import BackgroundJob, ProjectMembership, User, Video
 from ..media_auth import (
     MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
 )
@@ -36,7 +38,12 @@ from ..video_delete_service import VideoDeleteServiceError
 from ..video_operation_gate import VideoOperationBusyError
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_dependency import require_video_operation_gate
-from ..video_playback import public_video, resolve_video_playback
+from ..video_playback import (
+    DISPLAY_PROXY_FAILED,
+    DISPLAY_PROXY_PENDING,
+    public_video,
+    resolve_video_playback,
+)
 from ..schemas import (
     AssignmentBatchRequest,
     AssignmentStatsItem,
@@ -196,6 +203,47 @@ def _remove_file(path: Path) -> None:
         pass
 
 
+def _committed_upload_is_visible(
+    db: Session,
+    *,
+    video_id: int,
+    project_id: int,
+    storage_path: str,
+    source_sha256: str | None,
+    display_proxies_enabled: bool,
+    job_id: int | None,
+) -> bool:
+    """Resolve an uncertain commit using a fresh session on an independent connection."""
+    bind = db.get_bind()
+    try:
+        with bind.connect() as connection, Session(bind=connection) as verifier:
+            video = verifier.get(Video, video_id)
+            if not (
+                video is not None
+                and video.project_id == project_id
+                and video.storage_path == storage_path
+                and video.source_sha256 == source_sha256
+            ):
+                return False
+            if not display_proxies_enabled:
+                return True
+            if job_id is None:
+                return False
+            job = verifier.get(BackgroundJob, job_id)
+            payload = job.payload if job is not None else None
+            return bool(
+                job is not None
+                and job.project_id == project_id
+                and job.job_type == "display_proxy"
+                and isinstance(payload, dict)
+                and payload.get("video_id") == video_id
+                and payload.get("project_id") == project_id
+                and payload.get("source_sha256") == source_sha256
+            )
+    except Exception:
+        return False
+
+
 @router.get("/api/projects/{project_id}/videos", response_model=list[VideoOut])
 def list_videos(
     project_id: int,
@@ -307,6 +355,7 @@ async def upload_video(
 
     written = 0
     temp_file = None
+    final_owned_by_database = False
     try:
         # 写入前检查一次可用空间
         _check_disk_space(videos_dir, reserve)
@@ -331,6 +380,14 @@ async def upload_video(
         os.replace(temp_path, final_path)
         temp_path = None
 
+        source_sha256 = None
+        if settings.display_proxies_enabled:
+            try:
+                source_sha256 = await to_thread.run_sync(hash_display_proxy_source, final_path)
+            except Exception:
+                db.rollback()
+                raise HTTPException(status_code=500, detail=ERR_DB_SAVE) from None
+
         video = Video(
             project_id=project_id,
             filename=display_name,
@@ -340,22 +397,53 @@ async def upload_video(
             workflow_status="draft",
             annotation_revision=1,
             assignee_membership_id=assignee_membership_id,
+            source_sha256=source_sha256,
         )
+        job_id = None
         try:
             db.add(video)
-            db.commit()
+            # Establish the target identity before commit so an uncertain commit can
+            # be resolved without consulting the failed request session.
+            db.flush()
+            if settings.display_proxies_enabled:
+                job_id = enqueue_for_video(db, video, settings)
         except IntegrityError as exc:
-            # DB 提交失败：回滚并清理已落盘的最终孤儿文件
             db.rollback()
-            _remove_file(final_path)
             if is_assignee_write_conflict(exc):
                 raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
             raise HTTPException(status_code=500, detail=ERR_DB_SAVE)
         except Exception:
-            # DB 提交失败：回滚并清理已落盘的最终孤儿文件
             db.rollback()
-            _remove_file(final_path)
             raise HTTPException(status_code=500, detail=ERR_DB_SAVE)
+
+        video_id = video.id
+        try:
+            db.commit()
+        except BaseException as exc:
+            # A driver may raise after the database has actually committed. Release
+            # the failed request transaction, then decide file ownership exclusively
+            # from a fresh session/connection. Never submit work from this path.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            final_owned_by_database = _committed_upload_is_visible(
+                db,
+                video_id=video_id,
+                project_id=project_id,
+                storage_path=final_name,
+                source_sha256=source_sha256,
+                display_proxies_enabled=settings.display_proxies_enabled,
+                job_id=job_id,
+            )
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, IntegrityError) and is_assignee_write_conflict(exc):
+                raise HTTPException(status_code=409, detail=ASSIGNEE_CONFLICT_DETAIL) from None
+            raise HTTPException(status_code=500, detail=ERR_DB_SAVE) from None
+
+        final_owned_by_database = True
+        submit_after_commit(request, job_id)
         db.refresh(video)
         return public_video(video, settings)
     except _InsufficientDiskSpace:
@@ -370,6 +458,8 @@ async def upload_video(
                 pass
         if temp_path is not None:
             _remove_file(temp_path)
+        if not final_owned_by_database:
+            _remove_file(final_path)
         await file.close()
 
 
@@ -509,7 +599,7 @@ def assignment_stats(project_id: int, access: tuple = Depends(project_access),
 
 def _authorized_video_path(
     *, video_id: int, user_id: int, request: Request, db: Session
-) -> tuple[Video, Path]:
+) -> tuple[Video, Path, bool]:
     """签票与每次取流共用的实时用户、成员、路径和普通非空文件检查。"""
     user = db.get(User, user_id)
     if user is None:
@@ -531,9 +621,15 @@ def _authorized_video_path(
         raise HTTPException(status_code=403, detail=ERR_MEMBERSHIP_INACTIVE)
 
     playback = resolve_video_playback(video, request.app.state.settings)
+    if request.app.state.settings.display_proxies_enabled:
+        from ..video_playback import observe_strict_playback
+        observe_strict_playback(video, playback)
     if playback.status != "ready" or playback.path is None:
+        if request.app.state.settings.display_proxies_enabled:
+            detail = DISPLAY_PROXY_PENDING if playback.status == "pending" else DISPLAY_PROXY_FAILED
+            raise HTTPException(status_code=409, detail=detail)
         raise HTTPException(status_code=404, detail="Video playback is not ready")
-    return video, playback.path
+    return video, playback.path, playback.is_display_proxy
 
 
 def _set_media_cookie(response: Response, name: str, value: str, *, path: str, max_age: int) -> None:
@@ -671,13 +767,13 @@ def stream_video(
     db: Session = Depends(get_db),
 ) -> FileResponse:
     user_id = _stream_user_id(video_id, request, db)
-    video, path = _authorized_video_path(
+    video, path, is_display_proxy = _authorized_video_path(
         video_id=video_id, user_id=user_id, request=request, db=db,
     )
 
     return FileResponse(
         path=path,
-        filename=video.filename,
+        filename=f"display-video-{video.id}.mp4" if is_display_proxy else video.filename,
         content_disposition_type="inline",
         headers={"Cache-Control": "private, no-store"},
     )

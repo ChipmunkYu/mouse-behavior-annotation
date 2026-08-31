@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..display_proxy_enqueue import enqueue_for_video, hash_display_proxy_source, submit_after_commit
 from ..draft_detection_edits import revalidate_annotations
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
 from ..deps import project_access
@@ -1070,6 +1071,19 @@ def complete_import_batch(
             if batch.video_filename and "." in batch.video_filename
             else ""
         )
+        source_sha256 = None
+        if settings.display_proxies_enabled:
+            try:
+                # This synchronous FastAPI endpoint itself runs in a worker thread.
+                source_sha256 = hash_display_proxy_source(video_path)
+            except Exception:
+                db.rollback()
+                batch = _require_batch(db, batch_id, project_id)
+                batch.status = "failed"
+                batch.validation_errors = {"source_hash_failed": True}
+                batch.updated_at = datetime.utcnow()
+                db.commit()
+                raise HTTPException(status_code=500, detail="Failed to hash imported video") from None
         video = Video(
             project_id=project_id,
             filename=batch.video_filename or "imported_video",
@@ -1081,6 +1095,7 @@ def complete_import_batch(
             detection_import_revision=0,
             identity_revision=0,
             assignee_membership_id=assignee_membership_id,
+            source_sha256=source_sha256,
         )
         try:
             db.add(video)
@@ -1108,7 +1123,9 @@ def complete_import_batch(
                 if linked_video_id is None:
                     batch.created_video_id = video_id_created
                     batch.updated_at = datetime.utcnow()
+                    job_id = enqueue_for_video(db, video, settings)
                     db.commit()
+                    submit_after_commit(request, job_id)
                     _after_import_video_visible_commit()
                 else:
                     db.expire_all()

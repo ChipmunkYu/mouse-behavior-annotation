@@ -1,228 +1,182 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMediaController, MEDIA_LOAD_ERROR, type MediaControllerState, type MediaElementLike } from "./controller";
+import {
+  createMediaController,
+  MEDIA_CANCELLED_MESSAGE,
+  MEDIA_PENDING_MESSAGE,
+  MEDIA_PROXY_FAILED_MESSAGE,
+  type MediaControllerState,
+  type MediaElementLike,
+} from "./controller";
 
 class FakeMediaElement implements MediaElementLike {
   src = "";
-  currentTime = 0;
-  paused = true;
-  readonly log: string[];
   private listeners = new Map<string, Set<() => void>>();
-  constructor(log: string[]) { this.log = log; }
-  pause(): void { this.log.push("pause"); this.paused = true; }
-  play(): Promise<void> { this.log.push("play"); this.paused = false; return Promise.resolve(); }
-  load(): void { this.log.push("load"); }
-  removeAttribute(name: string): void { this.log.push(`remove:${name}`); if (name === "src") this.src = ""; }
+  pause = vi.fn();
+  load = vi.fn();
+  removeAttribute = vi.fn((name: string) => { if (name === "src") this.src = ""; });
   addEventListener(type: "loadedmetadata" | "canplay" | "error", listener: () => void): void {
-    const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set);
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
   }
-  removeEventListener(type: "loadedmetadata" | "canplay" | "error", listener: () => void): void { this.listeners.get(type)?.delete(listener); }
-  emit(type: "loadedmetadata" | "canplay" | "error"): void { [...(this.listeners.get(type) ?? [])].forEach((fn) => fn()); }
-  snapshot(type: "loadedmetadata" | "canplay" | "error"): Array<() => void> { return [...(this.listeners.get(type) ?? [])]; }
+  removeEventListener(type: "loadedmetadata" | "canplay" | "error", listener: () => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+  emit(type: "loadedmetadata" | "canplay" | "error"): void {
+    [...(this.listeners.get(type) ?? [])].forEach((listener) => listener());
+  }
 }
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
-describe("media controller", () => {
-  it("aborts stale work, performs cleanup in strict order, and revokes a stale blob", async () => {
-    const log: string[] = [];
-    const element = new FakeMediaElement(log);
-    const first = deferred<string>();
-    const second = deferred<string>();
-    let call = 0;
-    const fetchLegacyUrl = vi.fn((_id: number | string, signal: AbortSignal) => {
-      signal.addEventListener("abort", () => log.push("abort"));
-      return (++call === 1 ? first : second).promise;
-    });
-    const revoke = vi.fn((url: string) => log.push(`revoke:${url}`));
-    const controller = createMediaController({
-      element, native: false, fetchLegacyUrl, revokeObjectUrl: revoke,
-      fetchTicket: vi.fn(), onState: vi.fn(),
-    });
-    controller.load(1);
-    log.length = 0;
-    controller.load(2);
-    expect(log.slice(0, 4)).toEqual(["abort", "pause", "remove:src", "load"]);
-    first.resolve("blob:stale");
-    await Promise.resolve();
-    expect(revoke).toHaveBeenCalledWith("blob:stale");
-    second.resolve("blob:active");
-    await Promise.resolve();
-    element.emit("loadedmetadata");
-    expect(controller.getState()).toMatchObject({ status: "ready", generation: 2, readyReason: "initial" });
-    controller.dispose();
-    expect(revoke).toHaveBeenCalledWith("blob:active");
+function setup(fetchBlob = vi.fn()) {
+  const element = new FakeMediaElement();
+  const states: MediaControllerState[] = [];
+  const createObjectUrl = vi.fn(() => `blob:${createObjectUrl.mock.calls.length}`);
+  const revokeObjectUrl = vi.fn();
+  const controller = createMediaController({
+    element,
+    fetchBlob,
+    createObjectUrl,
+    revokeObjectUrl,
+    onState: (state) => states.push(state),
   });
+  return { controller, element, states, createObjectUrl, revokeObjectUrl, fetchBlob };
+}
 
-  it("synchronously reports initial readiness with the media element", async () => {
-    const element = new FakeMediaElement([]);
-    const onReady = vi.fn();
-    const controller = createMediaController({
-      element, native: true, onReady,
-      fetchTicket: vi.fn().mockResolvedValue({ url: "/media/initial", expires_at: "later" }),
-      fetchLegacyUrl: vi.fn(), revokeObjectUrl: vi.fn(), onState: vi.fn(),
-    });
+describe("complete-download media controller", () => {
+  it("does not become ready or create an object URL before the full blob resolves", async () => {
+    const download = deferred<{ blob: Blob; contentLength: number | null }>();
+    const ctx = setup(vi.fn(() => download.promise));
+    ctx.controller.load(1);
 
-    controller.load(1);
+    expect(ctx.controller.getState().status).toBe("downloading");
+    expect(ctx.createObjectUrl).not.toHaveBeenCalled();
+    download.resolve({ blob: new Blob(["complete"]), contentLength: 8 });
     await Promise.resolve();
-    element.emit("loadedmetadata");
 
-    expect(onReady).toHaveBeenCalledOnce();
-    expect(onReady).toHaveBeenCalledWith("initial", element);
-  });
-
-  it("renews a native ticket at most once and restores time/play before retry ready", async () => {
-    const log: string[] = [];
-    const element = new FakeMediaElement(log);
-    const states: MediaControllerState[] = [];
-    const fetchTicket = vi.fn()
-      .mockResolvedValueOnce({ url: "/media/first", expires_at: "soon" })
-      .mockResolvedValueOnce({ url: "/media/second", expires_at: "later" });
-    const onReady = vi.fn((reason, readyElement) => {
-      log.push(`ready:${reason}:${readyElement.currentTime}:${readyElement.paused ? "paused" : "playing"}`);
-    });
-    const controller = createMediaController({
-      element, native: true, fetchTicket, fetchLegacyUrl: vi.fn(),
-      revokeObjectUrl: vi.fn(), onState: (state) => states.push(state), onReady,
-    });
-    controller.load(1);
-    await Promise.resolve();
-    element.currentTime = 12.5;
-    element.paused = false;
-    element.emit("error");
-    await Promise.resolve();
-    element.currentTime = 0;
-    element.paused = true;
-    element.emit("canplay");
-    expect(element.currentTime).toBe(12.5);
-    expect(log).toContain("play");
-    expect(log.slice(-2)).toEqual(["play", "ready:retry-restored:12.5:playing"]);
-    expect(onReady).toHaveBeenCalledWith("retry-restored", element);
-    expect(states[states.length - 1]).toMatchObject({ status: "ready", readyReason: "retry-restored" });
-    Object.assign(element, {
-      currentSrc: "https://secret.example/video?token=element-secret",
-      error: { code: 4, message: "HTTP 403 private media detail", status: 403 },
-    });
-    element.emit("error");
-    expect(fetchTicket).toHaveBeenCalledTimes(2);
-    expect(controller.getState()).toEqual({
-      status: "error", generation: 1, readyReason: null, message: MEDIA_LOAD_ERROR, canRetry: true, httpStatus: null,
-    });
-    expect(JSON.stringify(controller.getState())).not.toContain("secret.example");
-    expect(JSON.stringify(controller.getState())).not.toContain("HTTP 403");
-  });
-
-  it("ignores queued callbacks from the old source while renewing within one generation", async () => {
-    const element = new FakeMediaElement([]);
-    const renewal = deferred<{ url: string; expires_at: string }>();
-    const fetchTicket = vi.fn()
-      .mockResolvedValueOnce({ url: "/media/first", expires_at: "soon" })
-      .mockReturnValueOnce(renewal.promise);
-    const onReady = vi.fn();
-    const controller = createMediaController({
-      element, native: true, fetchTicket, fetchLegacyUrl: vi.fn(),
-      revokeObjectUrl: vi.fn(), onState: vi.fn(), onReady,
-    });
-
-    controller.load(1);
-    await Promise.resolve();
-    const oldReady = [...element.snapshot("loadedmetadata"), ...element.snapshot("canplay")];
-    const [oldError] = element.snapshot("error");
-    element.currentTime = 8;
-    element.paused = false;
-
-    oldError();
-    expect(controller.getState()).toMatchObject({ status: "loading", generation: 1 });
-    expect(element.src).toBe("");
-    oldReady.forEach((listener) => listener());
-    oldError();
-    expect(controller.getState()).toMatchObject({ status: "loading", generation: 1 });
-    expect(onReady).not.toHaveBeenCalled();
-    expect(fetchTicket).toHaveBeenCalledTimes(2);
-
-    renewal.resolve({ url: "/media/second", expires_at: "later" });
-    await Promise.resolve();
-    expect(element.src).toBe("/media/second");
-    oldReady.forEach((listener) => listener());
-    oldError();
-    expect(controller.getState()).toMatchObject({ status: "loading", generation: 1 });
-    expect(element.src).toBe("/media/second");
-    expect(onReady).not.toHaveBeenCalled();
-    expect(fetchTicket).toHaveBeenCalledTimes(2);
-
-    element.emit("canplay");
-    expect(element.currentTime).toBe(8);
-    expect(element.paused).toBe(false);
-    expect(onReady).toHaveBeenCalledOnce();
-    expect(onReady).toHaveBeenCalledWith("retry-restored", element);
-    expect(controller.getState()).toMatchObject({ status: "ready", generation: 1, readyReason: "retry-restored" });
+    expect(ctx.createObjectUrl).toHaveBeenCalledOnce();
+    expect(ctx.controller.getState().status).toBe("downloading");
+    ctx.element.emit("loadedmetadata");
+    expect(ctx.controller.getState()).toMatchObject({ status: "ready", contentLength: 8, blobSize: 8 });
   });
 
   it.each([
-    [401, "登录已过期，请重新登录后重试。"],
-    [403, "你没有权限访问此视频，请联系项目管理员。"],
-    [404, "视频不存在或已被删除，请返回视频列表。"],
-  ] as const)("classifies a structured %i ticket error with a fixed safe message", async (status, message) => {
-    const malicious = `private detail https://secret.example/video?token=status-${status}`;
-    const error = Object.assign(new Error(malicious), { status, detail: malicious, url: malicious });
-    const controller = createMediaController({
-      element: new FakeMediaElement([]), native: true,
-      fetchTicket: vi.fn().mockRejectedValue(error), fetchLegacyUrl: vi.fn(),
-      revokeObjectUrl: vi.fn(), onState: vi.fn(),
-    });
-
-    controller.load(1);
+    ["DISPLAY_PROXY_PENDING", "pending", MEDIA_PENDING_MESSAGE, "display-pending"],
+    ["DISPLAY_PROXY_FAILED", "failed", MEDIA_PROXY_FAILED_MESSAGE, "display-failed"],
+  ] as const)("classifies 409 detail %s", async (detail, status, message, reason) => {
+    const ctx = setup(vi.fn().mockRejectedValue({ status: 409, detail }));
+    ctx.controller.load(1);
     await Promise.resolve();
-
-    expect(controller.getState()).toEqual({
-      status: "error", generation: 1, readyReason: null, message, canRetry: true, httpStatus: status,
-    });
-    const serialized = JSON.stringify(controller.getState());
-    expect(serialized).not.toContain("private detail");
-    expect(serialized).not.toContain("secret.example");
-    expect(serialized).not.toContain("token=");
+    expect(ctx.controller.getState()).toMatchObject({ status, message, reason });
   });
 
-  it("uses the generic classification for unknown and non-numeric statuses", async () => {
-    const fetchLegacyUrl = vi.fn()
-      .mockRejectedValueOnce({ status: 500, message: "https://secret.example/server" })
-      .mockRejectedValueOnce({ status: "403", message: "private detail" });
-    const controller = createMediaController({
-      element: new FakeMediaElement([]), native: false,
-      fetchTicket: vi.fn(), fetchLegacyUrl, revokeObjectUrl: vi.fn(), onState: vi.fn(),
-    });
-
-    controller.load(1);
-    await Promise.resolve();
-    expect(controller.getState()).toEqual({
-      status: "error", generation: 1, readyReason: null, message: MEDIA_LOAD_ERROR, canRetry: true, httpStatus: null,
-    });
-    expect(JSON.stringify(controller.getState())).not.toContain("secret.example");
-
-    controller.load(2);
-    await Promise.resolve();
-    expect(controller.getState()).toMatchObject({ status: "error", message: MEDIA_LOAD_ERROR, httpStatus: null });
-  });
-
-  it("resets retry allowance for a new video and exposes only a sanitized error", async () => {
-    const element = new FakeMediaElement([]);
-    const fetchTicket = vi.fn().mockRejectedValue(new Error("private source detail"));
-    const controller = createMediaController({
-      element, native: true, fetchTicket, fetchLegacyUrl: vi.fn(), revokeObjectUrl: vi.fn(), onState: vi.fn(),
-    });
-    controller.load(1);
-    await Promise.resolve();
-    expect(JSON.stringify(controller.getState())).toBe(JSON.stringify({
-      status: "error", generation: 1, readyReason: null, message: MEDIA_LOAD_ERROR, canRetry: true, httpStatus: null,
+  it("aborts cancellation without publishing a failure", async () => {
+    let signal: AbortSignal | undefined;
+    const ctx = setup(vi.fn((_id, currentSignal) => {
+      signal = currentSignal;
+      return new Promise((_resolve, reject) => currentSignal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError"))));
     }));
-    fetchTicket.mockResolvedValue({ url: "/media/new", expires_at: "later" });
-    controller.load(2);
+    ctx.controller.load(1);
+    ctx.controller.cancel();
     await Promise.resolve();
-    element.emit("error");
+
+    expect(signal?.aborted).toBe(true);
+    expect(ctx.controller.getState()).toMatchObject({ status: "cancelled", message: MEDIA_CANCELLED_MESSAGE });
+    expect(ctx.states.some((state) => state.status === "failed")).toBe(false);
+  });
+
+  it("ignores a late generation and gives retry a fresh AbortController", async () => {
+    const first = deferred<{ blob: Blob; contentLength: number | null }>();
+    const second = deferred<{ blob: Blob; contentLength: number | null }>();
+    const signals: AbortSignal[] = [];
+    const fetchBlob = vi.fn((_id, signal) => {
+      signals.push(signal);
+      return signals.length === 1 ? first.promise : second.promise;
+    });
+    const ctx = setup(fetchBlob);
+    ctx.controller.load(1);
+    ctx.controller.load(1);
+
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).not.toBe(signals[1]);
+    expect(signals[0].aborted).toBe(true);
+    first.resolve({ blob: new Blob(["stale"]), contentLength: 5 });
     await Promise.resolve();
-    expect(fetchTicket).toHaveBeenCalledTimes(3);
+    expect(ctx.createObjectUrl).not.toHaveBeenCalled();
+
+    second.resolve({ blob: new Blob(["fresh"]), contentLength: null });
+    await Promise.resolve();
+    ctx.element.emit("canplay");
+    expect(ctx.controller.getState()).toMatchObject({ status: "ready", generation: 2, blobSize: 5 });
+  });
+
+  it("retries after failure and revokes an installed URL exactly once with idempotent disposal", async () => {
+    const blob = new Blob(["video"]);
+    const fetchBlob = vi.fn()
+      .mockRejectedValueOnce({ status: 500 })
+      .mockResolvedValueOnce({ blob, contentLength: blob.size });
+    const ctx = setup(fetchBlob);
+    ctx.controller.load(1);
+    await Promise.resolve();
+    expect(ctx.controller.getState().status).toBe("failed");
+
+    ctx.controller.load(1);
+    await Promise.resolve();
+    ctx.element.emit("loadedmetadata");
+    expect(ctx.controller.getState().status).toBe("ready");
+    expect(fetchBlob.mock.calls[0][1]).not.toBe(fetchBlob.mock.calls[1][1]);
+
+    ctx.controller.dispose();
+    ctx.controller.dispose();
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledTimes(1);
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledWith("blob:1");
+  });
+
+  it("immediately cleans and revokes once on a media element error", async () => {
+    const retry = deferred<{ blob: Blob; contentLength: number | null }>();
+    const fetchBlob = vi.fn()
+      .mockResolvedValueOnce({ blob: new Blob(["video"]), contentLength: 5 })
+      .mockReturnValueOnce(retry.promise);
+    const ctx = setup(fetchBlob);
+    ctx.controller.load(1);
+    await Promise.resolve();
+
+    ctx.element.emit("error");
+
+    expect(ctx.controller.getState().status).toBe("failed");
+    expect(ctx.element.src).toBe("");
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledTimes(1);
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledWith("blob:1");
+
+    ctx.controller.load(1);
+    ctx.controller.dispose();
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("immediately cleans and revokes once when element.load throws", async () => {
+    const retry = deferred<{ blob: Blob; contentLength: number | null }>();
+    const fetchBlob = vi.fn()
+      .mockResolvedValueOnce({ blob: new Blob(["video"]), contentLength: 5 })
+      .mockReturnValueOnce(retry.promise);
+    const ctx = setup(fetchBlob);
+    ctx.element.load.mockImplementationOnce(() => { throw new Error("load failed"); });
+
+    ctx.controller.load(1);
+    await Promise.resolve();
+
+    expect(ctx.controller.getState().status).toBe("failed");
+    expect(ctx.element.src).toBe("");
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledTimes(1);
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledWith("blob:1");
+
+    ctx.controller.load(1);
+    ctx.controller.dispose();
+    expect(ctx.revokeObjectUrl).toHaveBeenCalledTimes(1);
   });
 });

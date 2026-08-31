@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { fetchVideoStreamTicket, fetchVideoStreamUrl } from "../api";
-import { isNativeMediaEnabled, type MediaSurface } from "./config";
+import { fetchVideoStreamBlob } from "../api";
+import type { MediaSurface } from "./config";
 import { createMediaController, type MediaController, type MediaControllerState, type MediaReadyReason } from "./controller";
 import { createLatestCallback } from "./latestCallback";
 
@@ -14,8 +14,8 @@ export interface UseMediaSourceInput {
 }
 
 export type UseMediaSourceResult = MediaControllerState & {
-  /** 重新创建 generation；同一 generation 内的原生 error 自动续票仍严格最多一次。 */
   reload: () => void;
+  cancel: () => void;
 };
 
 const IDLE: MediaControllerState = { status: "idle", generation: 0, readyReason: null };
@@ -34,9 +34,8 @@ export function useMediaSource({ videoId, surface, videoRef, onReady }: UseMedia
     }
     const controller = createMediaController({
       element,
-      native: isNativeMediaEnabled(surface),
-      fetchTicket: fetchVideoStreamTicket,
-      fetchLegacyUrl: fetchVideoStreamUrl,
+      fetchBlob: fetchVideoStreamBlob,
+      createObjectUrl: URL.createObjectURL,
       revokeObjectUrl: URL.revokeObjectURL,
       onState: setState,
       onReady: (reason, readyElement) => readyCallbackRef.current.invoke(reason, readyElement as HTMLVideoElement),
@@ -53,5 +52,7 @@ export function useMediaSource({ videoId, surface, videoRef, onReady }: UseMedia
     if (videoId != null) controllerRef.current?.load(videoId);
   }, [videoId]);
 
-  return { ...state, reload };
+  const cancel = useCallback(() => controllerRef.current?.cancel(), []);
+
+  return { ...state, reload, cancel };
 }

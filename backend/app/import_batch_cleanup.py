@@ -7,12 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, exists
+from sqlalchemy import delete, exists, text
 from sqlalchemy.orm import Session
 
 from .cleanup_io import append_cleanup_issues, remove_checked, safe_path, trusted_root
 from .models import (
     Annotation,
+    BackgroundJob,
     DetectionImport,
     DetectionSuppression,
     IdentityEdit,
@@ -21,6 +22,9 @@ from .models import (
     Video,
     VideoImportBatch,
 )
+from .display_proxy_jobs import display_proxy_names
+from .related_video_jobs import identify_related_video_jobs
+from .video_delete_io import DeletePath, VideoDeleteIO, VideoDeleteIOError
 
 CANCELLABLE_BATCH_STATUSES = ("uploading", "failed")
 
@@ -144,6 +148,92 @@ def _preflight(
     return files, created_video
 
 
+def _display_file(stored: str | None, settings) -> BatchFile | None:
+    """Validate a display-proxy key with the same direct-child policy as batch files."""
+    if not stored:
+        return None
+    path, reason = safe_path(stored, settings.display_proxies_dir, settings.data_dir)
+    root, root_reason = trusted_root(settings.data_dir, settings.display_proxies_dir)
+    if path is None or root is None or path.parent != root:
+        raise BatchCleanupConflict(
+            f"Display proxy path is unsafe: {reason or root_reason or 'invalid-path'}"
+        )
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError as exc:
+        raise BatchCleanupConflict(f"Display proxy path cannot be checked: {exc}") from exc
+    if mode is not None and (stat.S_ISLNK(mode) or not stat.S_ISREG(mode)):
+        raise BatchCleanupConflict("Display proxy path is not a regular file")
+    return BatchFile("display_proxy", stored, path, settings.display_proxies_dir)
+
+
+def _proxy_delete_scope(db: Session, video: Video, settings) -> tuple[list[BatchFile], tuple[int, ...]]:
+    """Freeze terminal proxy jobs and all deterministic artifacts; active/unknown jobs block."""
+    jobs = identify_related_video_jobs(
+        db, project_id=video.project_id, video_id=video.id,
+    )
+    if jobs.active:
+        raise BatchCleanupConflict("Import batch video has an active background job")
+    if jobs.unknown:
+        raise BatchCleanupConflict("Import batch video has an unclassifiable background job")
+
+    terminal_ids = tuple(job.id for job in jobs.terminal)
+    rows = (db.query(BackgroundJob).filter(BackgroundJob.id.in_(terminal_ids))
+            .order_by(BackgroundJob.id).all()) if terminal_ids else []
+    if tuple(row.id for row in rows) != terminal_ids:
+        raise BatchCleanupConflict("Import batch background jobs changed concurrently")
+
+    stored_paths: list[str] = []
+    if video.display_path:
+        stored_paths.append(video.display_path)
+    for row in rows:
+        if row.job_type != "display_proxy":
+            # A pristine failed import has no other legitimate related-job type.
+            raise BatchCleanupConflict("Import batch video has an unexpected background job")
+        if row.result_path:
+            stored_paths.append(row.result_path)
+        names = display_proxy_names(row.payload)
+        if names is None:
+            raise BatchCleanupConflict("Import batch display job payload is invalid")
+        stored_paths.extend(names)
+
+    files: list[BatchFile] = []
+    seen: set[Path] = set()
+    for stored in stored_paths:
+        item = _display_file(stored, settings)
+        if item is not None and item.path not in seen:
+            seen.add(item.path)
+            files.append(item)
+
+    # A target proxy must not be removed while another authority names it.
+    target_paths = {item.path for item in files}
+    if target_paths:
+        for other in db.query(Video).filter(Video.id != video.id, Video.display_path.is_not(None)):
+            item = _display_file(other.display_path, settings)
+            if item is not None and item.path in target_paths:
+                raise BatchCleanupConflict("Display proxy file is referenced by another video")
+        for other in db.query(BackgroundJob).filter(
+            BackgroundJob.job_type == "display_proxy",
+            BackgroundJob.result_path.is_not(None),
+            ~BackgroundJob.id.in_(terminal_ids) if terminal_ids else BackgroundJob.id > 0,
+        ):
+            item = _display_file(other.result_path, settings)
+            if item is not None and item.path in target_paths:
+                raise BatchCleanupConflict("Display proxy file is referenced by another job")
+    return files, terminal_ids
+
+
+def _delete_path(item: BatchFile) -> DeletePath:
+    root = Path(item.root).resolve()
+    return DeletePath(
+        "display_proxies" if item.role == "display_proxy"
+        else "videos" if item.role == "video" else "detection_imports",
+        item.path.resolve().relative_to(root).as_posix(),
+    )
+
+
 def _shared_by_other_batch(
     db: Session, batch: VideoImportBatch, item: BatchFile, settings
 ) -> bool:
@@ -200,10 +290,17 @@ def cleanup_import_batch(
         raise BatchCleanupConflict("Import batch is not stale")
 
     files, created_video = _preflight(db, batch, settings)
+    proxy_files: list[BatchFile] = []
+    terminal_job_ids: tuple[int, ...] = ()
+    if created_video is not None:
+        proxy_files, terminal_job_ids = _proxy_delete_scope(db, created_video, settings)
     retained = [item for item in files if _shared_by_other_batch(db, batch, item, settings)]
     deletable = [item for item in files if item not in retained]
     if dry_run:
-        return {"batch_id": batch.id, "files": len(deletable), "retained_shared": len(retained)}
+        return {
+            "batch_id": batch.id, "files": len(deletable) + len(proxy_files),
+            "retained_shared": len(retained), "terminal_jobs": len(terminal_job_ids),
+        }
 
     filters = [
         VideoImportBatch.id == batch_id,
@@ -231,7 +328,18 @@ def cleanup_import_batch(
     # The claim must be visible before filesystem work; this also releases SQLite's write lock.
     db.commit()
 
+    manifest = None
+    io = VideoDeleteIO(settings)
+    committed = False
     try:
+        if created_video is not None:
+            _before_pristine_video_delete()
+        if db.get_bind().dialect.name != "sqlite":
+            raise BatchCleanupConflict("Import batch cleanup requires SQLite")
+        # Keep job classification, quarantine, and row deletion under one writer
+        # lock. A terminal proxy job therefore cannot be requeued/claimed between
+        # the active-job gate and removal of its source Video.
+        db.execute(text("BEGIN IMMEDIATE"))
         db.expire_all()
         batch = db.get(VideoImportBatch, batch_id)
         if batch is None or batch.status != "cancelling":
@@ -239,11 +347,44 @@ def cleanup_import_batch(
         files, created_video = _preflight(db, batch, settings)
         retained = [item for item in files if _shared_by_other_batch(db, batch, item, settings)]
         deletable = [item for item in files if item not in retained]
+        proxy_files = []
+        terminal_job_ids = ()
+        if created_video is not None:
+            proxy_files, terminal_job_ids = _proxy_delete_scope(db, created_video, settings)
+            manifest = io.prepare(
+                created_video.id,
+                tuple(_delete_path(item) for item in (*deletable, *proxy_files)),
+                project_id=batch.project_id,
+                frozen_ids_by_table={
+                    "video_import_batches": (batch.id,), "videos": (created_video.id,),
+                    "background_jobs": terminal_job_ids,
+                },
+                terminal_job_ids=terminal_job_ids,
+            )
+            io.quarantine(manifest)
+            # Quarantine can take time. Re-read the authority before the atomic deletes.
+            db.expire_all()
+            batch = db.get(VideoImportBatch, batch_id)
+            if batch is None or batch.status != "cancelling":
+                raise BatchCleanupConflict("Import batch state changed concurrently")
+            created_video = db.get(Video, batch.created_video_id) if batch.created_video_id else None
+            if created_video is None or not _pristine_import_video(db, created_video):
+                raise BatchCleanupConflict("Import batch video changed concurrently")
+            _proxy_files_now, terminal_ids_now = _proxy_delete_scope(db, created_video, settings)
+            if terminal_ids_now != terminal_job_ids:
+                raise BatchCleanupConflict("Import batch background jobs changed concurrently")
         # A Video must be removed by one conditional statement.  This prevents
         # ORM cascades from silently deleting authority added after preflight.
         if created_video is not None:
-            _before_pristine_video_delete()
             video_id = created_video.id
+            if terminal_job_ids:
+                removed_jobs = db.query(BackgroundJob).filter(
+                    BackgroundJob.id.in_(terminal_job_ids),
+                    BackgroundJob.job_type == "display_proxy",
+                    BackgroundJob.status.in_(("succeeded", "failed", "cancelled")),
+                ).delete(synchronize_session=False)
+                if removed_jobs != len(terminal_job_ids):
+                    raise BatchCleanupConflict("Import batch background jobs changed concurrently")
             removed_video = db.execute(
                 delete(Video).where(
                     Video.id == video_id,
@@ -280,31 +421,53 @@ def cleanup_import_batch(
         if removed_batch != 1:
             raise BatchCleanupConflict("Import batch state changed concurrently")
         db.commit()
+        committed = True
     except Exception:
+        if manifest is not None and not committed and (io.quarantine_dir / manifest.operation_id).exists():
+            try:
+                io.restore(manifest)
+            except VideoDeleteIOError as exc:
+                _restore_claim(db, batch_id, original_status)
+                raise BatchCleanupConflict(
+                    f"Import batch files require administrator recovery: {exc}"
+                ) from exc
         _restore_claim(db, batch_id, original_status)
         raise
 
     issues: list[dict[str, Any]] = []
     deleted = 0
-    for item in deletable:
-        removed, reason = remove_checked(
-            item.path, root_dir=item.root, data_dir=settings.data_dir
-        )
-        deleted += int(removed)
-        if reason is not None:
+    if manifest is not None:
+        deleted = sum(entry.identity is not None for entry in manifest.entries)
+        try:
+            io.purge(manifest)
+        except VideoDeleteIOError as exc:
+            # The committed manifest is intentionally retained for startup recovery.
             issues.append({
-                "kind": "import-batch-delete-failed",
-                "batch_id": batch_id,
-                "project_id": project_id,
-                "role": item.role,
-                "path": str(item.path),
-                "reason": reason,
+                "kind": "import-batch-purge-pending", "batch_id": batch_id,
+                "project_id": project_id, "reason": str(exc),
+                "operation_id": manifest.operation_id,
             })
+    else:
+        for item in deletable:
+            removed, reason = remove_checked(
+                item.path, root_dir=item.root, data_dir=settings.data_dir
+            )
+            deleted += int(removed)
+            if reason is not None:
+                issues.append({
+                    "kind": "import-batch-delete-failed",
+                    "batch_id": batch_id,
+                    "project_id": project_id,
+                    "role": item.role,
+                    "path": str(item.path),
+                    "reason": reason,
+                })
     append_cleanup_issues(settings.cleanup_log, issues)
     return {
         "batch_id": batch_id,
         "files": deleted,
         "retained_shared": len(retained),
+        "terminal_jobs": len(terminal_job_ids),
         "issues": issues,
     }
 

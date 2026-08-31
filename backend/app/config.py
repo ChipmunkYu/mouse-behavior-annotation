@@ -72,11 +72,11 @@ class Settings(BaseSettings):
 
     # ---- 播放代理（候选 profile；默认关闭，不改变现有生产行为） ----
     display_proxies_enabled: bool = False
-    # 开启代理后仍允许源文件回退；关闭时进入严格代理模式。
-    display_proxy_allow_source_fallback: bool = True
     display_proxy_timeout_seconds: int = Field(default=60 * 60, ge=1)
     display_proxy_max_attempts: int = Field(default=3, ge=1)
     display_proxy_synchronous: bool = False
+    # 转码临时文件与最终文件共享此保留线；候选体积估算固定在 worker 代码中。
+    display_proxy_disk_reserve_bytes: int = Field(default=1024**3, ge=0)
 
     # ---- 分类导出（批次 6） ----
     # 导出 ZIP 生成后的保留天数：超过后 `export/download` 拒绝下载（批次 7 清理实体文件）。

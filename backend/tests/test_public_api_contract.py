@@ -16,7 +16,8 @@ from app.main import create_app
 from app.models import Annotation, Clip, Video
 from app.routers.clips import _to_item
 from app.schemas import JobOut, _sanitize_public_value
-from app.video_playback import resolve_video_playback
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
+from app.video_playback import DISPLAY_PROXY_FAILED, DISPLAY_PROXY_PENDING, resolve_video_playback
 from scripts.export_openapi import OUTPUT, rendered_openapi
 
 from .conftest import auth_headers
@@ -25,6 +26,7 @@ from .conftest import auth_headers
 FORBIDDEN = {
     "storage_path", "display_path", "clip_path", "thumbnail_path", "result_path",
     "video_path", "tracks_path", "metadata_path", "thumbnail_available",
+    "source_sha256", "display_source_sha256", "display_profile_version", "display_error",
 }
 
 
@@ -90,16 +92,16 @@ def test_video_response_uses_only_playback_status(ctx):
     assert next(item for item in listed if item["id"] == uploaded["id"])["playback_status"] == "ready"
     settings = ctx.client.app.state.settings
     settings.display_proxies_enabled = True
-    settings.display_proxy_allow_source_fallback = False
     strict = ctx.client.get(
         f"/api/projects/{setup['project']['id']}/videos", headers=setup["headers"],
     ).json()
     assert next(item for item in strict if item["id"] == uploaded["id"])["playback_status"] == "pending"
-    assert ctx.client.get(f"/api/videos/{uploaded['id']}/stream", headers=setup["headers"]).status_code == 404
+    blocked = ctx.client.get(f"/api/videos/{uploaded['id']}/stream", headers=setup["headers"])
+    assert (blocked.status_code, blocked.json()) == (409, {"detail": DISPLAY_PROXY_PENDING})
     settings.media_ticket_enabled = True
     assert ctx.client.post(
         f"/api/videos/{uploaded['id']}/stream-ticket", headers=setup["headers"],
-    ).status_code == 404
+    ).json() == {"detail": DISPLAY_PROXY_PENDING}
 
 
 def test_suppressions_without_active_import_remain_empty(ctx):
@@ -112,33 +114,151 @@ def test_suppressions_without_active_import_remain_empty(ctx):
     assert response.json() == []
 
 
-def test_playback_resolver_default_fallback_and_strict_proxy(tmp_path):
+def test_playback_resolver_switches_from_source_to_strict_proxy(tmp_path):
     videos, proxies = tmp_path / "videos", tmp_path / "proxies"
     videos.mkdir(); proxies.mkdir()
     (videos / "source.mp4").write_bytes(b"SOURCE")
     video = SimpleNamespace(
         storage_path="source.mp4", status="uploaded",
         display_path=None, display_status="pending",
+        source_sha256="a" * 64, display_source_sha256=None,
+        display_profile_version=None,
     )
     settings = SimpleNamespace(
         videos_dir=videos, display_proxies_dir=proxies,
-        display_proxies_enabled=False, display_proxy_allow_source_fallback=True,
+        display_proxies_enabled=False,
     )
-    assert resolve_video_playback(video, settings).status == "ready"
+    source = resolve_video_playback(video, settings)
+    assert (source.status, source.path) == ("ready", (videos / "source.mp4").resolve())
+
     settings.display_proxies_enabled = True
-    assert resolve_video_playback(video, settings).status == "ready"
-    settings.display_proxy_allow_source_fallback = False
     assert resolve_video_playback(video, settings).status == "pending"
+
+    video.display_status = "processing"
+    assert resolve_video_playback(video, settings).status == "pending"
+
     video.display_status = "failed"
     assert resolve_video_playback(video, settings).status == "failed"
+
     video.display_status, video.display_path = "ready", "proxy.mp4"
-    assert resolve_video_playback(video, settings).status == "pending"
+    video.display_source_sha256 = video.source_sha256
+    video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+    assert resolve_video_playback(video, settings).status == "failed"
     (proxies / "proxy.mp4").write_bytes(b"PROXY")
-    assert resolve_video_playback(video, settings).status == "ready"
+    proxy = resolve_video_playback(video, settings)
+    assert (proxy.status, proxy.path) == ("ready", (proxies / "proxy.mp4").resolve())
+
     (videos / "source.mp4").unlink()
+    video.display_status = "ready"
     assert resolve_video_playback(video, settings).status == "ready"
-    (proxies / "proxy.mp4").unlink()
-    assert resolve_video_playback(video, settings).status == "unavailable"
+
+
+def test_playback_resolver_rejects_damaged_or_unsafe_ready_proxy(tmp_path):
+    videos, proxies = tmp_path / "videos", tmp_path / "proxies"
+    videos.mkdir(); proxies.mkdir()
+    (videos / "source.mp4").write_bytes(b"SOURCE")
+    video = SimpleNamespace(
+        storage_path="source.mp4", status="uploaded",
+        display_path="proxy.mp4", display_status="ready",
+        source_sha256="a" * 64, display_source_sha256="a" * 64,
+        display_profile_version=DISPLAY_PROXY_PROFILE_VERSION,
+    )
+    settings = SimpleNamespace(
+        videos_dir=videos, display_proxies_dir=proxies,
+        display_proxies_enabled=True,
+    )
+
+    (proxies / "proxy.mp4").write_bytes(b"")
+    assert resolve_video_playback(video, settings).status == "failed"
+
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"OUTSIDE")
+    video.display_path = str(outside)
+    assert resolve_video_playback(video, settings).status == "failed"
+
+    video.display_path = "proxy.mp4"
+    (proxies / "proxy.mp4").write_bytes(b"PROXY")
+    video.display_profile_version = "stale-profile"
+    assert resolve_video_playback(video, settings).status == "failed"
+    video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+    video.display_source_sha256 = "b" * 64
+    assert resolve_video_playback(video, settings).status == "failed"
+
+
+def test_strict_proxy_stream_serves_only_proxy_with_sanitized_filename(ctx):
+    setup = ctx.make_project_with_video()
+    uploaded = ctx.client.post(
+        f"/api/projects/{setup['project']['id']}/videos/upload",
+        files={"file": ("private-source-name.mp4", b"SOURCE-SECRET", "video/mp4")},
+        headers=setup["headers"],
+    ).json()
+    settings = ctx.client.app.state.settings
+    proxy_name = "strict-ready.mp4"
+    settings.display_proxies_dir.mkdir(parents=True, exist_ok=True)
+    (settings.display_proxies_dir / proxy_name).write_bytes(b"PROXY-BYTES")
+    with ctx.session_factory() as db:
+        video = db.get(Video, uploaded["id"])
+        video.source_sha256 = "a" * 64
+        video.display_status = "ready"
+        video.display_path = proxy_name
+        video.display_source_sha256 = video.source_sha256
+        video.display_profile_version = DISPLAY_PROXY_PROFILE_VERSION
+        video.display_generated_at = datetime.utcnow()
+        db.commit()
+    settings.display_proxies_enabled = True
+
+    response = ctx.client.get(f"/api/videos/{uploaded['id']}/stream", headers=setup["headers"])
+    assert response.status_code == 200
+    assert response.content == b"PROXY-BYTES"
+    assert b"SOURCE-SECRET" not in response.content
+    disposition = response.headers["content-disposition"]
+    assert f"display-video-{uploaded['id']}.mp4" in disposition
+    assert "private-source-name" not in disposition
+    settings.media_ticket_enabled = True
+    ticket = ctx.client.post(
+        f"/api/videos/{uploaded['id']}/stream-ticket", headers=setup["headers"],
+    )
+    assert ticket.status_code == 200
+    assert ticket.json()["url"] == f"/api/videos/{uploaded['id']}/stream"
+
+
+def test_strict_proxy_api_failures_are_stable_and_authorization_precedes_playback(ctx):
+    setup = ctx.make_project_with_video()
+    uploaded = ctx.client.post(
+        f"/api/projects/{setup['project']['id']}/videos/upload",
+        files={"file": ("secret.mp4", b"SOURCE", "video/mp4")}, headers=setup["headers"],
+    ).json()
+    settings = ctx.client.app.state.settings
+    settings.display_proxies_enabled = True
+    settings.media_ticket_enabled = True
+
+    for status, detail in (("pending", DISPLAY_PROXY_PENDING),
+                           ("processing", DISPLAY_PROXY_PENDING),
+                           ("failed", DISPLAY_PROXY_FAILED)):
+        with ctx.session_factory() as db:
+            video = db.get(Video, uploaded["id"])
+            # processing requires a source identity; non-ready states require
+            # every generated-proxy identity field to remain empty.
+            video.source_sha256 = "a" * 64 if status == "processing" else None
+            video.display_status = status
+            video.display_path = None
+            video.display_profile_version = None
+            video.display_source_sha256 = None
+            video.display_generated_at = None
+            video.display_error = "private/internal/path" if status == "failed" else None
+            db.commit()
+        stream = ctx.client.get(f"/api/videos/{uploaded['id']}/stream", headers=setup["headers"])
+        ticket = ctx.client.post(f"/api/videos/{uploaded['id']}/stream-ticket", headers=setup["headers"])
+        assert (stream.status_code, stream.json()) == (409, {"detail": detail})
+        assert (ticket.status_code, ticket.json()) == (409, {"detail": detail})
+        assert "private" not in stream.text and "secret.mp4" not in stream.text
+
+    assert ctx.client.get("/api/videos/999999/stream", headers=setup["headers"]).status_code == 404
+    outsider = ctx.create_user("strict-outsider")
+    outsider_headers = auth_headers(ctx.client, "strict-outsider", "pw123")
+    assert outsider
+    denied = ctx.client.get(f"/api/videos/{uploaded['id']}/stream", headers=outsider_headers)
+    assert denied.status_code == 403
 
 
 def test_job_diagnostics_redact_absolute_paths():

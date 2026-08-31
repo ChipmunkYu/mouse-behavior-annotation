@@ -56,6 +56,7 @@ def test_development_defaults_remain_available():
     assert settings.media_legacy_bearer_enabled is True
     assert settings.media_ticket_ttl_seconds == 7200
     assert settings.media_binding_cookie_path == "/api/videos/"
+    assert settings.display_proxies_enabled is False
 
 
 @pytest.mark.parametrize("field,value", [

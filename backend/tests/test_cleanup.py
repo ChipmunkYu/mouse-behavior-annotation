@@ -14,6 +14,8 @@ from app import database as db_mod
 from app.cleanup import RetentionCleaner, run_retention_cleanup
 from app.cleanup_io import append_cleanup_issues
 from app.config import Settings
+from app.display_proxy_jobs import display_proxy_names
+from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import (
     Annotation,
     BackgroundJob,
@@ -39,6 +41,7 @@ def _settings(tmp_path: Path) -> Settings:
         settings.thumbnails_dir,
         settings.exports_dir,
         settings.detection_imports_dir,
+        settings.display_proxies_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
     db_mod.configure_engine(settings.resolved_database_url)
@@ -242,6 +245,92 @@ def test_settings_reject_invalid_cleanup_retention_values():
             Settings(**{field: -1})
     with pytest.raises(ValidationError):
         Settings(cleanup_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(display_proxy_disk_reserve_bytes=-1)
+
+
+def test_display_temp_and_orphan_cleanup_protects_all_authorities(tmp_path):
+    settings = _settings(tmp_path)
+    now = datetime(2026, 2, 1)
+    digest = "a" * 64
+
+    def names(video_id: int) -> tuple[str, str]:
+        value = display_proxy_names({
+            "video_id": video_id, "project_id": 1, "source_sha256": digest,
+            "profile_version": DISPLAY_PROXY_PROFILE_VERSION,
+        })
+        assert value is not None
+        return value
+
+    orphan_temp, orphan_final = names(1)
+    active_temp, active_final = names(2)
+    _terminal_temp, terminal_final = names(3)
+    _ready_temp, ready_final = names(4)
+    _delete_temp, delete_final = names(5)
+    paths = {
+        name: settings.display_proxies_dir / name
+        for name in (orphan_temp, orphan_final, active_temp, active_final,
+                     terminal_final, ready_final, delete_final)
+    }
+    for path in paths.values():
+        path.write_bytes(b"proxy")
+        _age(path, now, 25)
+
+    quarantine = settings.data_dir / "video-delete-quarantine" / "operation-1"
+    quarantine.mkdir(parents=True)
+    (quarantine / "manifest.json").write_text(json.dumps({"entries": [{
+        "root_kind": "display_proxies", "relative_key": delete_final,
+    }]}), encoding="utf-8")
+
+    with db_mod.SessionLocal() as db:
+        db.add(User(id=1, username="display-cleanup-owner", password_hash="unused"))
+        db.add(Project(id=1, name="display-cleanup", created_by=1))
+        db.flush()
+        db.add(Video(
+            id=4, project_id=1, filename="ready.mp4", storage_path="ready-source.mp4",
+            source_sha256=digest, display_status="ready", display_path=ready_final,
+            display_source_sha256=digest, display_profile_version=DISPLAY_PROXY_PROFILE_VERSION,
+            display_generated_at=now,
+        ))
+        active_payload = {
+            "video_id": 2, "project_id": 1, "source_sha256": digest,
+            "profile_version": DISPLAY_PROXY_PROFILE_VERSION,
+        }
+        db.add_all([
+            BackgroundJob(job_type="display_proxy", status="queued", payload=active_payload),
+            BackgroundJob(job_type="display_proxy", status="failed", result_path=terminal_final,
+                          finished_at=now),
+        ])
+        db.commit()
+        dry = run_retention_cleanup(db, settings, now=now, dry_run=True)
+        assert dry["would_delete"] == 2
+        assert all(path.exists() for path in paths.values())
+        applied = run_retention_cleanup(db, settings, now=now)
+        again = run_retention_cleanup(db, settings, now=now)
+    assert applied["deleted"] == 2 and again["deleted"] == 0
+    assert not paths[orphan_temp].exists() and not paths[orphan_final].exists()
+    assert all(paths[name].exists() for name in (
+        active_temp, active_final, terminal_final, ready_final, delete_final
+    ))
+
+
+def test_display_cleanup_rejects_out_of_bounds_symlink(tmp_path):
+    settings = _settings(tmp_path)
+    now = datetime(2026, 2, 1)
+    value = display_proxy_names({
+        "video_id": 8, "project_id": 1, "source_sha256": "b" * 64,
+        "profile_version": DISPLAY_PROXY_PROFILE_VERSION,
+    })
+    assert value is not None
+    outside = tmp_path / "outside-proxy.mp4"
+    outside.write_bytes(b"keep")
+    link = settings.display_proxies_dir / value[1]
+    _symlink(outside, link, directory=False)
+    _age(outside, now, 25)
+    with db_mod.SessionLocal() as db:
+        report = run_retention_cleanup(db, settings, now=now)
+    assert link.is_symlink() and outside.read_bytes() == b"keep"
+    assert any(issue["kind"] == "unsafe-path" for issue in report["issues"])
 
 
 def _symlink(target: Path, link: Path, *, directory: bool = True) -> None:
