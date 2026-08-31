@@ -34,10 +34,10 @@ _SUBMISSION_STAGING = re.compile(
 _EXPORT_ZIP = re.compile(r"^export_project_\d+_\d+\.zip$")
 _MEDIA_NAME = re.compile(r"^clip_(?P<annotation_id>\d+)_rev(?P<revision>\d+)\.(?P<ext>mp4|jpg)$")
 _DISPLAY_FINAL = re.compile(
-    r"^video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1\.mp4$"
+    r"^video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1(?:-ordinal-cfr)?\.mp4$"
 )
 _DISPLAY_TEMP = re.compile(
-    r"^\.video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1\.mp4\.part$"
+    r"^\.video-\d+-[0-9a-f]{16}-candidate-720p-h264-crf28-g30-sar1(?:-ordinal-cfr)?\.mp4\.part$"
 )
 
 

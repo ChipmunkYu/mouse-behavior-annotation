@@ -263,13 +263,18 @@ def test_display_temp_and_orphan_cleanup_protects_all_authorities(tmp_path):
         return value
 
     orphan_temp, orphan_final = names(1)
+    legacy_temp = orphan_temp.replace("-ordinal-cfr", "")
+    legacy_final = orphan_final.replace("-ordinal-cfr", "")
+    unknown_temp = legacy_temp.replace(".mp4.part", "-unknown.mp4.part")
+    malicious_final = orphan_final.replace(".mp4", "-evil.mp4")
     active_temp, active_final = names(2)
     _terminal_temp, terminal_final = names(3)
     _ready_temp, ready_final = names(4)
     _delete_temp, delete_final = names(5)
     paths = {
         name: settings.display_proxies_dir / name
-        for name in (orphan_temp, orphan_final, active_temp, active_final,
+        for name in (orphan_temp, orphan_final, legacy_temp, legacy_final,
+                     unknown_temp, malicious_final, active_temp, active_final,
                      terminal_final, ready_final, delete_final)
     }
     for path in paths.values():
@@ -303,12 +308,15 @@ def test_display_temp_and_orphan_cleanup_protects_all_authorities(tmp_path):
         ])
         db.commit()
         dry = run_retention_cleanup(db, settings, now=now, dry_run=True)
-        assert dry["would_delete"] == 2
+        assert dry["would_delete"] == 4
         assert all(path.exists() for path in paths.values())
         applied = run_retention_cleanup(db, settings, now=now)
         again = run_retention_cleanup(db, settings, now=now)
-    assert applied["deleted"] == 2 and again["deleted"] == 0
-    assert not paths[orphan_temp].exists() and not paths[orphan_final].exists()
+    assert applied["deleted"] == 4 and again["deleted"] == 0
+    assert all(not paths[name].exists() for name in (
+        orphan_temp, orphan_final, legacy_temp, legacy_final
+    ))
+    assert paths[unknown_temp].exists() and paths[malicious_final].exists()
     assert all(paths[name].exists() for name in (
         active_temp, active_final, terminal_final, ready_final, delete_final
     ))

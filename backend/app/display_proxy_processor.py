@@ -9,12 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DISPLAY_PROXY_PROFILE_VERSION = "candidate-720p-h264-crf28-g30-sar1"
+DISPLAY_PROXY_PROFILE_VERSION = "candidate-720p-h264-crf28-g30-sar1-ordinal-cfr"
 OUTPUT_FPS_TOLERANCE = 0.01
 OUTPUT_DURATION_TOLERANCE_FRAMES = 1.0
 FRAME_INTERVAL_TOLERANCE_SECONDS = 0.001
-TIMESTAMP_MAPPING_TOLERANCE_SECONDS = 0.001
-MAX_TIME_BASE_ALLOWANCE_SECONDS = 0.002
 MIN_FRAME_INTERVAL_RATIO = 0.5
 MAX_FRAME_INTERVAL_RATIO = 1.5
 
@@ -42,11 +40,21 @@ class UnsupportedDisplaySource(DisplayProxyError):
     """The candidate deliberately does not support this source."""
 
 
+def _rational_parts(value: object) -> tuple[int, int]:
+    match = re.fullmatch(r"([0-9]+)/([0-9]+)", str(value))
+    if match is None:
+        raise DisplayProxyError("media probe returned an invalid frame rate")
+    numerator, denominator = int(match.group(1)), int(match.group(2))
+    if numerator <= 0 or denominator <= 0:
+        raise DisplayProxyError("media probe returned an invalid frame rate")
+    return numerator, denominator
+
+
 def _fraction(value: object) -> float:
     try:
-        numerator, denominator = str(value).split("/", 1)
-        result = float(numerator) / float(denominator)
-    except (ValueError, ZeroDivisionError):
+        numerator, denominator = _rational_parts(value)
+        result = numerator / denominator
+    except (DisplayProxyError, OverflowError):
         raise DisplayProxyError("media probe returned an invalid frame rate") from None
     if not math.isfinite(result) or result <= 0:
         raise DisplayProxyError("media probe returned an invalid frame rate")
@@ -69,13 +77,17 @@ class DisplayProxyProcessor:
         self.ffprobe_path = ffprobe_path
         self.timeout_seconds = timeout_seconds
 
-    def transcode_command(self, input_path: str, output_path: str) -> list[str]:
+    def transcode_command(self, input_path: str, output_path: str,
+                          source_avg_frame_rate: object) -> list[str]:
+        numerator, denominator = _rational_parts(source_avg_frame_rate)
+        timing_filter = f"settb=expr={denominator}/{numerator},setpts=N"
         return [self.ffmpeg_path, "-hide_banner", "-nostdin", "-y", "-i", input_path,
                 "-map", "0:v:0", "-map_metadata", "-1", "-an", "-vf",
-                "scale=1280:720:flags=lanczos,setsar=1",
+                f"scale=1280:720:flags=lanczos,setsar=1,{timing_filter}",
                 "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
                 "-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "30",
-                "-sc_threshold", "0", "-vsync", "0", "-movflags", "+faststart",
+                "-sc_threshold", "0", "-vsync", "0", "-enc_time_base", "-1",
+                "-movflags", "+faststart",
                 "-f", "mp4", output_path]
 
     def _run(self, command: list[str], *paths: str | Path) -> subprocess.CompletedProcess:
@@ -227,8 +239,7 @@ class DisplayProxyProcessor:
         if not timestamps:
             raise error("media frame probe omitted timestamps")
         expected = 1.0 / (nominal_fps or fps)
-        tolerance = max(FRAME_INTERVAL_TOLERANCE_SECONDS,
-                         min(time_base * 2.0, MAX_TIME_BASE_ALLOWANCE_SECONDS))
+        tolerance = max(FRAME_INTERVAL_TOLERANCE_SECONDS, time_base * 2.0)
         minimum_interval = expected * MIN_FRAME_INTERVAL_RATIO
         maximum_interval = expected * MAX_FRAME_INTERVAL_RATIO
         previous = timestamps[0]
@@ -244,17 +255,22 @@ class DisplayProxyProcessor:
             raise error("media timestamps and duration differ by more than one frame")
 
     @staticmethod
-    def _compare_timestamps(source: tuple[float, ...], output: tuple[float, ...],
-                            *, source_time_base: float, output_time_base: float) -> None:
-        if len(source) != len(output):
+    def _validate_ordinal_timestamps(timestamps: tuple[float, ...], *, frame_count: int,
+                                     source_avg_fps: float,
+                                     output_time_base: float) -> None:
+        if len(timestamps) != frame_count:
             raise DisplayProxyError("proxy timestamp frame count differs from source")
-        time_base_allowance = min(max(source_time_base, output_time_base) * 2.0,
-                                  MAX_TIME_BASE_ALLOWANCE_SECONDS)
-        tolerance = max(TIMESTAMP_MAPPING_TOLERANCE_SECONDS, time_base_allowance)
-        source_origin, output_origin = source[0], output[0]
-        for source_value, output_value in zip(source, output):
-            if abs((output_value - output_origin) - (source_value - source_origin)) > tolerance:
-                raise DisplayProxyError("proxy frame timestamps drift from source")
+        if not timestamps:
+            raise DisplayProxyError("media frame probe omitted timestamps")
+        tolerance = max(FRAME_INTERVAL_TOLERANCE_SECONDS, output_time_base * 2.0)
+        origin = timestamps[0]
+        previous = origin
+        for index, current in enumerate(timestamps):
+            if index and current <= previous:
+                raise DisplayProxyError("media frame timestamps are not strictly monotonic")
+            if abs((current - origin) - index / source_avg_fps) > tolerance:
+                raise DisplayProxyError("proxy frame timestamps do not match ordinal CFR")
+            previous = current
 
     @staticmethod
     def _validate_faststart(path: str | Path) -> None:
@@ -292,19 +308,21 @@ class DisplayProxyProcessor:
     @staticmethod
     def _compare_metrics(source: tuple[float, float, int],
                          output: tuple[float, float, int]) -> None:
-        source_fps, source_duration, source_frames = source
+        source_fps, _source_duration, source_frames = source
         output_fps, output_duration, output_frames = output
         if output_frames != source_frames:
             raise DisplayProxyError("proxy frame count differs from source")
         if abs(output_fps - source_fps) > OUTPUT_FPS_TOLERANCE:
             raise DisplayProxyError("proxy FPS differs from source")
-        # One frame at the slower measured rate is the largest accepted duration drift.
-        duration_tolerance = OUTPUT_DURATION_TOLERANCE_FRAMES / min(source_fps, output_fps)
-        if abs(output_duration - source_duration) > duration_tolerance:
-            raise DisplayProxyError("proxy duration differs from source by more than one frame")
+        target_duration = source_frames / source_fps
+        duration_tolerance = OUTPUT_DURATION_TOLERANCE_FRAMES / source_fps
+        if abs(output_duration - target_duration) > duration_tolerance:
+            raise DisplayProxyError("proxy duration differs from ordinal CFR by more than one frame")
 
     def render(self, *, input_path: str, output_path: str) -> None:
         source_document = self.probe(input_path)
+        source_avg_frame_rate = self._video_stream(source_document).get("avg_frame_rate")
+        source_avg_numerator, source_avg_denominator = _rational_parts(source_avg_frame_rate)
         source_metrics = self._metrics(source_document, output=False)
         source_time_base = self._time_base(source_document)
         source_timestamps = self.probe_frame_timestamps(input_path)
@@ -313,20 +331,19 @@ class DisplayProxyProcessor:
                                   nominal_fps=_fraction(
                                       self._video_stream(source_document).get("r_frame_rate")
                                   ))
-        self._run(self.transcode_command(input_path, output_path), input_path, output_path)
+        self._run(self.transcode_command(input_path, output_path, source_avg_frame_rate),
+                  input_path, output_path)
         output_document = self.probe(output_path)
         output_metrics = self._metrics(output_document, output=True)
         output_time_base = self._time_base(output_document)
         output_timestamps = self.probe_frame_timestamps(output_path)
-        self._validate_timestamps(output_timestamps, output_metrics,
-                                  time_base=output_time_base, output=True,
-                                  nominal_fps=_fraction(
-                                      self._video_stream(output_document).get("r_frame_rate")
-                                  ))
         self._compare_metrics(source_metrics, output_metrics)
-        self._compare_timestamps(source_timestamps, output_timestamps,
-                                 source_time_base=source_time_base,
-                                 output_time_base=output_time_base)
+        self._validate_ordinal_timestamps(
+            output_timestamps,
+            frame_count=source_metrics[2],
+            source_avg_fps=source_avg_numerator / source_avg_denominator,
+            output_time_base=output_time_base,
+        )
         self._validate_faststart(output_path)
         self._run([self.ffmpeg_path, "-hide_banner", "-nostdin", "-v", "error", "-i",
                    output_path, "-map", "0:v:0", "-f", "null", "-"], output_path)

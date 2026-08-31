@@ -27,16 +27,25 @@ def _probe(*, width=1280, height=720, fps="30/1", codec="h264", pix="yuv420p",
 
 def test_candidate_command_snapshot_has_fixed_timing_and_no_r():
     processor = DisplayProxyProcessor(ffmpeg_path="ffmpeg-x")
-    command = processor.transcode_command("IN", "OUT")
+    command = processor.transcode_command("IN", "OUT", "27010000/899917")
     assert command == ["ffmpeg-x", "-hide_banner", "-nostdin", "-y", "-i", "IN",
                        "-map", "0:v:0", "-map_metadata", "-1", "-an", "-vf",
-                       "scale=1280:720:flags=lanczos,setsar=1",
+                       "scale=1280:720:flags=lanczos,setsar=1,"
+                       "settb=expr=899917/27010000,setpts=N",
                        "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
                        "-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "30",
-                       "-sc_threshold", "0", "-vsync", "0", "-movflags", "+faststart",
+                       "-sc_threshold", "0", "-vsync", "0", "-enc_time_base", "-1",
+                       "-movflags", "+faststart",
                        "-f", "mp4", "OUT"]
     assert "-r" not in command
-    assert DISPLAY_PROXY_PROFILE_VERSION == "candidate-720p-h264-crf28-g30-sar1"
+    assert "fps" not in command[command.index("-vf") + 1]
+    assert DISPLAY_PROXY_PROFILE_VERSION == "candidate-720p-h264-crf28-g30-sar1-ordinal-cfr"
+
+
+@pytest.mark.parametrize("rate", ["30", "30/1,setpts=PTS", "-30/1", "30/0"])
+def test_candidate_command_rejects_non_positive_or_unsafe_rate(rate):
+    with pytest.raises(DisplayProxyError, match="invalid frame rate"):
+        DisplayProxyProcessor().transcode_command("IN", "OUT", rate)
 
 
 def test_frame_timestamp_probe_requests_frame_sections(monkeypatch):
@@ -129,18 +138,27 @@ def test_output_timestamp_validation_rejects_non_monotonic_values():
                                                    time_base=1 / 15360, output=True)
 
 
-def test_timestamp_mapping_normalizes_origin_and_rejects_drift():
-    source = _timestamps()
-    shifted = tuple(value + 2.5 for value in source)
-    DisplayProxyProcessor._compare_timestamps(source, shifted,
-                                              source_time_base=1 / 15360,
-                                              output_time_base=1 / 15360)
+def test_output_ordinal_cfr_normalizes_origin_and_rejects_65us_plus_66ms():
+    shifted = tuple(value + 2.5 for value in _timestamps())
+    DisplayProxyProcessor._validate_ordinal_timestamps(
+        shifted, frame_count=300, source_avg_fps=30.0, output_time_base=1 / 15360
+    )
     drifted = list(shifted)
-    drifted[200] += 0.003
-    with pytest.raises(DisplayProxyError, match="drift"):
-        DisplayProxyProcessor._compare_timestamps(source, tuple(drifted),
-                                                  source_time_base=1 / 15360,
-                                                  output_time_base=1 / 15360)
+    drifted[200] += 0.066
+    with pytest.raises(DisplayProxyError, match="ordinal CFR"):
+        DisplayProxyProcessor._validate_ordinal_timestamps(
+            tuple(drifted), frame_count=300, source_avg_fps=30.0,
+            output_time_base=1 / 15360,
+        )
+
+
+def test_output_ordinal_cfr_rejects_half_frame_cadence_quantization():
+    half_frame_cadence = tuple(index / 60 for index in range(300))
+    with pytest.raises(DisplayProxyError, match="ordinal CFR"):
+        DisplayProxyProcessor._validate_ordinal_timestamps(
+            half_frame_cadence, frame_count=300, source_avg_fps=30.0,
+            output_time_base=1 / 60,
+        )
 
 
 def test_render_probes_transcodes_then_fully_decodes(monkeypatch):
@@ -152,7 +170,7 @@ def test_render_probes_transcodes_then_fully_decodes(monkeypatch):
     monkeypatch.setattr(processor, "_run", lambda command, *paths: calls.append(command))
     monkeypatch.setattr(processor, "_validate_faststart", lambda path: calls.append(["faststart", path]))
     processor.render(input_path="in.mp4", output_path="out.part")
-    assert calls[0] == processor.transcode_command("in.mp4", "out.part")
+    assert calls[0] == processor.transcode_command("in.mp4", "out.part", "30/1")
     assert calls[1] == ["faststart", "out.part"]
     assert calls[2][-4:] == ["0:v:0", "-f", "null", "-"]
 
@@ -171,6 +189,30 @@ def test_render_rejects_output_timing_drift(monkeypatch, output, message):
     monkeypatch.setattr(processor, "_validate_faststart", lambda _path: None)
     with pytest.raises(DisplayProxyError, match=message):
         processor.render(input_path="in.mp4", output_path="out.part")
+
+
+def test_render_maps_bounded_vfr_input_to_ordinal_cfr_without_changing_frame_count(monkeypatch):
+    rate = "30000/1001"
+    source = _probe(fps=rate, frames="300", duration="10.01")
+    source["streams"][0]["r_frame_rate"] = "30/1"
+    output = _probe(fps=rate, frames="300", duration="10.01")
+    output["streams"][0]["r_frame_rate"] = "30/1"
+    source_timestamps = list(_timestamps(count=300, period=1001 / 30000))
+    source_timestamps[100] = source_timestamps[99] + 0.025
+    output_timestamps = tuple(index * 1001 / 30000 for index in range(300))
+    timestamps = iter([tuple(source_timestamps), output_timestamps])
+    calls = []
+    processor = DisplayProxyProcessor()
+    documents = iter([source, output])
+    monkeypatch.setattr(processor, "probe", lambda _path: next(documents))
+    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: next(timestamps))
+    monkeypatch.setattr(processor, "_run", lambda command, *paths: calls.append(command))
+    monkeypatch.setattr(processor, "_validate_faststart", lambda _path: None)
+
+    processor.render(input_path="in.mp4", output_path="out.part")
+
+    assert "settb=expr=1001/30000,setpts=N" in calls[0][calls[0].index("-vf") + 1]
+    assert len(source_timestamps) == len(output_timestamps) == 300
 
 
 def _atom(kind: bytes, payload: bytes = b"") -> bytes:
