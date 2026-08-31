@@ -12,10 +12,7 @@ describe("fetchVideoStreamBlob", () => {
     localStorage.setItem("mba_token", "test-token");
     const responseBlob = new Blob(["complete-video"]);
     const blob = vi.fn().mockResolvedValue(responseBlob);
-    const fetchMock = vi.fn().mockResolvedValue(new Response(responseBlob, {
-      status: 200,
-      headers: { "Content-Length": String(responseBlob.size) },
-    }));
+    const fetchMock = vi.fn();
     // Response.blob is instrumented so completion timing and the single conversion are explicit.
     fetchMock.mockResolvedValueOnce(Object.assign(new Response(null, {
       status: 200,
