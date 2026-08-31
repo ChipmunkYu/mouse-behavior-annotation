@@ -224,7 +224,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 批次 7（生命周期清理）已实现，
 见下文对应章节。
 
-## 低码率展示代理播放（P4 已推送服务器候选）
+## 低码率展示代理播放（P4 已部署生产）
 
 迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定 profile、单 owner、CAS、原子发布和启动恢复。新 file-backed Video 仅在 `DISPLAY_PROXIES_ENABLED=true` 时计算原片 SHA-256，并在创建事务内入队；metadata-only Video 明确排除。四个展示入口都经完整认证 GET 读取资源，前端流式读取响应并显示真实下载进度，完整累积 Blob 后创建 object URL。开启时 pending/failed 严格返回 409，绝不按页面或状态回退原片；片段生成、Submission 冻结、补生成和项目导出始终读取 `Video.storage_path` 原片。
 
@@ -237,7 +237,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 
 预检不写数据库、不计算 hash、不运行 ffprobe：退出码 `0` 表示可切 strict，`1` 表示存在未 ready/不一致数据，`2` 表示配置、数据库或检查过程出错。上线 strict 前必须为 `0`。生产仅允许单实例、单 Uvicorn worker，不得滚动双实例。
 
-最终服务器候选 `ba99fc9cae6acb90e94e7d1bdbe0428f5839f4d2` 已推送。`c6bcfb0` 完成功能与本地/服务器测试，`0c01101` 修复 Node 22 下 Blob 测试可移植性，`ba99fc9` 修复真实服务结构化 enqueue/claim/ready/strict-ready 日志。服务器关键复核为后端 `22 passed`、原片 authority/真实片段 `5 passed`、日志/预检 `14 passed`，`pip check` 通过；隔离空库迁移至 `0016` 后，3 秒 1920×1080/30 FPS H.264 原片约 2.177 秒生成 1280×720、H.264、yuv420p、30 FPS、90 帧代理，完成 preflight 为 `1/1 ready`、`active=0`，无 `.part`。候选服务已停止，生产尚未切换、迁移或启用；实时状态和服务器文件路径只查仓库外“网站服务器文件清单”。
+生产当前为 `50be725743254c0fa55ae3b21de646d457211417`，schema 为 `0016`；service active、health ok。`2751e98d180ee034dce64e9ca7b4e47722bb8c7d` 仅是加载进度前端 release 和前一生产版本。ordinal CFR 已直接处理 401010242-byte、5402 帧真实 VFR 源并通过帧数、PTS 与完整解码门禁。随后 Job 8 因 ready clip 的 canonical FPS `29.9673167` 与 probe FPS `30` 被严格 `1e-6` 比较拒绝；`50be725` 将视频门禁改为累计时基漂移不超过一个 canonical frame，同时保留精确 decoded 帧数/尺寸、独立 duration 一帧门禁及 tracks/ZIP 门禁。该热修通过 `59 tests`、`compileall`、`diff check`，服务器同一 238 帧 clip 合同通过；上线后 Job 12 `succeeded`，结果为 `export_project_1_12.zip`。用户公网人工已确认上传、预览、标注、审核和 ZIP 导出可用；真实 ENOSPC、并发资源、三浏览器目标大 Blob及更多秋采抽查仍为扩展验收。实时状态和服务器文件路径只查仓库外“网站服务器文件清单”。
 
 ## Demo 账号
 
