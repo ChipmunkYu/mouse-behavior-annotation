@@ -55,13 +55,21 @@ def test_frame_timestamp_probe_requests_frame_sections(monkeypatch):
     assert captured[0][captured[0].index("-show_entries") + 1].startswith("frame=")
 
 
-def test_source_rejects_non_16_by_9_and_non_cfr():
+def test_source_rejects_non_16_by_9_and_non_30fps_rates():
     with pytest.raises(UnsupportedDisplaySource, match="16:9"):
         DisplayProxyProcessor._metrics(_probe(width=640, height=480), output=False)
     document = _probe()
-    document["streams"][0]["r_frame_rate"] = "30000/1001"
-    with pytest.raises(UnsupportedDisplaySource, match="CFR"):
+    document["streams"][0]["r_frame_rate"] = "24/1"
+    with pytest.raises(UnsupportedDisplaySource, match="approximately 30fps"):
         DisplayProxyProcessor._metrics(document, output=False)
+
+
+def test_source_metrics_accepts_realistic_30fps_vfr_rates():
+    document = _probe(fps="27010000/899917", frames="5402", duration="179.9834")
+    document["streams"][0]["r_frame_rate"] = "30/1"
+    fps, duration, frames = DisplayProxyProcessor._metrics(document, output=False)
+    assert fps == pytest.approx(30.013878)
+    assert (duration, frames) == (179.9834, 5402)
 
 
 @pytest.mark.parametrize("change", [{"sar": "4:3"}, {"rotation": 90}])
@@ -91,10 +99,19 @@ def _timestamps(count=300, period=1 / 30):
     return tuple(index * period for index in range(count))
 
 
-def test_timestamp_validation_rejects_vfr_with_matching_summary_fps():
+def test_timestamp_validation_accepts_bounded_vfr_with_matching_summary_fps():
     values = list(_timestamps())
-    values[151] += 0.01
-    with pytest.raises(UnsupportedDisplaySource, match="CFR"):
+    values[100] = values[99] + 0.0294
+    values[151] = values[150] + 0.048133
+    DisplayProxyProcessor._validate_timestamps(tuple(values), (30.0, 10.0, 300),
+                                               time_base=1 / 15360, output=False,
+                                               nominal_fps=30.0)
+
+
+def test_timestamp_validation_rejects_interval_outside_vfr_bounds():
+    values = list(_timestamps())
+    values[151] += 0.02
+    with pytest.raises(UnsupportedDisplaySource, match="VFR bounds"):
         DisplayProxyProcessor._validate_timestamps(tuple(values), (30.0, 10.0, 300),
                                                    time_base=1 / 15360, output=False)
 

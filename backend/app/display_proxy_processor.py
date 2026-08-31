@@ -15,6 +15,8 @@ OUTPUT_DURATION_TOLERANCE_FRAMES = 1.0
 FRAME_INTERVAL_TOLERANCE_SECONDS = 0.001
 TIMESTAMP_MAPPING_TOLERANCE_SECONDS = 0.001
 MAX_TIME_BASE_ALLOWANCE_SECONDS = 0.002
+MIN_FRAME_INTERVAL_RATIO = 0.5
+MAX_FRAME_INTERVAL_RATIO = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,9 +181,6 @@ class DisplayProxyProcessor:
             raise error("candidate profile does not allow rotated display matrices")
         fps = _fraction(video.get("avg_frame_rate"))
         nominal = _fraction(video.get("r_frame_rate"))
-        if abs(fps - nominal) > 0.01:
-            error = UnsupportedDisplaySource if not output else DisplayProxyError
-            raise error("candidate profile requires CFR input")
         try:
             duration = float(video.get("duration") or document.get("format", {}).get("duration"))
             frames = int(video.get("nb_read_frames") or video.get("nb_frames"))
@@ -203,8 +202,10 @@ class DisplayProxyProcessor:
                 raise UnsupportedDisplaySource("candidate profile requires known dimensions") from None
             if width <= 0 or height <= 0 or width * 9 != height * 16:
                 raise UnsupportedDisplaySource("candidate profile supports only 16:9 input")
-            if not 29.0 <= fps <= 31.0:
-                raise UnsupportedDisplaySource("candidate profile supports only approximately 30fps CFR input")
+            if not 29.0 <= fps <= 31.0 or not 29.0 <= nominal <= 31.0:
+                raise UnsupportedDisplaySource(
+                    "candidate profile supports only approximately 30fps input"
+                )
         return fps, duration, frames
 
     @staticmethod
@@ -217,23 +218,26 @@ class DisplayProxyProcessor:
 
     @staticmethod
     def _validate_timestamps(timestamps: tuple[float, ...], metrics: tuple[float, float, int],
-                             *, time_base: float, output: bool) -> None:
+                             *, time_base: float, output: bool,
+                             nominal_fps: float | None = None) -> None:
         fps, duration, frames = metrics
         error = DisplayProxyError if output else UnsupportedDisplaySource
         if len(timestamps) != frames:
             raise error("media timestamp frame count differs from decoded frame count")
         if not timestamps:
             raise error("media frame probe omitted timestamps")
-        expected = 1.0 / fps
+        expected = 1.0 / (nominal_fps or fps)
         tolerance = max(FRAME_INTERVAL_TOLERANCE_SECONDS,
-                        min(time_base * 2.0, MAX_TIME_BASE_ALLOWANCE_SECONDS))
+                         min(time_base * 2.0, MAX_TIME_BASE_ALLOWANCE_SECONDS))
+        minimum_interval = expected * MIN_FRAME_INTERVAL_RATIO
+        maximum_interval = expected * MAX_FRAME_INTERVAL_RATIO
         previous = timestamps[0]
         for current in timestamps[1:]:
             interval = current - previous
             if interval <= 0:
                 raise error("media frame timestamps are not strictly monotonic")
-            if abs(interval - expected) > tolerance:
-                raise error("candidate profile requires CFR frame timestamps")
+            if interval < minimum_interval or interval > maximum_interval:
+                raise error("media frame timestamp interval is outside the supported 30fps VFR bounds")
             previous = current
         timeline_duration = timestamps[-1] - timestamps[0]
         if abs(duration - timeline_duration) > expected + tolerance:
@@ -305,14 +309,20 @@ class DisplayProxyProcessor:
         source_time_base = self._time_base(source_document)
         source_timestamps = self.probe_frame_timestamps(input_path)
         self._validate_timestamps(source_timestamps, source_metrics,
-                                  time_base=source_time_base, output=False)
+                                  time_base=source_time_base, output=False,
+                                  nominal_fps=_fraction(
+                                      self._video_stream(source_document).get("r_frame_rate")
+                                  ))
         self._run(self.transcode_command(input_path, output_path), input_path, output_path)
         output_document = self.probe(output_path)
         output_metrics = self._metrics(output_document, output=True)
         output_time_base = self._time_base(output_document)
         output_timestamps = self.probe_frame_timestamps(output_path)
         self._validate_timestamps(output_timestamps, output_metrics,
-                                  time_base=output_time_base, output=True)
+                                  time_base=output_time_base, output=True,
+                                  nominal_fps=_fraction(
+                                      self._video_stream(output_document).get("r_frame_rate")
+                                  ))
         self._compare_metrics(source_metrics, output_metrics)
         self._compare_timestamps(source_timestamps, output_timestamps,
                                  source_time_base=source_time_base,
