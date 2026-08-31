@@ -43,4 +43,42 @@ describe("fetchVideoStreamBlob", () => {
       detail: "DISPLAY_PROXY_PENDING",
     });
   });
+
+  it("reads the response stream into one blob and reports actual byte progress", async () => {
+    const encoder = new TextEncoder();
+    const chunks = [encoder.encode("abc"), encoder.encode("defg")];
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        chunks.forEach((chunk) => controller.enqueue(chunk));
+        controller.close();
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { "Content-Length": "7", "Content-Type": "video/mp4" },
+    })));
+    const progress = vi.fn();
+
+    const result = await fetchVideoStreamBlob(9, undefined, progress);
+
+    expect(await result.blob.text()).toBe("abcdefg");
+    expect(result.blob.type).toBe("video/mp4");
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([
+      { loaded: 0, total: 7 },
+      { loaded: 3, total: 7 },
+      { loaded: 7, total: 7 },
+    ]);
+  });
+
+  it("rejects a streamed response that does not match Content-Length", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("short", {
+      status: 200,
+      headers: { "Content-Length": "10" },
+    })));
+
+    await expect(fetchVideoStreamBlob(10)).rejects.toMatchObject({
+      status: 502,
+      message: "视频下载不完整，请重试",
+    });
+  });
 });

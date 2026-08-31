@@ -34,6 +34,7 @@ import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
+import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
@@ -1985,7 +1986,7 @@ export default function AnnotatePage() {
                     onFrameData={handleFrameData}
                     refreshKey={overlayRefresh}
               /> : null}
-              {loading || media.status === "downloading" || media.status === "idle" ? <div className="media-status-overlay"><Loading text={loading ? "加载标注数据…" : "正在下载，完成后才能播放。"} />{!loading && media.status === "downloading" ? <button type="button" className="btn btn-sm" onClick={media.cancel}>取消</button> : null}</div> : null}
+              {loading ? <div className="media-status-overlay"><Loading text="加载标注数据…" /></div> : <MediaLoadProgress state={media} onCancel={media.cancel} />}
               {!loading && (media.status === "pending" || media.status === "failed" || media.status === "cancelled") ? <div className="media-status-overlay"><EmptyState compact title={media.status === "pending" ? "播放资源处理中" : media.status === "cancelled" ? "下载已取消" : "视频下载失败"} hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>{media.status === "cancelled" ? "重新下载" : "重试"}</button></div> : null}
             </div>
             {!loading && videoReady ? (

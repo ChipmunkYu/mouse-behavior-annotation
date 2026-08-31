@@ -226,7 +226,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 
 ## 低码率展示代理播放（P4 已推送服务器候选）
 
-迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定 profile、单 owner、CAS、原子发布和启动恢复。新 file-backed Video 仅在 `DISPLAY_PROXIES_ENABLED=true` 时计算原片 SHA-256，并在创建事务内入队；metadata-only Video 明确排除。四个展示入口都经完整认证 GET 读取资源，前端等待 `response.blob()` 后创建 object URL。开启时 pending/failed 严格返回 409，绝不按页面或状态回退原片；片段生成、Submission 冻结、补生成和项目导出始终读取 `Video.storage_path` 原片。
+迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定 profile、单 owner、CAS、原子发布和启动恢复。新 file-backed Video 仅在 `DISPLAY_PROXIES_ENABLED=true` 时计算原片 SHA-256，并在创建事务内入队；metadata-only Video 明确排除。四个展示入口都经完整认证 GET 读取资源，前端流式读取响应并显示真实下载进度，完整累积 Blob 后创建 object URL。开启时 pending/failed 严格返回 409，绝不按页面或状态回退原片；片段生成、Submission 冻结、补生成和项目导出始终读取 `Video.storage_path` 原片。
 
 唯一开关默认 `false`：关闭时展示读取原片，而且新 Video 不 hash、不入队；开启时新视频生成代理且展示严格只读 ready 代理。不支持历史回填，也没有独立 fallback 或 `PROXIES_DIR` 配置，代理目录固定由 `DATA_DIR` 派生。故关闭期间必须冻结新视频写入；启用前须在维护窗口清空/重置旧 file-backed 数据（实际执行须再次明确确认并留证），并运行只读预检：
 

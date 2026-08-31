@@ -298,8 +298,17 @@ export interface VideoStreamBlob {
   contentLength: number | null;
 }
 
+export interface VideoStreamProgress {
+  loaded: number;
+  total: number | null;
+}
+
 /** 用一次带 Bearer 认证的完整 GET 下载媒体；object URL 由媒体控制器统一管理。 */
-export async function fetchVideoStreamBlob(videoId: number | string, signal?: AbortSignal): Promise<VideoStreamBlob> {
+export async function fetchVideoStreamBlob(
+  videoId: number | string,
+  signal?: AbortSignal,
+  onProgress?: (progress: VideoStreamProgress) => void,
+): Promise<VideoStreamBlob> {
   const res = await apiRaw(`/videos/${videoId}/stream`, { credentials: "omit", signal });
   if (res.status === 401) {
     // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面仍停留在标注页
@@ -319,9 +328,31 @@ export async function fetchVideoStreamBlob(videoId: number | string, signal?: Ab
   const rawLength = res.headers.get("Content-Length");
   const parsedLength = rawLength == null ? NaN : Number(rawLength);
   const contentLength = Number.isSafeInteger(parsedLength) && parsedLength >= 0 ? parsedLength : null;
-  const blob = await res.blob();
+  onProgress?.({ loaded: 0, total: contentLength });
+
+  let blob: Blob;
+  if (res.body) {
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress?.({ loaded, total: contentLength });
+    }
+    blob = new Blob(chunks, { type: res.headers.get("Content-Type") ?? "" });
+  } else {
+    blob = await res.blob();
+    onProgress?.({ loaded: blob.size, total: contentLength });
+  }
   if (blob.size === 0) {
     throw new ApiError(404, "视频文件为空");
+  }
+  if (contentLength !== null && blob.size !== contentLength) {
+    throw new ApiError(502, "视频下载不完整，请重试");
   }
   return { blob, contentLength };
 }

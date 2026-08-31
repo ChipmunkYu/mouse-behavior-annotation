@@ -15,6 +15,7 @@ const entries = [
 describe("media entry points", () => {
   it.each(entries)("%s delegates media acquisition to useMediaSource", (_entry, source) => {
     expect(source).toContain("useMediaSource({");
+    expect(source).toContain("MediaLoadProgress");
     expect(source).not.toMatch(/\bfetch\s*\(/);
     expect(source).not.toMatch(/\bRange\b/);
     expect(source).not.toContain("isNativeMediaEnabled");

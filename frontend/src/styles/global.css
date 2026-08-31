@@ -1071,6 +1071,18 @@ a:focus-visible,
 .media-status-overlay .loading, .media-status-overlay .empty { padding: 12px; }
 .media-status-overlay .empty-title { color: #d7d9dd; }
 .media-status-overlay .empty-hint { color: #9ca1a9; }
+.media-load-overlay { padding: clamp(16px, 4vw, 40px); background: radial-gradient(circle at 50% 42%, #151a22 0, #080a0d 64%); }
+.media-load-card { width: min(460px, 100%); padding: 18px; border: 1px solid rgba(255, 255, 255, .14); border-radius: var(--radius); background: rgba(20, 24, 31, .9); box-shadow: 0 18px 50px rgba(0, 0, 0, .35); text-align: left; }
+.media-load-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 13px; color: #eef1f5; font-size: 13px; font-weight: 700; }
+.media-load-heading strong { margin-left: auto; color: #a9c4ff; font-size: 12px; font-variant-numeric: tabular-nums; }
+.media-load-pulse { width: 7px; height: 7px; border-radius: 50%; background: #6e9cff; box-shadow: 0 0 0 4px rgba(110, 156, 255, .14); }
+.media-load-track { position: relative; height: 8px; overflow: hidden; border-radius: 999px; background: #303640; }
+.media-load-fill { display: block; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #477de8, #76a5ff); transition: width 160ms ease-out; }
+.media-load-track.is-indeterminate .media-load-fill { width: 38%; animation: media-load-indeterminate 1.15s ease-in-out infinite; }
+.media-load-meta { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 30px; margin-top: 9px; color: #9fa8b5; font-size: 11px; font-variant-numeric: tabular-nums; }
+.media-load-meta .btn { flex: none; color: #d7dce4; border-color: #4b535f; background: #252a32; }
+@keyframes media-load-indeterminate { from { transform: translateX(-105%); } to { transform: translateX(270%); } }
+@media (prefers-reduced-motion: reduce) { .media-load-track.is-indeterminate .media-load-fill { animation-duration: 2.4s; } .media-load-fill { transition: none; } }
 
 /* 叠加层：预留空间标注 / YOLO 框等图层（P1 为空层，pointer-events 穿透） */
 .overlay-layer {

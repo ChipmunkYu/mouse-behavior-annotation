@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Video } from "../api/types";
 import { useMediaSource } from "../media";
+import { MediaLoadProgress } from "./MediaLoadProgress";
 
 interface VideoPreviewDialogProps {
   video: Pick<Video, "id" | "filename">;
@@ -87,7 +88,7 @@ export default function VideoPreviewDialog({ video, onClose }: VideoPreviewDialo
           playsInline
           preload="metadata"
         />
-        {media.status === "downloading" || media.status === "idle" ? <div id={statusId} className="video-preview-message media-status-overlay" role="status"><span className="spinner" aria-hidden="true"/><span>正在下载，完成后才能播放。</span>{media.status === "downloading" ? <button type="button" className="btn btn-sm" onClick={media.cancel}>取消</button> : null}</div> : null}
+        <MediaLoadProgress id={statusId} state={media} onCancel={media.cancel} />
         {media.status === "pending" || media.status === "failed" || media.status === "cancelled" ? <div id={statusId} className={`video-preview-message media-status-overlay${media.status === "failed" ? " video-preview-error" : ""}`} role={media.status === "failed" ? "alert" : "status"}><span>{media.message}</span><button type="button" className="btn btn-sm" onClick={media.reload}>{media.status === "cancelled" ? "重新下载" : "重试"}</button></div> : null}
       </div>
       <footer className="video-preview-footer"><span>仅预览原始视频，不会领取任务或进入标注。</span><button type="button" className="btn" onClick={onClose}>关闭预览</button></footer>

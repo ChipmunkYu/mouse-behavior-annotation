@@ -21,6 +21,7 @@ import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
+import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
@@ -449,7 +450,7 @@ export default function ReviewPage() {
                       preload="metadata"
                     />
                     {videoReady ? <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} trackRoleLabels={activeRoleByTrack} /> : null}
-                    {media.status === "downloading" || media.status === "idle" ? <div className="media-status-overlay"><Loading text="正在下载，完成后才能播放。" />{media.status === "downloading" ? <button type="button" className="btn btn-sm" onClick={media.cancel}>取消</button> : null}</div> : null}
+                    <MediaLoadProgress state={media} onCancel={media.cancel} />
                     {media.status === "pending" || media.status === "failed" || media.status === "cancelled" ? <div className="media-status-overlay"><EmptyState compact title={media.status === "pending" ? "播放资源处理中" : media.status === "cancelled" ? "下载已取消" : "视频下载失败"} hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>{media.status === "cancelled" ? "重新下载" : "重试"}</button></div> : null}
                   </div>
                   {videoReady ? (

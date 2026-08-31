@@ -29,7 +29,7 @@
   - **独立视频预览**：视频卡片预览不依赖全局上传任务或上传任务栏状态；展示源由后端统一资源选择器决定。
   - **开发用**：页面底部折叠区可录入 Mock 视频元数据（不经过真实上传，仅本地调试，不抢主操作）。
 - **标注工作台** `/projects/:projectId/annotate/:videoId`：
-  - 视频播放使用共享完整下载契约：带 Bearer 发起完整 GET，等待 `response.blob()` 后创建 object URL；无文件时显示空态。
+  - 视频播放使用共享完整下载契约：带 Bearer 发起完整 GET，流式读取响应并显示真实下载进度，完整累积 Blob 后创建 object URL；无文件时显示空态。
   - OverlayLayer 按当前帧显示 YOLO 检测框与修正后 track ID，并可切换关键点和骨架；叠加坐标随播放器缩放映射。
   - 点击检测框或 track ID 列表选择参与对象，按对象数量范围保存到行为标注 `mouse_ids`；没有 detection import 时仍可创建 `needs_mouse_ids` 草稿，前端省略 `mouse_ids` 和检测结果导入/track 修正修订，导入后补选，补齐前不能提交审核或进入正式导出。
   - track 修正模式支持 Split、Merge 和“忽略整个 track”。当前页面会话内可按实际完成顺序统一撤销具有可靠操作 ID 的三类操作；刷新后不恢复统一历史。整轨 suppression 通过 `GET .../detection-suppressions` 加载当前 active import 未撤销项，刷新后仍可通过记录旁入口单独撤销；旧 import 项不展示且撤销返回 409。`mouse_ids` 是语义与目标种类无关的历史兼容字段名。整轨忽略属于检测抑制，原始检测保持不可变；当前不提供单框创建能力，历史 `scope=detection` 仅兼容。
@@ -72,7 +72,7 @@
 ## 技术要点
 
 - 无额外状态管理库与 UI 框架，仅 React 内置能力。
-- 四个视频入口（视频库预览、片段库、审核工作台、标注工作台）共用媒体能力层：完整认证 GET → `response.blob()` → `URL.createObjectURL()`，不存在页面级原生 Range 开关或独立播放分支。
+- 四个视频入口（视频库预览、片段库、审核工作台、标注工作台）共用媒体能力层：完整认证 GET → 流式进度 → 完整 Blob → `URL.createObjectURL()`；存在 `Content-Length` 时显示确定进度，否则显示实际已加载字节和不确定进度，不存在页面级原生 Range 开关或独立播放分支。
 - 媒体能力统一处理四入口的加载世代、AbortController、晚到响应屏蔽和 object URL 回收。后端代理 pending/failed 的 409 由共享层统一转成可操作状态。
 - `DISPLAY_PROXIES_ENABLED` 是后端唯一源选择开关：false 时后端返回原片，true 时严格只返回 ready 代理；前端不实现 fallback。片段、Submission 与导出是否读取原片属于后端业务权威契约，不由播放器决定。
 - API 封装与类型集中在 `src/api/`：后端提交 `backend/openapi.json`，`openapi-typescript` 生成 `generated/schema.d.ts`；`types.ts` 只保留生成类型别名和纯前端组合类型，关键请求函数直接绑定 generated operation。`client.ts` 继续统一 fetch + Bearer + 401 和友好错误处理。

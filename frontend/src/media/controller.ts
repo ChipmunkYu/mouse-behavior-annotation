@@ -1,4 +1,4 @@
-import type { VideoStreamBlob } from "../api";
+import type { VideoStreamBlob, VideoStreamProgress } from "../api";
 
 export type MediaReadyReason = "initial" | "retry-restored";
 export type MediaHttpStatus = 401 | 403 | 404 | 409 | null;
@@ -12,7 +12,7 @@ interface MediaStateBase {
 
 export type MediaControllerState =
   | (MediaStateBase & { status: "idle" })
-  | (MediaStateBase & { status: "downloading" })
+  | (MediaStateBase & { status: "downloading"; loadedBytes: number; totalBytes: number | null })
   | (MediaStateBase & { status: "ready"; readyReason: MediaReadyReason; contentLength: number | null; blobSize: number })
   | (MediaStateBase & { status: "pending"; message: string; canRetry: true; reason: MediaPendingReason })
   | (MediaStateBase & { status: "failed"; message: string; canRetry: true; httpStatus: MediaHttpStatus; reason: MediaFailureReason })
@@ -41,7 +41,7 @@ export interface MediaElementLike {
 
 export interface MediaControllerDependencies {
   element: MediaElementLike;
-  fetchBlob: (videoId: number | string, signal: AbortSignal) => Promise<VideoStreamBlob>;
+  fetchBlob: (videoId: number | string, signal: AbortSignal, onProgress: (progress: VideoStreamProgress) => void) => Promise<VideoStreamBlob>;
   createObjectUrl: (blob: Blob) => string;
   revokeObjectUrl: (url: string) => void;
   onState: (state: MediaControllerState) => void;
@@ -146,9 +146,14 @@ export function createMediaController(deps: MediaControllerDependencies): MediaC
     const operation = ++generation.operation;
     const abort = new AbortController();
     generation.abort = abort;
-    publish({ status: "downloading", generation: generation.id, readyReason: null });
+    publish({ status: "downloading", generation: generation.id, readyReason: null, loadedBytes: 0, totalBytes: null });
     try {
-      const result = await deps.fetchBlob(generation.videoId, abort.signal);
+      const result = await deps.fetchBlob(generation.videoId, abort.signal, ({ loaded, total }) => {
+        if (active !== generation || generation.operation !== operation || abort.signal.aborted) return;
+        const loadedBytes = Number.isFinite(loaded) ? Math.max(0, loaded) : 0;
+        const totalBytes = total !== null && Number.isFinite(total) && total >= 0 ? total : null;
+        publish({ status: "downloading", generation: generation.id, readyReason: null, loadedBytes, totalBytes });
+      });
       if (active !== generation || generation.operation !== operation) return;
       generation.abort = null;
       const objectUrl = deps.createObjectUrl(result.blob);

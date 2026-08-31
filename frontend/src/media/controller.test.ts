@@ -66,6 +66,31 @@ describe("complete-download media controller", () => {
     expect(ctx.controller.getState()).toMatchObject({ status: "ready", contentLength: 8, blobSize: 8 });
   });
 
+  it("publishes real byte progress and ignores progress from an aborted generation", async () => {
+    const callbacks: Array<(progress: { loaded: number; total: number | null }) => void> = [];
+    const downloads = [
+      deferred<{ blob: Blob; contentLength: number | null }>(),
+      deferred<{ blob: Blob; contentLength: number | null }>(),
+    ];
+    const ctx = setup(vi.fn((_id, _signal, onProgress) => {
+      callbacks.push(onProgress);
+      return downloads[callbacks.length - 1].promise;
+    }));
+
+    ctx.controller.load(1);
+    callbacks[0]({ loaded: 4, total: 10 });
+    expect(ctx.controller.getState()).toMatchObject({ status: "downloading", loadedBytes: 4, totalBytes: 10 });
+
+    ctx.controller.load(2);
+    callbacks[0]({ loaded: 9, total: 10 });
+    expect(ctx.controller.getState()).toMatchObject({ status: "downloading", generation: 2, loadedBytes: 0, totalBytes: null });
+    callbacks[1]({ loaded: 3, total: null });
+    expect(ctx.controller.getState()).toMatchObject({ status: "downloading", generation: 2, loadedBytes: 3, totalBytes: null });
+
+    downloads[1].resolve({ blob: new Blob(["fresh"]), contentLength: null });
+    await Promise.resolve();
+  });
+
   it.each([
     ["DISPLAY_PROXY_PENDING", "pending", MEDIA_PENDING_MESSAGE, "display-pending"],
     ["DISPLAY_PROXY_FAILED", "failed", MEDIA_PROXY_FAILED_MESSAGE, "display-failed"],
