@@ -178,7 +178,7 @@ Submission 锁外 SHA-256 与稳定 identity 从同一个已打开 descriptor/Wi
 短 Video gate 再验证当前 storage key、media revision 与路径 identity。媒体 worker 从一个
 已验证 open handle 流式 hash/copy 到 `videos_dir` 内 job 私有 staging 文件，ffmpeg 只读取
 该 staging 副本，所有成功、失败和重试路径均清理 staging。时间参数保持 9 位小数。
-2026-08-17 已在 Python 3.11.9 隔离环境中使用 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成真实编码、媒体属性与 MediaWorker 本地验证；两者均可从 `.venv\Scripts` 找到。生产 FFmpeg/ffprobe 4.4.2 兼容性仍待候选环境验收。
+2026-08-17 已在 Python 3.11.9 隔离环境中使用 imageio-ffmpeg 0.6.0 内置的 FFmpeg `7.1-essentials_build-www.gyan.dev`（含 libx264）和 npm `@ffprobe-installer/win32-x64@5.1.0` 提供的 ffprobe 5.1 兼容包完成真实编码、媒体属性与 MediaWorker 本地验证；两者均可从 `.venv\Scripts` 找到。2026-08-31 又在网站服务器 Python 3.10.12、FFmpeg/ffprobe 4.4.2 隔离候选完成展示代理 3 秒真实短样本闭环；这只证明基本兼容，秋采长视频等外部门禁仍待验收。
 
 ### Sparse writer 切换维护命令
 
@@ -224,7 +224,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 批次 7（生命周期清理）已实现，
 见下文对应章节。
 
-## 低码率展示代理播放（P4 本地候选）
+## 低码率展示代理播放（P4 已推送服务器候选）
 
 迁移 `0016_display_proxy.py` 增加独立 display 字段和 `BackgroundJob.run_token`；`display_proxy_processor.py` 与 `display_proxy_jobs.py` 提供固定 profile、单 owner、CAS、原子发布和启动恢复。新 file-backed Video 仅在 `DISPLAY_PROXIES_ENABLED=true` 时计算原片 SHA-256，并在创建事务内入队；metadata-only Video 明确排除。四个展示入口都经完整认证 GET 读取资源，前端等待 `response.blob()` 后创建 object URL。开启时 pending/failed 严格返回 409，绝不按页面或状态回退原片；片段生成、Submission 冻结、补生成和项目导出始终读取 `Video.storage_path` 原片。
 
@@ -236,6 +236,8 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 `python scripts/display_proxy_preflight.py`。
 
 预检不写数据库、不计算 hash、不运行 ffprobe：退出码 `0` 表示可切 strict，`1` 表示存在未 ready/不一致数据，`2` 表示配置、数据库或检查过程出错。上线 strict 前必须为 `0`。生产仅允许单实例、单 Uvicorn worker，不得滚动双实例。
+
+最终服务器候选 `ba99fc9cae6acb90e94e7d1bdbe0428f5839f4d2` 已推送。`c6bcfb0` 完成功能与本地/服务器测试，`0c01101` 修复 Node 22 下 Blob 测试可移植性，`ba99fc9` 修复真实服务结构化 enqueue/claim/ready/strict-ready 日志。服务器关键复核为后端 `22 passed`、原片 authority/真实片段 `5 passed`、日志/预检 `14 passed`，`pip check` 通过；隔离空库迁移至 `0016` 后，3 秒 1920×1080/30 FPS H.264 原片约 2.177 秒生成 1280×720、H.264、yuv420p、30 FPS、90 帧代理，完成 preflight 为 `1/1 ready`、`active=0`，无 `.part`。候选服务已停止，生产尚未切换、迁移或启用；实时状态和服务器文件路径只查仓库外“网站服务器文件清单”。
 
 ## Demo 账号
 
@@ -428,7 +430,7 @@ Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是�
 受控源媒体 SHA-256；withdraw 允许 active 项目成员或原 submitter，且仅限无 Review 的 submitted
 attempt。approve 同事务写 Review、supersede、queued job 和 SubmissionAnnotation-only Clip，commit 后调度。
 
-0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成 25/30/60 FPS 真实 FFmpeg 编码、ffprobe 属性和 MediaWorker 本地验证，生产 FFmpeg/ffprobe 4.4.2 候选验收仍待执行。
+0011 在 Submission 冻结 source size/mtime_ns/device/inode；Windows 在 Python stat identity 不可用时通过 Win32 file ID 获取 volume/file index。SQLite trigger 在数据库层冻结已引用 snapshot/state、Submission authority、SubmissionAnnotation 与 raw baseline，同时保留未引用 snapshot 的 child-first cleanup。ffmpeg 时间参数采用 9 位小数，避免 25/30/60 FPS 边界被两位小数量化。Phase 4 已实现；本次媒体修复已完成 25/30/60 FPS 真实 FFmpeg 编码、ffprobe 属性和 MediaWorker 本地验证，服务器 FFmpeg/ffprobe 4.4.2 的展示代理 3 秒短闭环也已通过，但长视频与完整上线门禁仍待执行。
 
 Gate 3 remediation：submit 在 Video write gate 外解析受控 storage key、记录 size/mtime_ns
 并全量计算 SHA-256；短 gate 内只重验 DB identity 与 stat identity，Submission 冻结该 hash，
@@ -715,7 +717,7 @@ python scripts/export_openapi.py --check
 
 真实小鼠三文件 E2E 也在同一目标提交和 Python 3.11.9 隔离环境完成：后端使用被 Git 忽略的 `backend/data/local-e2e`，SQLite 已迁移至 `0011`；3.54 MB MOV、约 1.69 MB tracks JSONL 和 30 FPS/156 帧 metadata 全程仅经公开 API 创建项目 1、视频 1、批次 1、检测导入 1/修订 1，并成功写入 1877 条检测。随后以真实 `track_id=6`、帧 0–14 创建标注 1，提交为 submission 1、review 1 审核通过；异步媒体达到 `total=1/ready=1/failed=0`，export job 2 为 `succeeded`。下载文件 `backend/data/local-e2e/downloads/project-1-job-2.zip` 为 116603 bytes，片段目录严格包含四个约定文件且 JSON/计数一致；其中 MP4 经 ffprobe 确认为 H.264、yuv420p、2044×1080、15 帧、0.5 秒，工作目录无 `.part`/`.staging`。这些 ignored 配置与运行产物仅是本地证据，不是仓库提交；临时后端已停止，8000 端口已释放。
 
-上述历史自动验收及服务器本机 health 不替代人工浏览器硬删除/上传任务回归或本次来源的公网验收。当前 P4 分支尚未提交、推送或部署；候选 `npm audit` 报告 3 moderate、2 high，尚待评估且未自动修改依赖。
+上述历史自动验收及服务器本机 health 不替代人工浏览器硬删除/上传任务回归或本次来源的公网验收。当前 P4 最终服务器候选已推送并完成隔离短样本验收，但尚未部署或上线；production npm audit 为 2 moderate（React Router），完整 `npm ci` 依赖报告为 3 moderate、2 high，均未自动修复。
 
 覆盖：登录、创建项目（owner + 非空完整规范化方案 + 初始 replace audit）、缺失/空/非法类别原子失败不落库、创建后显式复核并锁定类别方案、跨项目访问拒绝、有效/无效标注、更新/删除、导出字段与类别名，
 三文件导入批次/替换与真实 metadata 别名、source basename 和视频元数据同步/替换兼容校验、候选文件清理、逐帧查询、无导入 `needs_mouse_ids` 草稿、`mouse_ids` 数量与覆盖校验、Split/Merge、active suppression 列表与刷新恢复、旧 import 撤销 409、全部 Annotation 重校验、并发修订冲突、三类审核修订失效、保留空帧且可 round-trip 的修正后 track 结果、legacy 单视频 ExportEvent，以及每个 `SubmissionAnnotation` 独立四文件 ZIP 的完整性，

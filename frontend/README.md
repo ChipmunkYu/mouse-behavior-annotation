@@ -112,7 +112,7 @@ npm run api:generate
 npm test -- --run
 ```
 
-当前分支已本地完成四入口共享完整 Blob 下载，但尚未提交、推送或部署。外部门禁仍包括：服务器 FFmpeg/ffprobe 4.4.2 真实代理、秋采长视频及时间轴、真实 ENOSPC、并发 CPU/内存/I/O，以及 Chrome/Edge/Firefox 大 Blob。门禁未完成不阻止形成和推送代码候选，但阻止宣称“已上线”。
+四入口共享完整 Blob 下载已包含在已推送的最终服务器候选 `ba99fc9cae6acb90e94e7d1bdbe0428f5839f4d2` 中，但尚未部署或上线。Node 22 测试暴露的 Blob 测试可移植性问题已由 `0c01101` 修复，服务器前端 `15 passed` 及 `api:check`、typecheck、build 均通过。FFmpeg/ffprobe 4.4.2 的 3 秒短样本代理闭环已通过；秋采长视频及时间轴、真实 ENOSPC、并发 CPU/内存/I/O、Chrome/Edge/Firefox 目标大 Blob 和生产维护窗口演练仍是上线门禁。
 
 ## 目录结构
 
