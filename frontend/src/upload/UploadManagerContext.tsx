@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cancelImportBatch, getImportBatch } from "../api";
 import { ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import { UNAUTHORIZED_EVENT } from "../auth/events";
 import { batchSucceeded, executeUploadTask } from "./uploadTasks";
 import type { EnqueueBatchInput, EnqueueVideoInput, UploadTask } from "./types";
@@ -34,6 +35,7 @@ function ignoreMissingBatch(error: unknown): void {
 }
 
 export function UploadManagerProvider({ children }: { children: ReactNode }) {
+  const { token } = useAuth();
   const [tasks, setTasks] = useState<UploadTask[]>([]);
   const [versions, setVersions] = useState<Record<number, number>>({});
   const tasksRef = useRef<UploadTask[]>([]);
@@ -193,6 +195,12 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
     window.addEventListener(UNAUTHORIZED_EVENT, stopLocally);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, stopLocally);
   }, [stopLocally]);
+
+  // stopLocally clears the previous session permanently. A later authenticated
+  // session may start only newly enqueued tasks; the cleared tasks cannot revive.
+  useEffect(() => {
+    if (token != null) stopping.current = false;
+  }, [token]);
 
   useEffect(() => () => {
     stopping.current = true;
