@@ -117,15 +117,30 @@ def validate_clip_directory(directory: Path, probe: dict, summary: TracksSummary
     metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
     _walk_forbidden([annotation, metadata])
     clip = metadata.get("clip", {})
-    for key in ("fps", "width", "height", "frame_count"):
-        matches = (math.isclose(float(clip.get(key, -1)), float(probe.get(key, -2)), rel_tol=1e-6,
-                                abs_tol=1e-6) if key == "fps" else clip.get(key) == probe.get(key))
-        if key not in probe or not matches:
+    count = clip.get("frame_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise MediaCommandError("metadata clip frame_count must be a positive integer")
+    canonical_fps = clip.get("fps")
+    probe_fps = probe.get("fps")
+    probe_duration = probe.get("duration")
+    if (isinstance(canonical_fps, bool) or not isinstance(canonical_fps, (int, float))
+            or not math.isfinite(canonical_fps) or canonical_fps <= 0):
+        raise MediaCommandError("metadata clip fps must be finite and positive")
+    if (isinstance(probe_fps, bool) or not isinstance(probe_fps, (int, float))
+            or not math.isfinite(probe_fps) or probe_fps <= 0):
+        raise MediaCommandError("ffprobe fps must be finite and positive")
+    if (isinstance(probe_duration, bool) or not isinstance(probe_duration, (int, float))
+            or not math.isfinite(probe_duration) or probe_duration <= 0):
+        raise MediaCommandError("ffprobe duration must be finite and positive")
+    for key in ("frame_count", "width", "height"):
+        if key not in probe or clip.get(key) != probe.get(key):
             raise MediaCommandError(f"ffprobe {key} mismatch")
-    count, fps, width, height = clip["frame_count"], clip["fps"], clip["width"], clip["height"]
-    if "duration" not in probe or not math.isclose(probe["duration"], count / fps,
-                                                    abs_tol=1 / fps + 1e-6):
+    tolerance = 1 / canonical_fps + 1e-6
+    if count * abs(1 / probe_fps - 1 / canonical_fps) > tolerance:
+        raise MediaCommandError("ffprobe fps mismatch")
+    if abs(probe_duration - count / canonical_fps) > tolerance:
         raise MediaCommandError("ffprobe duration mismatch")
+    fps, width, height = canonical_fps, clip["width"], clip["height"]
     if summary.frame_count != count or annotation.get("frame_range") != {"start": 0, "end": max(0, count - 1)}:
         raise MediaCommandError("frame count/range mismatch")
     if not set(annotation.get("mouse_ids", [])).issubset(summary.valid_track_ids):

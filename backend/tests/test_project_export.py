@@ -597,6 +597,97 @@ def test_export_contract_rejects_malformed_participant_authority(
         )
 
 
+def _valid_contract_directory(tmp_path, *, fps=25.0, frame_count=100):
+    directory = tmp_path / "item"
+    directory.mkdir()
+    (directory / "clip.mp4").write_bytes(b"x")
+    (directory / "tracks.json").write_text("[]", encoding="utf-8")
+    (directory / "annotation.json").write_text(json.dumps({
+        "behavior": "追逐", "mouse_ids": [], "participants": [],
+        "confidence": "certain", "frame_range": {"start": 0, "end": frame_count - 1},
+        "time_range": {"start": 0, "end": frame_count / fps},
+    }), encoding="utf-8")
+    (directory / "metadata.json").write_text(json.dumps({
+        "schema_version": "1.0", "clip": {"fps": fps, "width": 10,
+        "height": 10, "frame_count": frame_count},
+    }), encoding="utf-8")
+    summary = TracksSummary(frame_count=frame_count, valid_track_ids=frozenset())
+    return directory, summary
+
+
+def test_export_contract_accepts_production_probe_values(tmp_path):
+    directory, summary = _valid_contract_directory(
+        tmp_path, fps=29.96731670997195, frame_count=238)
+
+    validate_clip_directory(directory, {
+        "fps": 30, "width": 10, "height": 10, "frame_count": 238, "duration": 7.967,
+    }, summary)
+
+
+def test_export_contract_fps_cumulative_drift_boundary(tmp_path):
+    canonical_fps = 25.0
+    frame_count = 100
+    tolerance = 1 / canonical_fps + 1e-6
+    boundary_fps = 1 / (1 / canonical_fps + tolerance / frame_count)
+    directory, summary = _valid_contract_directory(
+        tmp_path, fps=canonical_fps, frame_count=frame_count)
+    probe = {"fps": boundary_fps, "width": 10, "height": 10,
+             "frame_count": frame_count, "duration": frame_count / canonical_fps}
+
+    validate_clip_directory(directory, probe, summary)
+    probe["fps"] = 1 / (1 / canonical_fps + (tolerance + 1e-6) / frame_count)
+    with pytest.raises(MediaCommandError, match="fps mismatch"):
+        validate_clip_directory(directory, probe, summary)
+
+
+@pytest.mark.parametrize("probe_update,error", [
+    ({"fps": 20.0}, "fps mismatch"),
+    ({"duration": 4.1}, "duration mismatch"),
+    ({"frame_count": 99}, "frame_count mismatch"),
+])
+def test_export_contract_rejects_independent_probe_mismatches(tmp_path, probe_update, error):
+    directory, summary = _valid_contract_directory(tmp_path)
+    probe = {"fps": 25.0, "width": 10, "height": 10,
+             "frame_count": 100, "duration": 4.0, **probe_update}
+
+    with pytest.raises(MediaCommandError, match=error):
+        validate_clip_directory(directory, probe, summary)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("fps", 0), ("fps", -1), ("fps", float("nan")), ("fps", float("inf")),
+    ("duration", 0), ("duration", -1), ("duration", float("nan")),
+    ("duration", float("inf")),
+])
+def test_export_contract_rejects_nonpositive_or_nonfinite_probe_timing(
+    tmp_path, field, value
+):
+    directory, summary = _valid_contract_directory(tmp_path)
+    probe = {"fps": 25.0, "width": 10, "height": 10,
+             "frame_count": 100, "duration": 4.0, field: value}
+
+    with pytest.raises(MediaCommandError, match=field):
+        validate_clip_directory(directory, probe, summary)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("frame_count", 0), ("frame_count", -1), ("frame_count", 1.5),
+    ("frame_count", True), ("fps", 0), ("fps", -1),
+    ("fps", float("nan")), ("fps", float("inf")),
+])
+def test_export_contract_rejects_invalid_canonical_timing(tmp_path, field, value):
+    directory, summary = _valid_contract_directory(tmp_path)
+    metadata_path = directory / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["clip"][field] = value
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    probe = {"fps": 25.0, "width": 10, "height": 10,
+             "frame_count": 100, "duration": 4.0}
+
+    with pytest.raises(MediaCommandError, match=field):
+        validate_clip_directory(directory, probe, summary)
+
+
 def test_formal_zip_role_participants_are_snapshot_ordered_and_tracks_are_role_free(media_ctx):
     from tests.test_participant_role_track_edits import _annotation, _keys, _setup
 
