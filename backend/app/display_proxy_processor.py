@@ -10,6 +10,13 @@ from pathlib import Path
 
 
 DISPLAY_PROXY_PROFILE_VERSION = "candidate-720p-h264-crf28-g30-sar1-ordinal-cfr"
+# Exact allowlist used only to recognize jobs left by supported profile generations
+# during deletion/history inspection. Workers must continue to accept only the
+# current DISPLAY_PROXY_PROFILE_VERSION.
+DISPLAY_PROXY_DELETE_PROFILE_VERSIONS = frozenset({
+    "candidate-720p-h264-crf28-g30-sar1",
+    DISPLAY_PROXY_PROFILE_VERSION,
+})
 OUTPUT_FPS_TOLERANCE = 0.01
 OUTPUT_DURATION_TOLERANCE_FRAMES = 1.0
 FRAME_INTERVAL_TOLERANCE_SECONDS = 0.001

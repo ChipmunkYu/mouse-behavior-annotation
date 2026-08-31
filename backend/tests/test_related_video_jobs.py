@@ -79,6 +79,35 @@ def test_display_proxy_job_is_visible_to_delete_guard(ctx):
     assert [job.id for job in result.active] == [job_id]
 
 
+def test_legacy_display_proxy_profiles_have_fail_closed_delete_semantics(ctx):
+    info = ctx.make_project_with_video()
+    project_id, video_id = info["project"]["id"], info["video"]["id"]
+
+    def payload(profile):
+        return {"video_id": video_id, "project_id": project_id,
+                "source_sha256": "a" * 64, "profile_version": profile}
+
+    with ctx.session_factory() as db:
+        terminal_id = _add(
+            db, job_type="display_proxy", status="failed", project_id=project_id,
+            payload=payload("candidate-720p-h264-crf28-g30-sar1"),
+        )
+        active_id = _add(
+            db, job_type="display_proxy", status="queued", project_id=project_id,
+            payload=payload("candidate-720p-h264-crf28-g30-sar1"),
+        )
+        unknown_id = _add(
+            db, job_type="display_proxy", status="failed", project_id=project_id,
+            payload=payload("candidate-720p-h264-crf28-g30-sar1-almost"),
+        )
+        db.commit()
+        result = identify_related_video_jobs(db, project_id=project_id, video_id=video_id)
+
+    assert [job.id for job in result.terminal] == [terminal_id]
+    assert [job.id for job in result.active] == [active_id]
+    assert [job.id for job in result.unknown] == [unknown_id]
+
+
 def test_display_proxy_payload_with_persisted_storage_path_is_unknown(ctx):
     info = ctx.make_project_with_video()
     project_id, video_id = info["project"]["id"], info["video"]["id"]

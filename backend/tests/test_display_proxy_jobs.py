@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.display_proxy_jobs import DisplayProxyWorker, enqueue_display_proxy
+from app.display_proxy_jobs import DisplayProxyWorker, display_proxy_names, enqueue_display_proxy
 from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION, DisplayProxyError
 from app.models import BackgroundJob, Video
 from app.process_lock import ProcessLock, ProcessLockError
@@ -49,6 +49,15 @@ def _queued(ctx, content=b"source"):
         job_id, video_id, key = job.id, video.id, job.dedupe_key
         db.commit()
     return settings, source, digest, job_id, video_id, key
+
+
+def test_worker_payload_validation_rejects_legacy_profile():
+    assert display_proxy_names({
+        "video_id": 1,
+        "project_id": 1,
+        "source_sha256": "a" * 64,
+        "profile_version": "candidate-720p-h264-crf28-g30-sar1",
+    }) is None
 
 
 def test_enqueue_dedupes_and_requires_source_hash(ctx):

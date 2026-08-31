@@ -12,7 +12,7 @@ from typing import Iterable, Mapping
 from sqlalchemy.orm import Session
 
 from .models import BackgroundJob
-from .display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
+from .display_proxy_processor import DISPLAY_PROXY_DELETE_PROFILE_VERSIONS
 
 
 ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -223,7 +223,7 @@ def _classify_display_proxy(payload: Mapping[str, object], project_id: int,
              and _integer(payload.get("video_id"))
              and payload.get("project_id") == project_id
              and _hex_digest(payload.get("source_sha256"))
-             and payload.get("profile_version") == DISPLAY_PROXY_PROFILE_VERSION)
+             and payload.get("profile_version") in DISPLAY_PROXY_DELETE_PROFILE_VERSIONS)
     return related, valid
 
 

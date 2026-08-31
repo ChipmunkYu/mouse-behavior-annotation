@@ -70,6 +70,27 @@ def test_hard_delete_removes_ready_proxy_and_duplicate_terminal_result(ctx):
         assert db.connection().exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
 
+def test_hard_delete_accepts_terminal_legacy_display_proxy_job(ctx):
+    _made_result, project_id, video_id, headers = _made(ctx)
+    with ctx.session_factory() as db:
+        job = BackgroundJob(
+            project_id=project_id, job_type="display_proxy", status="failed",
+            payload={"video_id": video_id, "project_id": project_id,
+                     "source_sha256": "a" * 64,
+                     "profile_version": "candidate-720p-h264-crf28-g30-sar1"},
+        )
+        db.add(job); db.commit(); job_id = job.id
+
+    response = ctx.client.delete(
+        f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
+    )
+
+    assert response.status_code == 204, response.text
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is None
+        assert db.get(BackgroundJob, job_id) is None
+
+
 def test_database_failure_restores_source_and_ready_proxy(ctx, monkeypatch):
     _made_result, project_id, video_id, headers = _made(ctx)
     settings = ctx.raw_client.app.state.settings
