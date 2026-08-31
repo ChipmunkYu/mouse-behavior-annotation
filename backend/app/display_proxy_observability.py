@@ -15,12 +15,13 @@ EVENT_LOGGER_NAME = "app.display_proxy"
 def configure_display_proxy_observability() -> None:
     """Restore the owned logger after Alembic logging configuration runs.
 
-    Events propagate to the root logger without a dedicated handler or a local
-    threshold, leaving the effective runtime level under operator control.
+    Events propagate to the root logger without a dedicated handler.  Alembic's
+    fileConfig leaves the root logger at WARNING, so this owned lane needs an
+    INFO baseline; operators can still override or disable it after startup.
     """
     logger = logging.getLogger(EVENT_LOGGER_NAME)
     logger.disabled = False
-    logger.setLevel(logging.NOTSET)
+    logger.setLevel(logging.INFO)
     logger.propagate = True
     logger.handlers.clear()
 

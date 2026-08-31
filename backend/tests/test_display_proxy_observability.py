@@ -40,7 +40,7 @@ def test_event_emission_does_not_reconfigure_logger():
 def test_application_initialization_restores_single_propagating_logger(ctx, caplog):
     logger = logging.getLogger(EVENT_LOGGER_NAME)
     assert logger.disabled is False
-    assert logger.level == logging.NOTSET
+    assert logger.level == logging.INFO
     assert logger.propagate is True
     assert logger.handlers == []
 
