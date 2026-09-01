@@ -1,9 +1,9 @@
 # projects/2 新增四类行为标签计划
 
-> **状态：已确认计划、尚未实施。**  
-> **基线：生产 release `50be725743254c0fa55ae3b21de646d457211417`；SQLite schema `0016`。**  
+> **状态：已确认计划；待确认模板/本地候选执行包已准备，尚未实施。**
+> **已确认生产事实：仓库外 `网站服务器文件清单.md` 截至 2026-08-31 仅确认 release `50be725743254c0fa55ae3b21de646d457211417`、SQLite schema `0016`。**
 > **范围：只新增、不删除、不改既有类别；不补标已提交或已审核数据。**  
-> **操作边界：本轮没有服务器或代码操作，也没有修改数据库与生产状态。**
+> **操作边界：本轮没有服务器操作，也没有修改数据库与生产状态。**
 
 ## 1. 直接结论
 
@@ -26,7 +26,7 @@
 
 - 三个 `unordered` 类别的 `role_definitions=[]`。
 - Following 的两个角色按 Follower、Leader 顺序设置 `role_sort_order=0/1`。
-- Following 的两个 role key 必须在实施时分别生成互不重复的 `role_<32hex>`。本文不得写死实际 key，实施记录也应以当次真实生成值为准。
+- 本地候选执行包已固定两个互不重复的 key，以支持 fail-closed 比较和幂等复核：Follower=`role_fa688d903bd22a493398b22bfd7d65cd`，Leader=`role_005fe72c3604718350b2a1beade6eaf4`。这是对原“实施时生成”计划边界的明确收敛；若执行包重新定基线，必须重新审查这些固定值是否仍无冲突。
 
 ## 3. 定义来源与自动校验边界
 
@@ -42,20 +42,24 @@
 
 ## 4. 数据库实施计划
 
-以下是实施步骤与核验要求，不是服务器命令或可直接执行的 SQL：
+以下是实施步骤与核验要求，不是已执行记录。project 2 存在性/锁定状态、四类缺失、唯一 active owner、后台任务以及数据库打开者都必须现场确认，不能由本计划预先断言。严格顺序不可跳步：
 
-1. **停服与备份**：进入维护窗口并停服；制作 SQLite 一致性备份，同时正确处理 WAL 模式下的主库、`-wal` 与 `-shm` 状态，避免仅复制主文件得到不一致备份。验证备份可读且完整。
-2. **只读基线核对**：核实目标确为 project 2；读取现有类别的分组、名称和最大 `sort_order`；检查现有 role key，确保新 key 不冲突；确认无数据库锁与活动写入。
-3. **健康基线**：记录数据库 integrity check 与 foreign key check 的实施前结果，任何异常均停止变更。
-4. **单事务变更**：在一个明确事务中完成以下事项，失败则整体回滚：
+1. **冻结新写入**：先冻结登录后的所有上传、标注/审核、导出发起及管理写入，并验证入口冻结生效。
+2. **后台任务归零**：服务仍运行时确认 display、media、export、cleanup 等所有类型的 `queued`/`running` 后台任务全部归零；未知类型或状态也必须解释清楚，不得只看 display。
+3. **停服与静态门禁**：停止唯一服务，确认 unit inactive、Uvicorn 退出、8000 无监听，并仅对主库及实际存在的 WAL/SHM 路径检查无打开者。
+4. **现场 dry-run**：核实固定 release/schema/trigger；确认 project 2 恰好存在且已锁定、四类全部缺失、唯一 active owner；读取现有类别、最大 `sort_order` 与 role key；记录 integrity、foreign key 和只读 fingerprint。任何偏差均停止。
+5. **一致性备份与证据**：使用 SQLite backup API 创建独立一致性备份，验证备份可读、完整、SHA256 与 dry-run fingerprint。apply 必须显式传入备份路径和 SHA256，脚本再次验证，缺失或不匹配即拒绝写入。
+6. **单事务 apply**：在一个明确事务中完成以下事项，失败则整体回滚：
    - 临时移除 `trg_category_locked_insert`，并在同一事务内按原定义恢复；
    - 按最终类别表插入四行，填写颜色、角色、数量、排序、`is_active=true` 与显式 `created_at`；
-   - 建议同时临时处理 `trg_project_scheme_lock`，使其不会阻断本次受控变更，并在同一事务内按原定义恢复；
-   - 建议将类别方案 `version` 增加 1，并追加由真实 owner actor 执行的 `replace` audit；基于真实变更前后完整方案重算 `before`、`after` 与 `scheme_hash`，不得使用占位 actor 或伪造审计内容；
+   - 同时临时处理 `trg_project_scheme_lock`，使其不会阻断本次受控变更，并在同一事务内按原定义恢复；
+   - 将类别方案 `version` 恰好增加 1，并追加由现场确认的唯一 active owner actor 执行的 `replace` audit；基于真实变更前后完整方案重算 `before`、`after` 与 `scheme_hash`，不得使用占位 actor 或伪造审计内容；
    - 保持既有 `locked_at`、`locked_by` 不变。
-5. **提交与复检**：提交后确认四行、分组、颜色、排序、角色结构、数量约束、版本/审计（若实施）均准确；确认两个临时处理的触发器已按原定义恢复；再次执行 integrity 与 foreign key 检查，并确认锁状态正常。
-6. **启服与业务验收**：仅在数据库复检通过后启服，按本文验收清单检查 `projects/2`。
-7. **回滚准备**：若事务内失败，直接回滚事务；若提交后或启服后发现异常，立即停服，优先恢复经验证的一致性备份，并复核 integrity、foreign key、schema `0016`、release `50be725...` 及服务状态。不得通过随意删除四行代替完整回滚，尤其是在已产生新标注或审计后。
+7. **verify**：提交后以新只读连接确认四行、分组、颜色、排序、角色结构、数量约束、version/audit/hash 均准确；确认全部触发器按固定 release 原定义恢复，再次执行 integrity 与 foreign key 检查并确认锁字段不变。
+8. **启服与业务验收**：仅在 verify 通过后启服，按本文验收清单检查 `projects/2`。
+9. **回滚准备**：若事务内失败，直接回滚事务；若提交后或启服后发现异常，立即停服，优先恢复经验证的一致性备份，并复核 integrity、foreign key、schema `0016`、release `50be725...` 及服务状态。不得通过随意删除四行代替完整回滚，尤其是在已产生新标注或审计后。
+
+配套候选：[`../../deploy/operations/update_project2_categories.py`](../../deploy/operations/update_project2_categories.py) 与 [`../../deploy/operations/projects-2标签更新操作说明.md`](../../deploy/operations/projects-2标签更新操作说明.md)。若执行前先部署其他候选 release，或现场 schema/trigger 与固定基线不一致，本包失效；必须按新 release/schema/trigger 重新定基线、审查与自测，不得继续使用旧包。
 
 ## 5. 改动矩阵
 
@@ -63,9 +67,9 @@
 |---|---|---|
 | 必需 | DB 新增四行 | 仅为 `projects/2` 增加 Following、Group locomotion、Social clustering、Dispersal。 |
 | 必需 | 类别字段 | 正确填写颜色、角色结构、数量约束和相对排序。 |
-| 必需 | 触发器恢复 | `trg_category_locked_insert` 必须恢复；若临时处理 `trg_project_scheme_lock`，也必须恢复。 |
+| 必需 | 触发器恢复 | `trg_category_locked_insert` 与 `trg_project_scheme_lock` 均必须恢复。 |
 | 必需 | 备份与校验 | 停服一致性备份、WAL/`-shm` 注意事项、实施前后 integrity/foreign key 与恢复可用性核验。 |
-| 建议 | version/audit 一致性 | `version +1`，真实 owner actor 的 `replace` audit，以及真实 `before`/`after`/`scheme_hash`。 |
+| 必需 | version/audit 一致性 | `version +1`，真实且唯一 active owner actor 的 `replace` audit，以及真实 `before`/`after`/`scheme_hash`。 |
 | 无需 | 运行时代码 | 不改前端 runtime、后端 runtime、API、Review、export 代码。 |
 | 无需 | 默认与演示数据 | 不改默认新项目模板和 demo seed。 |
 | 无需 | 历史数据 | 不改既有类别，不补标或改写旧 submission 快照。 |
@@ -92,14 +96,14 @@
 
 ## 8. 验收清单
 
-- [ ] 维护窗口内停服，且确认无活动写入或数据库锁。
-- [ ] 一致性备份完成，WAL/`-shm` 已正确处理，备份可读并通过完整性核验。
+- [ ] 已依次完成冻结新写入、所有 active 后台任务归零、停服、8000/数据库无打开者。
+- [ ] 一致性备份完成，备份可读并通过完整性、SHA256 与 fingerprint 核验；apply 已显式确认该证据。
 - [ ] 实施前 project 2、现有 group/name/max sort、role key、schema、integrity 与 foreign key 基线已记录。
 - [ ] 仅新增四类，没有删除或修改既有类别。
 - [ ] 四类名称、分组、颜色、排序、模式、数量、角色和 `created_at` 均符合最终类别表。
-- [ ] Following 的两个 role key 为实施时生成的互不重复 `role_<32hex>`，角色顺序为 Follower 0、Leader 1。
+- [ ] Following 使用执行包中固定且经现场冲突检查通过的两个不同 `role_<32hex>`，角色顺序为 Follower 0、Leader 1。
 - [ ] 所有临时处理的触发器均已按原定义恢复。
-- [ ] `locked_at`、`locked_by` 未改变；version/audit 如实施则内容完整且 actor 真实。
+- [ ] `locked_at`、`locked_by` 未改变；version 恰好 +1，audit 内容完整且 actor 为现场确认的唯一 active owner。
 - [ ] 提交后 integrity、foreign key、锁状态和业务 API 读取均正常。
 - [ ] 前端显示、颜色、角色槽位、数量门禁、长名称、快捷键和重叠时间轴验收通过。
 - [ ] 导出抽查符合兼容性边界，旧 submission 快照未变化。
@@ -115,4 +119,4 @@
 
 ## 10. 未实施事项
 
-截至本计划形成时，没有修改服务器、数据库、代码或生产状态；没有插入四类、生成实际 role key、调整 version/audit、停启服务或执行部署。本文只记录已确认的后续实施与验收边界。
+截至本计划形成时，仅在本地准备并自测候选脚本与操作说明；没有修改服务器、数据库或生产状态，没有插入四类、调整 version/audit、停启服务或执行部署。本文只记录已确认的后续实施与验收边界。
