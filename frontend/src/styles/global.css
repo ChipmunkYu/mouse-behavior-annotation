@@ -1141,8 +1141,8 @@ a:focus-visible,
 .mouse-id-item { display: flex; flex-direction: column; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text); }
 .mouse-id-item span { font-size: 10px; color: var(--text-3); }
 .mouse-id-item.selected { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
-.mouse-ids-panel.keyboard-nav { border-color: var(--accent); }
-.mouse-id-item.keyboard-focused { outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: 0 0 0 3px var(--accent-weak); }
+.mouse-ids-panel.keyboard-nav, .identity-panel.keyboard-nav { border-color: var(--accent); }
+.mouse-id-item.keyboard-focused, .identity-track.keyboard-focused { outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: 0 0 0 3px var(--accent-weak); }
 .participant-nav-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: var(--radius); background: var(--accent-weak); color: var(--accent); font-size: 11px; font-weight: 700; }
 .mouse-rule-warning, .mouse-warning-banner { padding: 7px 10px; border: 1px solid var(--warn); border-radius: var(--radius); background: var(--warn-weak); color: var(--warn); font-size: 11px; }
 .mouse-status.warning { color: var(--warn); font-weight: 700; }
