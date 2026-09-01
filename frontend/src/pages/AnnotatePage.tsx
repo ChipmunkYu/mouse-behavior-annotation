@@ -966,7 +966,9 @@ export default function AnnotatePage() {
     getCorrectedTracks(pid, vid, { current_frame: currentFrame, search: identitySearch || undefined, page_size: 200 })
       .then((result) => {
         if (!alive) return;
-        const items = showAllTracks ? result.items : result.items.filter((t) => t.visible_in_current_frame || overlaySelectedIds.includes(t.display_track_id));
+        const items = showAllTracks || identitySearch
+          ? result.items
+          : result.items.filter((t) => t.visible_in_current_frame || overlaySelectedIds.includes(t.display_track_id));
         setTracks(items);
       })
       .catch((err: unknown) => { if (alive) setErrorMsg(err instanceof Error ? err.message : "加载 track ID 失败"); });
