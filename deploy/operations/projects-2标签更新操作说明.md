@@ -1,10 +1,10 @@
-# projects/2 标签更新生产操作说明（待确认模板/本地候选）
+# projects/2 标签更新生产操作说明（2026-09-02 已执行）
 
-> # **命令尚未执行，服务器/DB 未改变**
+> # **本次更新已完成；本文保留为实施与回滚记录**
 >
-> 本文及配套脚本只是本地候选、待确认执行模板，不是服务器执行记录。任何实际服务器只读或写命令都必须逐条展示、用中文说明用途，并在用户明确确认该条命令后执行；不得把多个服务器命令一次性授权。脚本始终以 `jinghan` 运行，`sudo` 仅用于 `systemctl`。
+> 2026-09-02 已按本文完成 dry-run、一致性备份、单事务 apply 与 verify，projects/2 从 12 类增至 16 类。命令块保留为本次记录，不得直接重复执行；脚本始终以 `jinghan` 运行，`sudo` 仅用于 `systemctl`。
 
-仓库外 `网站服务器文件清单.md` 截至 2026-08-31 唯一确认的生产基线是 release `50be725743254c0fa55ae3b21de646d457211417`、schema `0016`；本候选包因此固定 backend `/opt/mouse-annotation/releases/50be725743254c0fa55ae3b21de646d457211417/backend`，venv 为该 backend 下 `.venv`。禁止通过 `current` 导入代码。project 2 是否存在/锁定、四类是否缺失、active owner 是否唯一、后台任务是否归零、服务/端口/DB 是否仍有打开者均不是已确认生产事实，必须按下文现场 preflight。若本包执行前先部署了任何候选 release、schema 或触发器定义发生变化，本包立即失效：必须基于届时精确 release/schema/trigger 重新定基线、重新审查并生成执行包，不得沿用本文继续操作。
+本包固定旧生产 release `50be725743254c0fa55ae3b21de646d457211417`、schema `0016` 并已成功执行；实施前备份为 `/data/mouse-annotation/backups/pre-project2-categories-20260901T204232Z.db`。当前生产已切换到 `fc749b24e031e884d265299c9a7456badc1d9379`，因此本包现已失效，除按回滚章节恢复本次备份外不得再次运行 apply。
 
 ## 1. 本地上传（待确认）
 

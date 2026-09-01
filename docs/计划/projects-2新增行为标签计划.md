@@ -1,9 +1,9 @@
 # projects/2 新增四类行为标签计划
 
-> **状态：已确认计划；待确认模板/本地候选执行包已准备，尚未实施。**
-> **已确认生产事实：仓库外 `网站服务器文件清单.md` 截至 2026-08-31 仅确认 release `50be725743254c0fa55ae3b21de646d457211417`、SQLite schema `0016`。**
+> **状态：已于 2026-09-02 实施并验证。**
+> **生产结果：projects/2 已从 12 类增至 16 类；当前 release `fc749b24e031e884d265299c9a7456badc1d9379`，SQLite schema 仍为 `0016`。**
 > **范围：只新增、不删除、不改既有类别；不补标已提交或已审核数据。**  
-> **操作边界：本轮没有服务器操作，也没有修改数据库与生产状态。**
+> **操作边界：仅新增四类并更新对应 version/audit；没有删除或修改既有类别，也没有补标旧数据。**
 
 ## 1. 直接结论
 
@@ -42,7 +42,7 @@
 
 ## 4. 数据库实施计划
 
-以下是实施步骤与核验要求，不是已执行记录。project 2 存在性/锁定状态、四类缺失、唯一 active owner、后台任务以及数据库打开者都必须现场确认，不能由本计划预先断言。严格顺序不可跳步：
+以下是本次已执行的实施步骤与核验要求。现场确认了 project 2、锁定状态、四类缺失、唯一 active owner、后台任务及数据库静态状态；严格顺序如下：
 
 1. **冻结新写入**：先冻结登录后的所有上传、标注/审核、导出发起及管理写入，并验证入口冻结生效。
 2. **后台任务归零**：服务仍运行时确认 display、media、export、cleanup 等所有类型的 `queued`/`running` 后台任务全部归零；未知类型或状态也必须解释清楚，不得只看 display。
@@ -59,7 +59,7 @@
 8. **启服与业务验收**：仅在 verify 通过后启服，按本文验收清单检查 `projects/2`。
 9. **回滚准备**：若事务内失败，直接回滚事务；若提交后或启服后发现异常，立即停服，优先恢复经验证的一致性备份，并复核 integrity、foreign key、schema `0016`、release `50be725...` 及服务状态。不得通过随意删除四行代替完整回滚，尤其是在已产生新标注或审计后。
 
-配套候选：[`../../deploy/operations/update_project2_categories.py`](../../deploy/operations/update_project2_categories.py) 与 [`../../deploy/operations/projects-2标签更新操作说明.md`](../../deploy/operations/projects-2标签更新操作说明.md)。若执行前先部署其他候选 release，或现场 schema/trigger 与固定基线不一致，本包失效；必须按新 release/schema/trigger 重新定基线、审查与自测，不得继续使用旧包。
+配套历史执行包：[`../../deploy/operations/update_project2_categories.py`](../../deploy/operations/update_project2_categories.py) 与 [`../../deploy/operations/projects-2标签更新操作说明.md`](../../deploy/operations/projects-2标签更新操作说明.md)。该包已在固定 `50be725...` 基线上完成使命；当前生产已切换到 `fc749b2`，不得再次执行。
 
 ## 5. 改动矩阵
 
@@ -96,18 +96,18 @@
 
 ## 8. 验收清单
 
-- [ ] 已依次完成冻结新写入、所有 active 后台任务归零、停服、8000/数据库无打开者。
-- [ ] 一致性备份完成，备份可读并通过完整性、SHA256 与 fingerprint 核验；apply 已显式确认该证据。
-- [ ] 实施前 project 2、现有 group/name/max sort、role key、schema、integrity 与 foreign key 基线已记录。
-- [ ] 仅新增四类，没有删除或修改既有类别。
-- [ ] 四类名称、分组、颜色、排序、模式、数量、角色和 `created_at` 均符合最终类别表。
-- [ ] Following 使用执行包中固定且经现场冲突检查通过的两个不同 `role_<32hex>`，角色顺序为 Follower 0、Leader 1。
-- [ ] 所有临时处理的触发器均已按原定义恢复。
-- [ ] `locked_at`、`locked_by` 未改变；version 恰好 +1，audit 内容完整且 actor 为现场确认的唯一 active owner。
-- [ ] 提交后 integrity、foreign key、锁状态和业务 API 读取均正常。
+- [x] 已依次完成冻结新写入、所有 active 后台任务归零、停服、8000/数据库无打开者。
+- [x] 一致性备份完成，备份可读并通过完整性、SHA256 与 fingerprint 核验；apply 已显式确认该证据。
+- [x] 实施前 project 2、现有 group/name/max sort、role key、schema、integrity 与 foreign key 基线已记录。
+- [x] 仅新增四类，没有删除或修改既有类别。
+- [x] 四类名称、分组、颜色、排序、模式、数量、角色和 `created_at` 均符合最终类别表。
+- [x] Following 使用执行包中固定且经现场冲突检查通过的两个不同 `role_<32hex>`，角色顺序为 Follower 0、Leader 1。
+- [x] 所有临时处理的触发器均已按原定义恢复。
+- [x] `locked_at`、`locked_by` 未改变；version 恰好 +1，audit 内容完整且 actor 为现场确认的唯一 active owner。
+- [x] 提交后 integrity、foreign key、锁状态和后端 health 均正常。
 - [ ] 前端显示、颜色、角色槽位、数量门禁、长名称、快捷键和重叠时间轴验收通过。
 - [ ] 导出抽查符合兼容性边界，旧 submission 快照未变化。
-- [ ] 启服后健康状态正常，并保留实施记录与回滚证据。
+- [x] 启服后健康状态正常，并保留实施记录与回滚证据。
 
 ## 9. 回滚清单
 
@@ -117,6 +117,6 @@
 - [ ] 恢复后复核 schema `0016`、integrity、foreign key、project 2 类别方案、触发器定义、锁字段和审计一致性。
 - [ ] 确认生产 release 仍为 `50be725743254c0fa55ae3b21de646d457211417`，启服后完成健康与页面抽查。
 
-## 10. 未实施事项
+## 10. 实施结果与剩余事项
 
-截至本计划形成时，仅在本地准备并自测候选脚本与操作说明；没有修改服务器、数据库或生产状态，没有插入四类、调整 version/audit、停启服务或执行部署。本文只记录已确认的后续实施与验收边界。
+2026-09-02 已完成 dry-run、一致性备份、单事务 apply、只读 verify、启服与 `fc749b2` 发布。剩余仅用户浏览器人工验收 16 类显示、颜色、角色槽位、快捷键和 Split/Merge Track ID 反馈；未完成前不声称这些 UI 项已人工通过。
