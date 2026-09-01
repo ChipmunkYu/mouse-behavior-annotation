@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from app.config import Settings
+
 
 ROOT = Path(__file__).resolve().parents[2]
 NGINX = ROOT / "deploy" / "nginx" / "mouse-annotation.conf"
@@ -28,6 +30,7 @@ def test_nginx_upload_regex_covers_only_actual_upload_routes():
 
 def test_nginx_auth_limits_hosts_and_buffering_contract():
     config = NGINX.read_text(encoding="utf-8")
+    assert "detection_import_max_file_bytes" not in Settings.model_fields
     auth_block = re.search(r"location = /_auth \{(?P<body>.*?)\n    \}", config, re.S)
     assert auth_block is not None
     auth_body = auth_block.group("body")
@@ -39,7 +42,7 @@ def test_nginx_auth_limits_hosts_and_buffering_contract():
         r"location ~ \^/api/projects/[^ ]+ \{(?P<body>.*?)\n    \}", config, re.S
     )
     api_block = re.search(r"location /api/ \{(?P<body>.*?)\n    \}", config, re.S)
-    assert upload_block is not None and "client_max_body_size 20g;" in upload_block.group("body")
+    assert upload_block is not None and "client_max_body_size 0;" in upload_block.group("body")
     assert api_block is not None and "client_max_body_size 10m;" in api_block.group("body")
     assert "limit_conn_zone $binary_remote_addr zone=upload_per_ip:10m;" in config
     assert "return 308 https://jerrylab.xyz$request_uri;" in config
@@ -49,7 +52,7 @@ def test_nginx_auth_limits_hosts_and_buffering_contract():
     assert "proxy_pass http://127.0.0.1:8000/api/auth/me;" in config
     assert "proxy_set_header Host jerrylab.xyz;" in config
     assert config.count("proxy_request_buffering off;") == 1
-    assert "client_max_body_size 20g;" in config
+    assert "client_max_body_size 0;" in config
     assert "client_max_body_size 10m;" in config
     assert "limit_conn upload_per_ip 2;" in config
     assert "frame-ancestors 'none'" in config

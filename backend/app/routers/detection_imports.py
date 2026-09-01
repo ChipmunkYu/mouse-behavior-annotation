@@ -795,15 +795,6 @@ async def upload_batch_file(
 
     settings = request.app.state.settings
 
-    # Fix 5: 文件大小限制（非视频文件）
-    if role in ("tracks", "metadata") and file.size is not None:
-        if file.size > settings.detection_import_max_file_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"{role} file too large: {file.size} bytes "
-                f"(max {settings.detection_import_max_file_bytes} bytes)",
-            )
-
     if role == "video":
         ext = display_name.rsplit(".", 1)[-1].lower() if "." in display_name else ""
         if ext not in {"mp4", "mov", "avi", "mkv", "webm", "m4v", "wmv", "mpeg", "mpg"}:
@@ -864,15 +855,6 @@ async def upload_batch_file(
         )
         if written == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-        if role in ("tracks", "metadata"):
-            actual_size = final_path.stat().st_size
-            if actual_size > settings.detection_import_max_file_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"{role} file too large after save: {actual_size} bytes "
-                    f"(max {settings.detection_import_max_file_bytes} bytes)",
-                )
 
         activity = datetime.utcnow()
         values = {
@@ -1329,15 +1311,6 @@ async def replace_detection_import(
     settings = request.app.state.settings
     detection_imports_dir = settings.detection_imports_dir.resolve()
 
-    # Fix 5: 文件大小限制
-    for role, file in [("tracks", tracks_file), ("metadata", metadata_file)]:
-        if file.size is not None and file.size > settings.detection_import_max_file_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"{role} file too large: {file.size} bytes "
-                f"(max {settings.detection_import_max_file_bytes} bytes)",
-            )
-
     # 保存文件
     _prevent_traversal(tracks_file.filename or "")
     _prevent_traversal(metadata_file.filename or "")
@@ -1373,18 +1346,6 @@ async def replace_detection_import(
 
     tracks_rel = tracks_final.name
     metadata_rel = metadata_final.name
-
-    # Fix 5: 落盘后大小检查
-    for role, path in [("tracks", tracks_final), ("metadata", metadata_final)]:
-        actual_size = path.stat().st_size
-        if actual_size > settings.detection_import_max_file_bytes:
-            _remove_if_exists(tracks_final)
-            _remove_if_exists(metadata_final)
-            raise HTTPException(
-                status_code=413,
-                detail=f"{role} file too large after save: {actual_size} bytes "
-                f"(max {settings.detection_import_max_file_bytes} bytes)",
-            )
 
     # 校验
     try:

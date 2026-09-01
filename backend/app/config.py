@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     export_retention_days: int = Field(default=7, ge=0)
 
     # ---- 检测导入限制（v0.6） ----
-    detection_import_max_file_bytes: int = 200 * 1024 * 1024  # 200 MB
     detection_import_max_frames: int = 100000
     detection_import_max_detections_per_frame: int = 100
     detection_import_max_errors: int = 100
