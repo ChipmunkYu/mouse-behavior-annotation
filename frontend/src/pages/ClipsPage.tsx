@@ -8,7 +8,7 @@
  *   「跳转到标注」回到 /projects/:pid/annotate/:vid?t=start（标注工作台已支持 ?t= 定位）
  * - 分页（page / page_size，默认 20）；仅当当前页存在“待生成”片段时才轮询刷新，
  *   离开页面 / 切换筛选即停止，绝不批量预加载视频
- * - 键盘与焦点：卡片为按钮（Enter/Space 选择预览），筛选 / 分页均为原生控件
+ * - 键盘与焦点：卡片用 Enter 选择预览，Space 仅播放/暂停；筛选 / 分页均为原生控件
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -38,6 +38,18 @@ import { canRequestClipThumbnail, clipItemKey, effectiveClipMediaStatus, shouldP
 
 /** 待生成片段存在时自动刷新列表的间隔。 */
 const POLL_INTERVAL_MS = 5000;
+
+export function stepClipFrame(currentTime: number, direction: -1 | 1, fps: number, duration: number): number {
+  return Math.min(Math.max(0, currentTime + direction / fps), duration > 0 ? duration : Number.MAX_VALUE);
+}
+
+export function handleClipFrameShortcut(event: KeyboardEvent, onStep: (direction: -1 | 1) => void): boolean {
+  if ((event.code !== "ArrowLeft" && event.code !== "ArrowRight") || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) onStep(event.code === "ArrowLeft" ? -1 : 1);
+  return true;
+}
 
 /** 片段生成状态完全以后端 media_status 为准。 */
 function ClipStatusChip({ status }: { status: ClipItem["media_status"] }) {
@@ -152,27 +164,11 @@ function ClipRangeBar({
   return (
     <div
       className="clip-range"
-      role="slider"
-      tabIndex={0}
-      aria-label="标注区间"
-      aria-valuemin={0}
-      aria-valuemax={Math.max(0, Math.round(duration))}
-      aria-valuenow={Math.round(Math.min(currentTime, duration))}
-      aria-valuetext={formatTimeShort(currentTime)}
-      title="点击跳转 (←/→ 步进 1 秒)"
+      title="点击跳转"
       onClick={(e) => {
         const rect = e.currentTarget.getBoundingClientRect();
         const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
         onSeek(frac * duration);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          onSeek(Math.max(0, currentTime - 1));
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault();
-          onSeek(Math.min(duration, currentTime + 1));
-        }
       }}
     >
       <div className="clip-range-track">
@@ -422,6 +418,34 @@ export default function ClipsPage() {
     setSelected(c);
   }
 
+  function stepFrame(direction: -1 | 1) {
+    const v = videoRef.current;
+    if (!v) return;
+    const fps = videos?.find((item) => item.id === selectedRef.current?.video_id)?.fps;
+    v.currentTime = stepClipFrame(v.currentTime, direction, fps && fps > 0 ? fps : 30, v.duration);
+  }
+
+  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyHandlerRef.current = (e: KeyboardEvent) => {
+    if (document.querySelector(".modal-overlay")) return;
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    if (target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (!e.repeat) togglePlay();
+      return;
+    }
+    if (!selectedRef.current || media.status !== "ready") return;
+    if (target?.closest("button, a, [role='button']")) return;
+    handleClipFrameShortcut(e, stepFrame);
+  };
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => keyHandlerRef.current(e);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   /* ---------- 渲染 ---------- */
   const previewColor = selected
     ? categoryById.get(selected.category_id)?.color ?? "var(--text-3)"
@@ -526,10 +550,16 @@ export default function ClipsPage() {
 
             <div className="preview-controls">
               <button type="button" className="btn btn-sm" onClick={togglePlay} disabled={media.status !== "ready"}>
-                {playing ? "⏸ 暂停" : "▶ 播放"}
+                {playing ? "⏸ 暂停 [Space]" : "▶ 播放 [Space]"}
               </button>
               <button type="button" className="btn btn-sm" onClick={jumpToStart} disabled={media.status !== "ready"}>
                 ⟲ 回到起点
+              </button>
+              <button type="button" className="btn btn-sm" onClick={(e) => { e.currentTarget.blur(); stepFrame(-1); }} disabled={media.status !== "ready"}>
+                ⟨ 退一帧 [←]
+              </button>
+              <button type="button" className="btn btn-sm" onClick={(e) => { e.currentTarget.blur(); stepFrame(1); }} disabled={media.status !== "ready"}>
+                进一帧 [→] ⟩
               </button>
               <button type="button" className="btn btn-sm" onClick={toggleMute} disabled={media.status !== "ready"}>
                 {muted ? "🔇 静音" : "🔊 出声"}

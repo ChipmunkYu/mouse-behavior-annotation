@@ -2,7 +2,7 @@
  * 可复用的确认对话框 + useConfirm 钩子：
  * - confirm(options) 返回 Promise<boolean>，确认 resolve(true)，取消 / Esc / 点击遮罩 resolve(false)
  * - 取消不会发出任何请求，由调用方决定后续动作
- * - 键盘可达：打开时焦点落在「取消」；Esc 取消；关闭后焦点归还触发元素
+ * - 键盘可达：打开时焦点落在「取消」；Esc 取消；非危险操作 Enter 确认；关闭后焦点归还触发元素
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -38,10 +38,16 @@ export function useConfirm(): [ReactNode, (options: ConfirmOptions) => Promise<b
 
   useEffect(() => {
     if (!options) return;
+    const danger = options.danger ?? false;
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
-        close(false);
+        if (!e.repeat) close(false);
+      } else if (e.code === "Space") {
+        e.preventDefault();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (!e.repeat && !danger) close(true);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -73,7 +79,7 @@ export function useConfirm(): [ReactNode, (options: ConfirmOptions) => Promise<b
             className={options.danger ? "btn btn-danger" : "btn btn-primary"}
             onClick={() => close(true)}
           >
-            {options.confirmLabel ?? "确认"}
+            {options.confirmLabel ?? "确认"}{options.danger ? null : " [Enter]"}
           </button>
         </div>
       </div>

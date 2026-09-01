@@ -261,16 +261,16 @@ export default function ReviewPage() {
       const tag = target.tagName;
       return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
     }
+    // 确认对话框打开时不响应页面快捷键（对话框内部处理 Esc / Enter）。
+    if (document.querySelector(".modal-overlay")) return;
     if (e.code === "Space") {
-      if (isEditable(e.target) || e.target instanceof HTMLButtonElement) return;
+      if (isEditable(e.target)) return;
       e.preventDefault();
       if (!e.repeat) togglePlay();
       return;
     }
     if (isEditable(e.target)) return;
     if (e.repeat) return;
-    // 确认对话框打开时不响应全局快捷键（对话框内部自行处理 Esc / 空格）
-    if (document.querySelector(".modal-overlay")) return;
     switch (e.code) {
       case "ArrowLeft":
         e.preventDefault();

@@ -29,6 +29,7 @@ import type {
   DetectionImport,
   DetectionWithTrack,
   DetectionSuppression,
+  IdentityEditResult,
 } from "../api/types";
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
@@ -46,6 +47,7 @@ import { useMediaSource } from "../media";
 type SaveState = "idle" | "saving" | "saved" | "error";
 type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
+type IdentityEditFeedback = { text: string; key: number; routeKey: string };
 type DraftField = "category" | "start" | "end" | "participants";
 type DraftSnapshot = {
   activeCategory: Category | null;
@@ -59,6 +61,26 @@ type DraftSnapshot = {
 };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+
+export function buildIdentityEditFeedback(
+  operation: "split" | "merge",
+  selectedTrackIds: number[],
+  frame: number,
+  result: Pick<IdentityEditResult, "new_display_track_id" | "retained_display_track_id">
+): string {
+  if (operation === "split") {
+    return result.new_display_track_id != null
+      ? `Split 完成：Track ${selectedTrackIds[0]} 从帧 ${frame} 起拆分为新 Track ${result.new_display_track_id}，已自动选中。`
+      : "Split 已完成，但服务端未返回新 Track ID。";
+  }
+  return result.retained_display_track_id != null
+    ? `Merge 完成：保留 Track ${result.retained_display_track_id}，已并入 ${selectedTrackIds.length - 1} 个 track，已自动选中。`
+    : "Merge 已完成，但服务端未返回保留的 Track ID。";
+}
+
+export function identityEditFeedbackForRoute(feedback: IdentityEditFeedback | null, routeKey: string): IdentityEditFeedback | null {
+  return feedback?.routeKey === routeKey ? feedback : null;
+}
 
 /**
  * 数字键只覆盖稳定显示顺序中的前 10 个启用类别。
@@ -107,6 +129,23 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function blurActiveButton(): void {
   if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+}
+
+type AnnotateEscapeAction = "close-help" | "cancel-edit" | "exit-participant-navigation" | "exit-identity-navigation";
+
+export function resolveAnnotateEscapeAction(state: {
+  shortcutHelpOpen: boolean;
+  editingAnnotationId: number | null;
+  participantNavigationActive: boolean;
+  identityNavigationActive: boolean;
+  hasDraft: boolean;
+}): AnnotateEscapeAction | null {
+  if (state.shortcutHelpOpen) return "close-help";
+  if (state.editingAnnotationId != null) return "cancel-edit";
+  if (state.participantNavigationActive) return "exit-participant-navigation";
+  if (state.identityNavigationActive) return "exit-identity-navigation";
+  // 有草稿本身不是取消目标；重置草稿只能由显式按钮发起。
+  return null;
 }
 
 function draftApiErrorMessages(error: unknown): string[] {
@@ -199,7 +238,7 @@ function CategoryPanel({
                 className={activeCategory?.id === c.id ? "cat-btn active" : "cat-btn"}
                 disabled={disabled}
                 onClick={(e) => {
-                  // 失焦：让后续 Space 回到“播放/暂停”，而不是重复触发本类别按钮
+                  // 选择后清除旧按钮焦点，避免与后续列表导航高亮混淆。
                   e.currentTarget.blur();
                   onSelect(c);
                 }}
@@ -605,7 +644,7 @@ function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive,
     if (navigationActive) itemRefs.current[focusIndex]?.scrollIntoView({ block: "nearest" });
   }, [focusIndex, navigationActive]);
   return <Card title="参与对象" className={`mouse-ids-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
-    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Space 选择</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [Esc]</button></div> : null}
+    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
     <div className="selected-mice">{selected.length ? selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>) : <span>点击视频框或下方 track ID 选择参与对象</span>}</div>
     <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
     {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
@@ -627,14 +666,20 @@ function RoleSlotsPanel({ category, assignments, pendingIds, activeKey, unlocked
   </Card>;
 }
 
-function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppressions, canRevertSuppression, canRevertIdentity, canUndoLatest, undoBoundary, onSearch, onShowAll, onToggle, onSplit, onMerge, onSuppressTrack, onUndoLatest, onRevertSuppression, onRevertIdentity }: {
+function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppressions, canRevertSuppression, canRevertIdentity, canUndoLatest, undoBoundary, navigationActive, focusIndex, onFocusIndex, onExitNavigation, onSearch, onShowAll, onToggle, onSplit, onMerge, onSuppressTrack, onUndoLatest, onRevertSuppression, onRevertIdentity }: {
   tracks: CorrectedTrackSummary[]; selected: number[]; frame: number; search: string; showAll: boolean; busy: boolean; suppressions: DetectionSuppression[]; canRevertSuppression: boolean; canRevertIdentity: boolean;
-  canUndoLatest: boolean; undoBoundary: string;
+  canUndoLatest: boolean; undoBoundary: string; navigationActive: boolean; focusIndex: number;
+  onFocusIndex: (index: number) => void; onExitNavigation: () => void;
   onSearch: (s: string) => void; onShowAll: (v: boolean) => void; onToggle: (id: number) => void; onSplit: () => void; onMerge: () => void; onSuppressTrack: () => void; onUndoLatest: () => void; onRevertSuppression: (id?: number) => void; onRevertIdentity: () => void;
 }) {
-  return <Card title="track 修正" className="identity-panel" extra={<span className="identity-frame mono">帧 {frame}</span>}>
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  useEffect(() => {
+    if (navigationActive) itemRefs.current[focusIndex]?.scrollIntoView({ block: "nearest" });
+  }, [focusIndex, navigationActive]);
+  return <Card title="track 修正" className={`identity-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className="identity-frame mono">帧 {frame}</span>}>
+    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘导航中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
     <div className="identity-filter"><div className="segmented"><button className={!showAll ? "active" : ""} onClick={() => onShowAll(false)}>当前帧可见</button><button className={showAll ? "active" : ""} onClick={() => onShowAll(true)}>全部 track ID</button></div><input className="input" placeholder="搜索 track ID" aria-label="搜索 track ID" value={search} onChange={(e) => onSearch(e.target.value)} /></div>
-    <div className="identity-track-list">{tracks.map((t) => <button key={t.display_track_id} className={selected.includes(t.display_track_id) ? "identity-track selected" : "identity-track"} onClick={() => onToggle(t.display_track_id)}><span className="track-id mono">track ID {t.display_track_id}</span><span>{t.visible_in_current_frame ? "● 当前可见" : `${t.first_frame ?? "?"} → ${t.last_frame ?? "?"}`}</span><span className="flex-spacer" /><span>{t.detection_count} 框</span></button>)}</div>
+    <div className="identity-track-list">{tracks.map((t, index) => <button ref={(node) => { itemRefs.current[index] = node; }} key={t.display_track_id} className={`${selected.includes(t.display_track_id) ? "identity-track selected" : "identity-track"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(t.display_track_id); }}><span className="track-id mono">track ID {t.display_track_id}</span><span>{t.visible_in_current_frame ? "● 当前可见" : `${t.first_frame ?? "?"} → ${t.last_frame ?? "?"}`}</span><span className="flex-spacer" /><span>{t.detection_count} 框</span></button>)}</div>
     <div className="identity-actions"><button className="btn btn-primary" disabled={busy || selected.length !== 1} onClick={onSplit}>从当前帧 Split</button><button className="btn btn-primary" disabled={busy || selected.length < 2} onClick={onMerge}>Merge 所选</button></div>
     <div className="identity-danger-zone"><button className="btn btn-sm btn-danger" disabled={busy || selected.length !== 1} onClick={onSuppressTrack}>忽略整个 track [Delete]</button><button className="btn btn-sm" disabled={busy || !canUndoLatest} onClick={onUndoLatest}>撤销上一次 track 修正 [Ctrl+Z]</button><button className="btn btn-sm" disabled={busy || !canRevertSuppression} onClick={() => onRevertSuppression()}>撤销上一次忽略</button><button className="btn btn-sm" disabled={busy || !canRevertIdentity} onClick={onRevertIdentity}>撤销上一次 Split / Merge</button></div>
     <div className="frame-preview">{undoBoundary}</div>
@@ -651,20 +696,25 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
     <div className="modal shortcut-help" role="dialog" aria-modal="true" aria-labelledby="shortcut-help-title" onClick={(e) => e.stopPropagation()}>
       <div className="modal-title" id="shortcut-help-title">键盘快捷键</div>
       <div className="shortcut-help-grid">
-        <kbd>Space</kbd><span>播放 / 暂停；参与对象导航时切换选择</span>
+        <kbd>Space</kbd><span>仅播放 / 暂停视频</span>
+        <kbd>Tab</kbd><span>切换行为标注 / track 修正模式</span>
+        <kbd>Shift+Tab</kbd><span>已消费，不执行操作</span>
+        <kbd>T</kbd><span>进入 / 退出当前模式的 track 列表键盘导航</span>
+        <kbd>Enter</kbd><span>导航中选择当前高亮项；非危险确认弹窗中执行确认</span>
         <kbd>← / →</kbd><span>前后 1 帧</span>
         <kbd>Shift+← / Shift+→</kbd><span>前后 10 帧</span>
         <kbd>《</kbd><span>上一个视频（物理键 Shift+Comma）</span>
         <kbd>》</kbd><span>下一个视频（物理键 Shift+Period）</span>
         <kbd>?</kbd><span>打开 / 关闭本帮助</span>
-        <kbd>Esc</kbd><span>关闭帮助、取消编辑、退出参与对象导航或确认重置标注</span>
+        <kbd>Esc</kbd><span>关闭帮助、取消编辑、退出列表导航或取消确认</span>
         {mode === "behavior" ? <>
           <kbd>S / D</kbd><span>设置开始 / 设置结束（不保存）</span>
           <kbd>Ctrl+Enter</kbd><span>保存此行为；与页面主按钮使用相同校验与确认</span>
           <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个启用行为类别` : "当前没有可映射的启用行为类别"}</span>
-          <kbd>↑ / ↓</kbd><span>参与对象导航时移动高亮</span>
+          <kbd>↑ / ↓</kbd><span>参与对象列表导航时移动高亮</span>
           <kbd>Delete</kbd><span>为当前选中的行为标注打开删除确认框</span>
         </> : <>
+          <kbd>↑ / ↓</kbd><span>track 列表导航时移动高亮</span>
           <kbd>Delete</kbd><span>为单一选中的整个 track 打开忽略确认框</span>
           <kbd>Ctrl+Z</kbd><span>仅撤销当前页面会话内最近一次可追踪的 track 修正；刷新后历史不完整</span>
         </>}
@@ -715,6 +765,7 @@ export default function AnnotatePage() {
   const [identitySearch, setIdentitySearch] = useState("");
   const [showAllTracks, setShowAllTracks] = useState(false);
   const [identityBusy, setIdentityBusy] = useState(false);
+  const [identityEditFeedback, setIdentityEditFeedback] = useState<IdentityEditFeedback | null>(null);
   const [overlayRefresh, setOverlayRefresh] = useState(0);
   const [lastSuppressionId, setLastSuppressionId] = useState<number | null>(null);
   const [activeSuppressions, setActiveSuppressions] = useState<DetectionSuppression[]>([]);
@@ -722,6 +773,8 @@ export default function AnnotatePage() {
   const [undoHistory, setUndoHistory] = useState<UndoEntry[]>([]);
   const [participantNavigationActive, setParticipantNavigationActive] = useState(false);
   const [participantFocusIndex, setParticipantFocusIndex] = useState(0);
+  const [identityNavigationActive, setIdentityNavigationActive] = useState(false);
+  const [identityFocusIndex, setIdentityFocusIndex] = useState(0);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<number | null>(null);
   const [editingAnnotationId, setEditingAnnotationId] = useState<number | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
@@ -742,10 +795,11 @@ export default function AnnotatePage() {
   const [confirmDialog, confirm] = useConfirm();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [hint, setHint] = useState("可按任意顺序选择类别、参与对象并按 S/D 设置开始/结束；Ctrl+Enter 保存");
+  const [hint, setHint] = useState("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
 
   useEffect(() => {
     setParticipantNavigationActive(false);
+    setIdentityNavigationActive(false);
   }, [workspaceMode]);
 
   // 从片段库跳回标注位置：?t=<秒> 定位播放头
@@ -798,6 +852,7 @@ export default function AnnotatePage() {
     setIdentitySearch("");
     setShowAllTracks(false);
     setIdentityBusy(false);
+    setIdentityEditFeedback(null);
     setOverlayRefresh(0);
     setLastSuppressionId(null);
     setActiveSuppressions([]);
@@ -805,6 +860,8 @@ export default function AnnotatePage() {
     setUndoHistory([]);
     setParticipantNavigationActive(false);
     setParticipantFocusIndex(0);
+    setIdentityNavigationActive(false);
+    setIdentityFocusIndex(0);
     setSelectedAnnotationId(null);
     setEditingAnnotationId(null);
     setShortcutHelpOpen(false);
@@ -815,7 +872,7 @@ export default function AnnotatePage() {
     setAnnotationMutationBusy(false);
     setNavigationPending(false);
     setErrorMsg(null);
-    setHint("可按任意顺序选择类别、参与对象并按 S/D 设置开始/结束；Ctrl+Enter 保存");
+    setHint("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
   }, [pid, vid]);
 
   // 供键盘监听读取最新值（避免闭包过期）
@@ -935,9 +992,9 @@ export default function AnnotatePage() {
       setHint(`已选择类别“${category.name}”；当前没有可选择的参与对象`);
       return;
     }
+    setParticipantNavigationActive(false);
     setParticipantFocusIndex(0);
-    setParticipantNavigationActive(true);
-    setHint(`已选择类别“${category.name}”；参与对象选择中：↑/↓ 移动，Space 选择，Esc 退出`);
+    setHint(`已选择类别“${category.name}”；按 T 进入参与对象键盘选择，用 ↑/↓ 移动、Enter 选择、T 退出`);
   }, [activeCategory, detectionImport, participantRoles, roleSelectedIds, selectedMouseIds, tracks]);
 
   useEffect(() => {
@@ -949,6 +1006,16 @@ export default function AnnotatePage() {
     }
     setParticipantFocusIndex((index) => Math.min(index, tracks.length - 1));
   }, [participantNavigationActive, tracks]);
+
+  useEffect(() => {
+    if (!identityNavigationActive) return;
+    if (tracks.length === 0) {
+      setIdentityNavigationActive(false);
+      setHint("track 列表已为空，已退出键盘导航");
+      return;
+    }
+    setIdentityFocusIndex((index) => Math.min(index, tracks.length - 1));
+  }, [identityNavigationActive, tracks]);
 
   const mouseIdsValid = useCallback((category: Category | null, ids: number[]) => {
     if (!category) return false;
@@ -1427,6 +1494,7 @@ export default function AnnotatePage() {
 
   async function runIdentityEdit(operation: "split" | "merge") {
     if (!detectionImport) return;
+    const operationRouteKey = `${pid}:${vid}`;
     const request = {
       operation,
       track_ids: identitySelectedMouseIds,
@@ -1454,6 +1522,10 @@ export default function AnnotatePage() {
         setUndoHistory((history) => [...history, { kind: "identity", id: result.edit_id!, createdAt: Date.now() }]);
       } else {
         setHint("track 修正已完成，但服务端未返回可撤销 ID；本次操作不能通过 Ctrl+Z 撤销");
+      }
+      const feedbackText = buildIdentityEditFeedback(operation, identitySelectedMouseIds, currentFrame, result);
+      if (routeKeyRef.current === operationRouteKey) {
+        setIdentityEditFeedback({ text: feedbackText, key: Date.now(), routeKey: operationRouteKey });
       }
       setOverlayRefresh((x) => x + 1);
       await loadAnnotations();
@@ -1700,36 +1772,62 @@ export default function AnnotatePage() {
     const confirmOpen = document.querySelector(".modal-overlay:not(.shortcut-help-overlay)") != null;
     if (confirmOpen) return;
 
-    if (isEditableTarget(e.target)) {
-      if (e.key === "Escape" && editingAnnotationId != null) {
+    if (e.key === "Escape") {
+      const action = resolveAnnotateEscapeAction({ shortcutHelpOpen, editingAnnotationId, participantNavigationActive, identityNavigationActive, hasDraft });
+      if (action == null) return;
+      e.preventDefault();
+      if (e.repeat) return;
+      if (action === "close-help") setShortcutHelpOpen(false);
+      else if (action === "cancel-edit") { changeEditingAnnotation(null); setHint("已取消编辑行为标注"); }
+      else if (action === "exit-participant-navigation") { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }
+      else { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }
+      return;
+    }
+
+    if (shortcutHelpOpen) {
+      if (e.key === "?") {
         e.preventDefault();
-        changeEditingAnnotation(null);
-        setHint("已取消编辑行为标注");
+        if (!e.repeat) setShortcutHelpOpen(false);
+      } else if ((e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) || e.code === "Space" || e.code === "Enter") {
+        e.preventDefault();
       }
+      return;
+    }
+
+    if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      if (e.repeat) return;
+      if (e.shiftKey) return;
+      if (workspaceMode === "behavior") {
+        if (!detectionImport) {
+          setHint("track 修正需要有效的检测导入，当前仍停留在行为标注模式");
+          return;
+        }
+        setWorkspaceMode("identity");
+        setHint("已切换到 track 修正模式");
+      } else {
+        setWorkspaceMode("behavior");
+        setHint("已切换到行为标注模式");
+      }
+      return;
+    }
+
+    if (isEditableTarget(e.target)) {
       return;
     }
     const isVideoNavigationShortcut = e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
       && (e.code === "Comma" || e.code === "Period");
     if (editingAnnotationId != null && !isVideoNavigationShortcut) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        changeEditingAnnotation(null);
-        setHint("已取消编辑行为标注");
-      }
       return;
     }
-    if ((e.code === "ArrowLeft" || e.code === "ArrowRight") && e.target instanceof HTMLElement && e.target.closest(".timeline")) {
+    if (e.repeat) {
+      const navigationActive = participantNavigationActive || identityNavigationActive;
+      const managedNavigationKey = navigationActive && (e.code === "ArrowUp" || e.code === "ArrowDown" || e.code === "Enter" || e.code === "Delete");
+      const managedPageKey = e.code === "Space" || e.code === "ArrowLeft" || e.code === "ArrowRight" || e.code === "KeyT" || (e.code === "Enter" && e.ctrlKey) || isVideoNavigationShortcut;
+      if (managedNavigationKey || managedPageKey) e.preventDefault();
       return;
     }
-    if (e.repeat) return;
 
-    if (shortcutHelpOpen) {
-      if (e.key === "Escape" || e.key === "?") {
-        e.preventDefault();
-        setShortcutHelpOpen(false);
-      }
-      return;
-    }
     if (e.key === "?") {
       e.preventDefault();
       setShortcutHelpOpen(true);
@@ -1748,14 +1846,59 @@ export default function AnnotatePage() {
       return;
     }
 
-    if (participantNavigationActive && workspaceMode === "behavior") {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setParticipantNavigationActive(false);
-        blurActiveButton();
-        setHint("已退出参与对象键盘选择；已选参与对象保持不变");
-        return;
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "KeyT") {
+      e.preventDefault();
+      if (workspaceMode === "behavior") {
+        if (participantNavigationActive) {
+          setParticipantNavigationActive(false);
+          setHint("已退出参与对象键盘选择；已选参与对象保持不变");
+          return;
+        }
+        if (!activeCategory) {
+          setHint("请先选择行为类别，再按 T 进入参与对象键盘选择");
+          return;
+        }
+        if (activeCategory.participant_mode === "role_based") {
+          setHint("当前类别使用角色槽位分配参与对象，请使用角色槽位和 Track 按钮");
+          return;
+        }
+        if (activeCategory.mouse_count_max === 0) {
+          setHint("当前类别无需选择参与对象");
+          return;
+        }
+        if (!detectionImport) {
+          setHint("没有可用检测结果，无法进入参与对象键盘选择");
+          return;
+        }
+        if (tracks.length === 0) {
+          setHint("当前没有可选择的参与对象");
+          return;
+        }
+        setParticipantFocusIndex(0);
+        setParticipantNavigationActive(true);
+        setHint("参与对象键盘选择中：↑/↓ 移动，Enter 选择，T 或 Esc 退出");
+      } else {
+        if (identityNavigationActive) {
+          setIdentityNavigationActive(false);
+          setHint("已退出 track 列表键盘导航；已选 track 保持不变");
+          return;
+        }
+        if (!detectionImport) {
+          setHint("track 修正需要有效的检测导入");
+          return;
+        }
+        if (tracks.length === 0) {
+          setHint("当前没有可导航的 track");
+          return;
+        }
+        setIdentityFocusIndex(0);
+        setIdentityNavigationActive(true);
+        setHint("track 列表键盘导航中：↑/↓ 移动，Enter 选择，T 或 Esc 退出");
       }
+      return;
+    }
+
+    if (participantNavigationActive && workspaceMode === "behavior") {
       if (e.code === "ArrowUp" || e.code === "ArrowDown") {
         e.preventDefault();
         if (tracks.length > 0) {
@@ -1764,21 +1907,36 @@ export default function AnnotatePage() {
         }
         return;
       }
-      if (e.code === "Space") {
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         const track = tracks[participantFocusIndex];
-        if (track) void (activeCategory?.participant_mode === "role_based" ? toggleRoleTrack(track.display_track_id) : Promise.resolve(toggleMouseId(track.display_track_id)));
+        if (track) toggleMouseId(track.display_track_id);
         return;
       }
       if (e.code === "Delete") {
         e.preventDefault();
-        setHint("参与对象键盘选择中，Delete 不执行危险操作；按 Esc 退出后再操作");
+        return;
+      }
+    }
+
+    if (identityNavigationActive && workspaceMode === "identity") {
+      if (e.code === "ArrowUp" || e.code === "ArrowDown") {
+        e.preventDefault();
+        if (tracks.length > 0) {
+          const delta = e.code === "ArrowUp" ? -1 : 1;
+          setIdentityFocusIndex((index) => Math.max(0, Math.min(tracks.length - 1, index + delta)));
+        }
+        return;
+      }
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "Enter") {
+        e.preventDefault();
+        const track = tracks[identityFocusIndex];
+        if (track) toggleIdentityMouseId(track.display_track_id);
         return;
       }
     }
 
     if (e.code === "Space") {
-      if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       togglePlay();
       return;
@@ -1841,10 +1999,6 @@ export default function AnnotatePage() {
       }
     }
 
-    if (e.key === "Escape" && workspaceMode === "behavior" && hasDraft) {
-      e.preventDefault();
-      void requestResetDraft();
-    }
   };
 
   useEffect(() => {
@@ -1875,6 +2029,7 @@ export default function AnnotatePage() {
       invalidTrackCounts.unordered ? `${invalidTrackCounts.unordered} 条 Track 已失效，需要重新选择` : "",
     ].filter(Boolean).join("；");
   }, [annotations, detectionImport, invalidTrackCounts]);
+  const visibleIdentityEditFeedback = identityEditFeedbackForRoute(identityEditFeedback, `${pid}:${vid}`);
 
   return (
     <div className="annotate-page">
@@ -2149,7 +2304,7 @@ export default function AnnotatePage() {
             <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
               {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
-          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab"><IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
+          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
           <AnnotationList
             annotations={annotations}
             categories={displayCategories}

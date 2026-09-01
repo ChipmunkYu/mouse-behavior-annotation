@@ -52,15 +52,6 @@ export default function Timeline({
       aria-valuemax={Math.max(0, Math.round(duration))}
       aria-valuenow={Math.round(Math.min(currentTime, duration))}
       aria-valuetext={`当前 ${formatTime(currentTime)}；草稿开始 ${draftStartTime == null ? "未设置" : `${formatTime(draftStartTime)}${draftStartFrame == null ? "" : `，帧 ${draftStartFrame}`}`}；结束 ${draftEndTime == null ? "未设置" : `${formatTime(draftEndTime)}${draftEndFrame == null ? "" : `，帧 ${draftEndFrame} inclusive`}`}`}
-      onKeyDown={(e) => {
-        if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          onSeek(Math.max(0, currentTime - 1));
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault();
-          onSeek(Math.min(duration, currentTime + 1));
-        }
-      }}
     >
       <div className="timeline-lanes">
         {annotations.map((a) => {
