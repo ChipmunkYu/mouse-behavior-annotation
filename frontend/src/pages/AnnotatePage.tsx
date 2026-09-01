@@ -82,6 +82,17 @@ export function identityEditFeedbackForRoute(feedback: IdentityEditFeedback | nu
   return feedback?.routeKey === routeKey ? feedback : null;
 }
 
+export function mergePinnedTracks(
+  baseItems: CorrectedTrackSummary[],
+  selectedTrackIds: number[],
+  supplementalItems: CorrectedTrackSummary[] = []
+): CorrectedTrackSummary[] {
+  const byId = new Map([...supplementalItems, ...baseItems].map((item) => [item.display_track_id, item]));
+  const seen = new Set<number>();
+  return [...selectedTrackIds.map((id) => byId.get(id)), ...baseItems]
+    .filter((item): item is CorrectedTrackSummary => item != null && !seen.has(item.display_track_id) && !!seen.add(item.display_track_id));
+}
+
 /**
  * 数字键只覆盖稳定显示顺序中的前 10 个启用类别。
  * 当前类别模型没有显式的群体行为快捷键字段，因此不按名称、分组或参与对象数量猜测。
@@ -733,6 +744,7 @@ export default function AnnotatePage() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadAllRequestRef = useRef(0);
+  const supplementalTrackRequestsRef = useRef({ key: "", byId: new Map<number, Promise<CorrectedTrackSummary | null>>() });
   const routeKeyRef = useRef(`${pid}:${vid}`);
   routeKeyRef.current = `${pid}:${vid}`;
 
@@ -917,7 +929,7 @@ export default function AnnotatePage() {
     setSelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
   }, []);
   const toggleIdentityMouseId = useCallback((id: number) => {
-    setIdentitySelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
+    setIdentitySelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   }, []);
 
   const roleDefinitions = useMemo(() => activeCategory?.participant_mode === "role_based" ? [...activeCategory.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order) : [], [activeCategory]);
@@ -1031,16 +1043,32 @@ export default function AnnotatePage() {
     if (!detectionImport) { setTracks([]); return; }
     let alive = true;
     getCorrectedTracks(pid, vid, { current_frame: currentFrame, search: identitySearch || undefined, page_size: 200 })
-      .then((result) => {
+      .then(async (result) => {
         if (!alive) return;
-        const items = showAllTracks || identitySearch
+        const baseItems = showAllTracks || identitySearch
           ? result.items
           : result.items.filter((t) => t.visible_in_current_frame || overlaySelectedIds.includes(t.display_track_id));
-        setTracks(items);
+        if (workspaceMode !== "identity") { setTracks(baseItems); return; }
+        const baseIds = new Set(result.items.map((item) => item.display_track_id));
+        const missingSelectedIds = identitySelectedMouseIds.filter((id) => !baseIds.has(id));
+        const cacheKey = `${pid}:${vid}:${detectionImport.id}:${identityRevision}`;
+        if (supplementalTrackRequestsRef.current.key !== cacheKey) {
+          supplementalTrackRequestsRef.current = { key: cacheKey, byId: new Map() };
+        }
+        const supplementalItems = await Promise.all(missingSelectedIds.map((id) => {
+          const cached = supplementalTrackRequestsRef.current.byId.get(id);
+          if (cached) return cached;
+          const request = getCorrectedTracks(pid, vid, { search: String(id), page_size: 200 })
+            .then((exactResult) => exactResult.items.find((item) => item.display_track_id === id) ?? null);
+          supplementalTrackRequestsRef.current.byId.set(id, request);
+          return request;
+        }));
+        if (!alive) return;
+        setTracks(mergePinnedTracks(baseItems, identitySelectedMouseIds, supplementalItems.filter((item): item is CorrectedTrackSummary => item != null)));
       })
       .catch((err: unknown) => { if (alive) setErrorMsg(err instanceof Error ? err.message : "加载 track ID 失败"); });
     return () => { alive = false; };
-  }, [pid, vid, detectionImport, currentFrame, identitySearch, showAllTracks, identityRevision, overlaySelectedIds]);
+  }, [pid, vid, detectionImport, currentFrame, identitySearch, showAllTracks, identityRevision, overlaySelectedIds, workspaceMode, identitySelectedMouseIds]);
 
   // 优先使用浏览器实际解析的媒体时长（elementDuration）作为时间轴基准，
   // DB 元数据时长仅作回退：避免元数据 duration 与真实播放时长不一致时时间轴错位。

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildIdentityEditFeedback, identityEditFeedbackForRoute } from "./AnnotatePage";
+import type { CorrectedTrackSummary } from "../api/types";
+import { buildIdentityEditFeedback, identityEditFeedbackForRoute, mergePinnedTracks } from "./AnnotatePage";
+
+const track = (display_track_id: number): CorrectedTrackSummary => ({
+  display_track_id,
+  first_frame: 0,
+  last_frame: 10,
+  detection_count: 11,
+  visible_in_current_frame: false,
+});
 
 describe("track 修正反馈", () => {
   it("说明 Split 的新 Track ID 和 Merge 保留的 Track ID", () => {
@@ -21,5 +30,22 @@ describe("track 修正反馈", () => {
     expect(identityEditFeedbackForRoute(feedback, "1:10")).toBe(feedback);
     expect(identityEditFeedbackForRoute(feedback, "1:11")).toBeNull();
     expect(identityEditFeedbackForRoute(feedback, "2:10")).toBeNull();
+  });
+});
+
+describe("track 修正列表置顶", () => {
+  it("补入基础 200 条外的已选 track 并按选择顺序置顶", () => {
+    expect(mergePinnedTracks([track(1), track(2)], [202, 201], [track(201), track(202)]).map((item) => item.display_track_id))
+      .toEqual([202, 201, 1, 2]);
+  });
+
+  it("基础结果已有的已选 track 只保留一次", () => {
+    expect(mergePinnedTracks([track(1), track(2), track(3)], [2], [track(2)]).map((item) => item.display_track_id))
+      .toEqual([2, 1, 3]);
+  });
+
+  it("补取返回 substring 匹配时只合并 exact track", () => {
+    expect(mergePinnedTracks([track(1)], [20], [track(120), track(20), track(201)]).map((item) => item.display_track_id))
+      .toEqual([20, 1]);
   });
 });
