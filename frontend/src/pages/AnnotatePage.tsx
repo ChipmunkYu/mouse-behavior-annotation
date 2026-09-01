@@ -29,6 +29,7 @@ import type {
   DetectionImport,
   DetectionWithTrack,
   DetectionSuppression,
+  IdentityEditResult,
 } from "../api/types";
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
@@ -46,6 +47,7 @@ import { useMediaSource } from "../media";
 type SaveState = "idle" | "saving" | "saved" | "error";
 type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
+type IdentityEditFeedback = { text: string; key: number; routeKey: string };
 type DraftField = "category" | "start" | "end" | "participants";
 type DraftSnapshot = {
   activeCategory: Category | null;
@@ -59,6 +61,26 @@ type DraftSnapshot = {
 };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+
+export function buildIdentityEditFeedback(
+  operation: "split" | "merge",
+  selectedTrackIds: number[],
+  frame: number,
+  result: Pick<IdentityEditResult, "new_display_track_id" | "retained_display_track_id">
+): string {
+  if (operation === "split") {
+    return result.new_display_track_id != null
+      ? `Split 完成：Track ${selectedTrackIds[0]} 从帧 ${frame} 起拆分为新 Track ${result.new_display_track_id}，已自动选中。`
+      : "Split 已完成，但服务端未返回新 Track ID。";
+  }
+  return result.retained_display_track_id != null
+    ? `Merge 完成：保留 Track ${result.retained_display_track_id}，已并入 ${selectedTrackIds.length - 1} 个 track，已自动选中。`
+    : "Merge 已完成，但服务端未返回保留的 Track ID。";
+}
+
+export function identityEditFeedbackForRoute(feedback: IdentityEditFeedback | null, routeKey: string): IdentityEditFeedback | null {
+  return feedback?.routeKey === routeKey ? feedback : null;
+}
 
 /**
  * 数字键只覆盖稳定显示顺序中的前 10 个启用类别。
@@ -743,6 +765,7 @@ export default function AnnotatePage() {
   const [identitySearch, setIdentitySearch] = useState("");
   const [showAllTracks, setShowAllTracks] = useState(false);
   const [identityBusy, setIdentityBusy] = useState(false);
+  const [identityEditFeedback, setIdentityEditFeedback] = useState<IdentityEditFeedback | null>(null);
   const [overlayRefresh, setOverlayRefresh] = useState(0);
   const [lastSuppressionId, setLastSuppressionId] = useState<number | null>(null);
   const [activeSuppressions, setActiveSuppressions] = useState<DetectionSuppression[]>([]);
@@ -829,6 +852,7 @@ export default function AnnotatePage() {
     setIdentitySearch("");
     setShowAllTracks(false);
     setIdentityBusy(false);
+    setIdentityEditFeedback(null);
     setOverlayRefresh(0);
     setLastSuppressionId(null);
     setActiveSuppressions([]);
@@ -1470,6 +1494,7 @@ export default function AnnotatePage() {
 
   async function runIdentityEdit(operation: "split" | "merge") {
     if (!detectionImport) return;
+    const operationRouteKey = `${pid}:${vid}`;
     const request = {
       operation,
       track_ids: identitySelectedMouseIds,
@@ -1497,6 +1522,10 @@ export default function AnnotatePage() {
         setUndoHistory((history) => [...history, { kind: "identity", id: result.edit_id!, createdAt: Date.now() }]);
       } else {
         setHint("track 修正已完成，但服务端未返回可撤销 ID；本次操作不能通过 Ctrl+Z 撤销");
+      }
+      const feedbackText = buildIdentityEditFeedback(operation, identitySelectedMouseIds, currentFrame, result);
+      if (routeKeyRef.current === operationRouteKey) {
+        setIdentityEditFeedback({ text: feedbackText, key: Date.now(), routeKey: operationRouteKey });
       }
       setOverlayRefresh((x) => x + 1);
       await loadAnnotations();
@@ -2000,6 +2029,7 @@ export default function AnnotatePage() {
       invalidTrackCounts.unordered ? `${invalidTrackCounts.unordered} 条 Track 已失效，需要重新选择` : "",
     ].filter(Boolean).join("；");
   }, [annotations, detectionImport, invalidTrackCounts]);
+  const visibleIdentityEditFeedback = identityEditFeedbackForRoute(identityEditFeedback, `${pid}:${vid}`);
 
   return (
     <div className="annotate-page">
@@ -2274,7 +2304,7 @@ export default function AnnotatePage() {
             <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
               {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
-          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab"><IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
+          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
           <AnnotationList
             annotations={annotations}
             categories={displayCategories}
