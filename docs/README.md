@@ -29,6 +29,7 @@ P1—P4 低码率展示代理与导出热修已部署至生产，schema 为 `001
 
 ## 计划与独立分支实现（混合状态）
 
+- [projects/2 新增四类行为标签计划](计划/projects-2新增行为标签计划.md)：仅为既有 `projects/2` 新增 Following、Group locomotion、Social clustering、Dispersal 四类；已确认、尚未实施，不改运行时代码或默认新项目模板。
 - [视频同步硬删除需求规格](计划/视频同步硬删除需求规格.md)：DELETE API、active owner/admin 与 draft/rejected 限制、活动/未知任务 409 零副作用门禁、单进程 gate、终态 worker 不变量、版本化 manifest/quarantine/startup recovery 及视频库入口已实现；POSIX descriptor-relative 能力已在生产 Linux 候选实机验证。已随 `9360603` 部署，生产保持单 Uvicorn worker。
 - [标注流程与帧边界需求规格](计划/标注流程与帧边界需求规格.md)：任意顺序草稿与显式保存、参与 ID 分别相交、行为任意重叠、禁止单帧、帧权威/派生只读时间及既定草稿交互均已实现，帧权威迁移为 `0015_frame_authority.py`；已随 `9360603` 部署，生产数据库 schema 为 `0015`。
 - [行为类别方案与参与对象角色化扩展设计](计划/行为类别自定义管理设计.md)：记录 `feature/category-role-schema@933b805` 阶段的联合实现与历史专项证据，包括后端 `516 passed, 3 skipped, 1 warning`、5 项真实 FFmpeg/ffprobe 集成测试和 62 modules 前端构建；既有人工浏览器矩阵仅对应合并前 category 基线。该条不再断言当前 P4 候选、服务器 FFmpeg 或生产部署状态，后者分别以低码率实现计划和仓库外“网站服务器文件清单”为准。
@@ -40,6 +41,7 @@ P1—P4 低码率展示代理与导出热修已部署至生产，schema 为 `001
 
 - [YOLO 检测结果接入与 track 修正设计](历史/YOLO检测结果接入与track修正设计.md)
 - [track 修正与行为标注业务逻辑伪代码](历史/ID修正与行为标注业务逻辑伪代码.md)
+- [视频流式播放与 HTTP Range 实施计划（2026-08-11）](历史/视频流式播放与HTTP Range实施计划-20260811.md)：未直接实施的短期媒体票据 query 方案，仅保留早期架构取舍与测试矩阵。
 
 历史文档保留旧 `CorrectedTrack`、CDA、`IdentityEdit` 和 suppression 表的迁移与回滚脉络，不得用于推导当前运行时模型或正式导出契约。
 
