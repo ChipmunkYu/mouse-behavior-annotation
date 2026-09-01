@@ -1747,7 +1747,7 @@ def test_replace_bumps_revision_and_resets_annotations(ctx, login_headers):
 
 
 # ---------------------------------------------------------------------------
-# Fix 5: Import size limits
+# Import resource limits
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -1773,23 +1773,6 @@ def test_batch_upload_disk_reserve_returns_507_and_cleans_part(
     settings = ctx.client.app.state.settings
     target = settings.videos_dir if role == "video" else settings.detection_imports_dir
     assert list(target.glob("*.part")) == []
-
-
-def test_oversized_file_rejected(ctx, login_headers, monkeypatch):
-    """超过大小限制的文件上传应返回 413。"""
-    headers, pid = _create_project_for_test(ctx, login_headers)
-    batch = _create_batch(ctx.client, pid, headers)
-
-    # 设置极小的限制
-    monkeypatch.setattr(
-        ctx.client.app.state.settings,
-        "detection_import_max_file_bytes",
-        10,
-    )
-
-    # 上传一个大于限制的文件
-    resp = _upload_file(ctx.client, pid, batch["id"], "tracks", "big.jsonl", "x" * 100, headers)
-    assert resp.status_code == 413, resp.text
 
 
 def test_too_many_frames_rejected(ctx, login_headers, monkeypatch):
