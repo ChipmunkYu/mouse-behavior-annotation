@@ -1,9 +1,13 @@
 import hashlib
 import errno
+import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import update
+from sqlalchemy.orm import Query
 
 from app.display_proxy_jobs import DisplayProxyWorker, display_proxy_names, enqueue_display_proxy
 from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION, DisplayProxyError
@@ -294,10 +298,9 @@ def test_claim_has_token_and_owns_requires_exact_type_and_payload(ctx):
     settings, _source, _digest, job_id, _video_id, _ = _queued(ctx)
     worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
                                 session_factory=ctx.session_factory, settings=settings)
-    claim = worker._claim(job_id)
-    assert claim is not None
-    token, payload = claim
-    assert token
+    token = "claim-token"
+    payload = worker._claim(job_id, token)
+    assert payload is not None
     with ctx.session_factory() as db:
         job = db.get(BackgroundJob, job_id)
         assert job.status == "running" and job.run_token == token
@@ -310,6 +313,53 @@ def test_claim_has_token_and_owns_requires_exact_type_and_payload(ctx):
         db.flush()
         assert not worker._owns(db, job_id, token, payload)
         db.rollback()
+
+
+def test_old_token_cannot_terminalize_new_running_generation(ctx):
+    settings, _source, _digest, job_id, video_id, _ = _queued(ctx)
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    old_token = "old-token"
+    assert worker._claim(job_id, old_token) is not None
+    with ctx.session_factory() as db:
+        db.get(BackgroundJob, job_id).run_token = "new-token"
+        db.commit()
+
+    assert worker._terminalize_running(job_id, old_token) is False
+
+    with ctx.session_factory() as db:
+        job, video = db.get(BackgroundJob, job_id), db.get(Video, video_id)
+        assert (job.status, job.run_token) == ("running", "new-token")
+        assert video.display_status == "processing"
+
+
+def test_token_change_after_payload_read_prevents_terminalization(ctx, monkeypatch):
+    settings, _source, _digest, job_id, video_id, _ = _queued(ctx)
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    old_token = "old-token"
+    assert worker._claim(job_id, old_token) is not None
+    original_update = Query.update
+    injected = False
+
+    def replace_token_before_conditional_update(query, values, *args, **kwargs):
+        nonlocal injected
+        if not injected and "run_token" in values:
+            injected = True
+            with ctx.session_factory() as db:
+                db.execute(update(BackgroundJob).where(BackgroundJob.id == job_id).values(
+                    run_token="new-token"))
+                db.commit()
+        return original_update(query, values, *args, **kwargs)
+
+    monkeypatch.setattr(Query, "update", replace_token_before_conditional_update)
+    assert worker._terminalize_running(job_id, old_token) is False
+    assert injected
+
+    with ctx.session_factory() as db:
+        job, video = db.get(BackgroundJob, job_id), db.get(Video, video_id)
+        assert (job.status, job.run_token) == ("running", "new-token")
+        assert video.display_status == "processing"
 
 
 def test_recovery_wrong_source_job_does_not_mask_orphan_processing(ctx):
@@ -359,20 +409,122 @@ def test_recovery_malformed_running_job_fails_safe_and_continues(ctx):
 
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
-def test_worker_does_not_capture_process_control_exceptions(ctx, interrupt):
+def test_async_control_exception_cleans_terminalizes_and_lane_continues(
+        ctx, monkeypatch, interrupt):
     settings, _source, _digest, job_id, _video_id, _ = _queued(ctx)
+    _settings, _source, _digest, second_id, second_video_id, _ = _queued(ctx)
+    settings.display_proxy_synchronous = False
 
-    class InterruptingProcessor:
-        def render(self, **_kwargs):
-            raise interrupt()
+    class InterruptingFirstProcessor(FakeDisplayProcessor):
+        def render(self, **kwargs):
+            if not self.calls:
+                self.calls.append((kwargs["input_path"], kwargs["output_path"]))
+                Path(kwargs["output_path"]).write_bytes(b"partial")
+                raise interrupt()
+            super().render(**kwargs)
 
-    worker = DisplayProxyWorker(processor=InterruptingProcessor(),
+    worker = DisplayProxyWorker(processor=InterruptingFirstProcessor(),
                                 session_factory=ctx.session_factory, settings=settings)
-    with pytest.raises(interrupt):
-        worker._run(job_id)
+    futures = {}
+    original_done = worker._future_done
+
+    def observe(job_id, future):
+        futures[job_id] = future
+        original_done(job_id, future)
+
+    monkeypatch.setattr(worker, "_future_done", observe)
+    worker.start(); worker.shutdown()
+
+    assert isinstance(futures[job_id].exception(), interrupt)
     with ctx.session_factory() as db:
         job = db.get(BackgroundJob, job_id)
-        assert job.status == "running" and job.run_token
+        video = db.get(Video, job.payload["video_id"])
+        assert job.status == "failed" and job.run_token is None and job.finished_at is not None
+        assert video.display_status == "failed"
+        assert db.get(BackgroundJob, second_id).status == "succeeded"
+        assert db.get(Video, second_video_id).display_status == "ready"
+    assert not list(settings.display_proxies_dir.glob("*.part"))
+
+
+def test_async_failed_persistence_retries_same_token_and_lane_continues(
+        ctx, monkeypatch, caplog):
+    settings, _source, _digest, first_id, first_video_id, _ = _queued(ctx)
+    _settings, _source, _digest, second_id, second_video_id, _ = _queued(ctx)
+    settings.display_proxy_synchronous = False
+
+    class FailFirstProcessor(FakeDisplayProcessor):
+        def render(self, **kwargs):
+            if not self.calls:
+                self.calls.append((kwargs["input_path"], kwargs["output_path"]))
+                raise DisplayProxyError("first processing failure")
+            super().render(**kwargs)
+
+    worker = DisplayProxyWorker(processor=FailFirstProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    original_terminalize = worker._terminalize_running
+    terminalize_tokens = []
+
+    def fail_once_terminalize(job_id, token):
+        terminalize_tokens.append(token)
+        if len(terminalize_tokens) == 1:
+            raise RuntimeError("injected first terminalization failure")
+        return original_terminalize(job_id, token)
+
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(worker, "_fail", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("injected fail persistence failure")))
+    monkeypatch.setattr(worker, "_terminalize_running", fail_once_terminalize)
+    worker.start(); worker.shutdown()
+
+    with ctx.session_factory() as db:
+        first, second = db.get(BackgroundJob, first_id), db.get(BackgroundJob, second_id)
+        assert first.status == "failed" and first.run_token is None and first.finished_at is not None
+        assert db.get(Video, first_video_id).display_status == "failed"
+        assert second.status == "succeeded" and second.run_token is None
+        assert db.get(Video, second_video_id).display_status == "ready"
+    assert len(terminalize_tokens) == 2 and len(set(terminalize_tokens)) == 1
+    events = [json.loads(record.message) for record in caplog.records
+              if record.message.startswith("{")]
+    fallback = [event for event in events
+                if event.get("event") == "display_proxy_failed"
+                and event.get("error_category") == "worker_uncaught"]
+    assert len(fallback) == 1
+    rendered = "\n".join(record.message for record in caplog.records)
+    assert "injected first terminalization failure" not in rendered
+    assert "injected fail persistence failure" not in rendered
+
+
+def test_terminalization_control_exception_propagates(ctx, monkeypatch):
+    settings, _source, _digest, job_id, _video_id, _ = _queued(ctx)
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(),
+                                session_factory=ctx.session_factory, settings=settings)
+    monkeypatch.setattr(worker, "_run_claimed", lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("processing failed")))
+    monkeypatch.setattr(worker, "_terminalize_running", lambda *_args: (_ for _ in ()).throw(
+        SystemExit("stop")))
+
+    with pytest.raises(SystemExit, match="stop"):
+        worker._run(job_id)
+
+
+def test_synchronous_terminalization_failure_is_safely_diagnosed(ctx, monkeypatch, caplog):
+    settings, source, _digest, job_id, _video_id, _ = _queued(ctx)
+    worker = DisplayProxyWorker(processor=FakeDisplayProcessor(fail=True),
+                                session_factory=ctx.session_factory, settings=settings)
+    monkeypatch.setattr(worker, "_fail", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError(f"private failure {source}")))
+    monkeypatch.setattr(worker, "_terminalize_running", lambda *_args: (_ for _ in ()).throw(
+        RuntimeError(f"private terminal failure {source}")))
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(RuntimeError, match="private failure"):
+        worker._run(job_id)
+
+    messages = [record.message for record in caplog.records]
+    events = [json.loads(message) for message in messages if message.startswith("{")]
+    assert sum(event.get("event") == "display_proxy_terminalization_failed"
+               for event in events) == 2
+    assert str(source) not in "\n".join(messages)
 
 
 def test_process_lock_rejects_second_owner(tmp_path):
