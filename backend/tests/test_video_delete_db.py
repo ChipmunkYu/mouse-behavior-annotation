@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app import video_delete_db
 from app.config import Settings
 from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import (
@@ -309,6 +310,86 @@ def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):
         assert db.get(Video, video_id) is None
         assert not db.query(BackgroundJob).filter(
             BackgroundJob.id.in_(frozen.terminal_job_ids)).count()
+
+
+def test_delete_and_residual_checks_chunk_ids_and_composite_keys(
+        ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr(video_delete_db, "_SQLITE_BIND_BUDGET", 4)
+    project_id, video_id, actor_id, category_id = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        detection_import = DetectionImport(
+            video_id=video_id, revision=1, schema_version="1", status="imported", active=True)
+        db.add(detection_import); db.flush()
+        track = CorrectedTrack(detection_import_id=detection_import.id, display_track_id=1)
+        draft = DraftIdentityEdit(
+            detection_import_id=detection_import.id, applied_edit_version=1,
+            operation="split", params={}, operator_id=actor_id)
+        suppression = DetectionSuppression(
+            video_id=video_id, detection_import_id=detection_import.id,
+            base_identity_revision=0, result_identity_revision=1,
+            scope="detection", operator_id=actor_id)
+        db.add_all([track, draft, suppression]); db.flush()
+        raws = [RawDetection(
+            detection_import_id=detection_import.id, frame_index=i,
+            frame_detection_index=0, raw_track_id=1,
+        ) for i in range(7)]
+        db.add_all(raws); db.flush()
+        snapshot = DetectionSnapshot(
+            detection_import_id=detection_import.id, source_edit_version=1,
+            raw_detection_count=7, override_count=7, schema_version=1, fps=25,
+            width=100, height=100, frame_count=10, keypoint_names=[], skeleton_edges=[])
+        db.add(snapshot); db.flush()
+        for raw in raws:
+            db.add_all([
+                CorrectedDetectionAssignment(
+                    raw_detection_id=raw.id, corrected_track_id=track.id,
+                    identity_revision=1),
+                SuppressionDetection(suppression_id=suppression.id,
+                                     raw_detection_id=raw.id),
+                DetectionStateOverride(
+                    raw_detection_id=raw.id, detection_import_id=detection_import.id,
+                    display_track_id=1, suppressed=False, updated_edit_version=1),
+                DraftDetectionChange(
+                    edit_id=draft.id, raw_detection_id=raw.id,
+                    detection_import_id=detection_import.id,
+                    before_override_exists=False, before_display_track_id=None,
+                    before_suppressed=None, after_override_exists=True,
+                    after_display_track_id=1, after_suppressed=False),
+                DetectionSnapshotState(
+                    snapshot_id=snapshot.id, raw_detection_id=raw.id,
+                    detection_import_id=detection_import.id,
+                    display_track_id=1, suppressed=False),
+            ])
+        other = _other_graph(db, project_id, actor_id, category_id, suffix="chunk-other")
+        db.commit()
+        other_video_id, other_raw_id = other["video"].id, other["raw_id"]
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+
+        statements = []
+        engine = db.get_bind()
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if statement.startswith(("DELETE FROM ", "SELECT 1 FROM ")):
+                statements.append(statement)
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            _final(db, ctx.session_factory, frozen, settings)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+        assert statements and max(statement.count("?") for statement in statements) <= 4
+        assert sum(statement.startswith("DELETE FROM raw_detections")
+                   for statement in statements) > 1
+        assert sum(statement.startswith("SELECT 1 FROM raw_detections")
+                   for statement in statements) > 1
+        assert sum(statement.startswith("DELETE FROM suppression_detections")
+                   for statement in statements) > 1
+        assert sum(statement.startswith("SELECT 1 FROM suppression_detections")
+                   for statement in statements) > 1
+        assert db.get(Video, video_id) is None
+        assert db.get(Video, other_video_id) is not None
+        assert db.get(RawDetection, other_raw_id) is not None
+        assert db.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
 def test_cross_video_snapshot_and_shared_path_fail_closed(ctx, tmp_path):
@@ -633,6 +714,89 @@ def test_external_incoming_edges_block_freeze_without_side_effects(ctx, tmp_path
             _freeze(db, settings, project_id, video_id, actor_id)
         assert db.execute(text("SELECT count(*) FROM videos")).scalar_one() == before
         assert db.get(Video, other["video"].id) is not None
+
+
+@pytest.mark.parametrize("direction", ["target-raw", "target-track"])
+def test_assignment_edges_in_both_directions_block_freeze_without_side_effects(
+        ctx, tmp_path, direction):
+    project_id, video_id, actor_id, category_id = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        _full_graph(db, project_id, video_id, actor_id, category_id)
+        target_assignment = db.query(CorrectedDetectionAssignment).join(RawDetection).join(
+            DetectionImport).filter(DetectionImport.video_id == video_id).one()
+        other = _other_graph(db, project_id, actor_id, category_id,
+                             suffix=f"assignment-{direction}")
+        if direction == "target-raw":
+            target_assignment.corrected_track_id = other["track_id"]
+        else:
+            db.add(CorrectedDetectionAssignment(
+                raw_detection_id=other["raw_id"],
+                corrected_track_id=target_assignment.corrected_track_id,
+                identity_revision=1,
+            ))
+        db.commit()
+        before = db.execute(text("SELECT count(*) FROM corrected_detection_assignments")).scalar_one()
+        with pytest.raises(VideoDeleteConflictError, match="assignment"):
+            _freeze(db, settings, project_id, video_id, actor_id)
+        assert db.execute(text(
+            "SELECT count(*) FROM corrected_detection_assignments"
+        )).scalar_one() == before
+        assert db.get(Video, video_id) is not None
+        assert db.get(Video, other["video"].id) is not None
+
+
+def test_assignment_freeze_query_uses_constant_bind_subqueries(ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr(video_delete_db, "_SQLITE_BIND_BUDGET", 4)
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        detection_import = DetectionImport(
+            video_id=video_id, revision=1, schema_version="1", status="imported", active=True)
+        db.add(detection_import); db.flush()
+        track = CorrectedTrack(detection_import_id=detection_import.id, display_track_id=1)
+        db.add(track); db.flush()
+        raws = [RawDetection(
+            detection_import_id=detection_import.id, frame_index=i,
+            frame_detection_index=0, raw_track_id=1,
+        ) for i in range(7)]
+        db.add_all(raws); db.flush()
+        db.add_all([CorrectedDetectionAssignment(
+            raw_detection_id=raw.id, corrected_track_id=track.id, identity_revision=0,
+        ) for raw in raws])
+        db.commit()
+
+        assignment_queries = []
+        engine = db.get_bind()
+        def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+            if statement.lstrip().startswith("SELECT") and "corrected_detection_assignments" in statement:
+                assignment_queries.append((statement, parameters))
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+        assert len(frozen.ids("raw_detections")) == 7
+        assert len(frozen.ids("corrected_detection_assignments")) == 7
+        assert len(assignment_queries) == 1
+        statement, parameters = assignment_queries[0]
+        assert "SELECT raw_detections.id" in statement
+        assert "SELECT corrected_tracks.id" in statement
+        assert len(parameters) <= 2
+
+
+def test_freeze_maps_sqlalchemy_failure_to_safe_integrity_error(
+        ctx, tmp_path, monkeypatch):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    def fail(*_args, **_kwargs):
+        raise SQLAlchemyError("database detail")
+    monkeypatch.setattr(video_delete_db, "_collect", fail)
+    with ctx.session_factory() as db:
+        with pytest.raises(VideoDeleteIntegrityError, match=(
+                "Database integrity prevented video deletion")) as caught:
+            _freeze(db, _settings(tmp_path), project_id, video_id, actor_id)
+        assert "database detail" not in caught.value.safe_message
 
 
 def test_triggers_protect_before_and_after_success(ctx, tmp_path):

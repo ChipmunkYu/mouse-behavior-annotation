@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from sqlalchemy import Engine, or_, text
+from sqlalchemy import Engine, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -88,6 +88,7 @@ _DELETE_ORDER = (
     "videos",
 )
 _DROPPED_TRIGGERS = ("trg_annotation_delete", "trg_live_annotation_delete")
+_SQLITE_BIND_BUDGET = 500
 
 
 def _positive(value: object) -> bool:
@@ -96,6 +97,12 @@ def _positive(value: object) -> bool:
 
 def _ids(rows: Iterable[object]) -> tuple[int, ...]:
     return tuple(sorted(row.id for row in rows))  # type: ignore[attr-defined]
+
+
+def _chunks(values: Sequence, *, binds_per_item: int = 1):
+    size = max(1, _SQLITE_BIND_BUDGET // binds_per_item)
+    for offset in range(0, len(values), size):
+        yield values[offset:offset + size]
 
 
 def _safe_key(stored: str, root: Path) -> str:
@@ -140,35 +147,51 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
 
     annotations = _rows(db, Annotation, Annotation.video_id == video_id)
     annotation_ids = _ids(annotations)
+    annotation_id_set = set(annotation_ids)
     submissions = _rows(db, Submission, Submission.video_id == video_id)
     submission_ids = _ids(submissions)
+    submission_id_set = set(submission_ids)
     submission_annotations = _rows(
         db, SubmissionAnnotation, SubmissionAnnotation.submission_id.in_(submission_ids)
     ) if submission_ids else []
     submission_annotation_ids = _ids(submission_annotations)
+    submission_annotation_id_set = set(submission_annotation_ids)
     reviews = _rows(db, Review, Review.video_id == video_id)
     clips = _rows(db, Clip, or_(
         Clip.annotation_id.in_(annotation_ids) if annotation_ids else text("0"),
         Clip.submission_annotation_id.in_(submission_annotation_ids)
         if submission_annotation_ids else text("0"),
     ))
+    target_import_ids = select(DetectionImport.id).where(DetectionImport.video_id == video_id)
+    target_raw_ids = select(RawDetection.id).where(
+        RawDetection.detection_import_id.in_(target_import_ids)
+    )
+    target_track_ids = select(CorrectedTrack.id).where(
+        CorrectedTrack.detection_import_id.in_(target_import_ids)
+    )
+    target_suppression_ids = select(DetectionSuppression.id).where(
+        DetectionSuppression.video_id == video_id
+    )
     imports = _rows(db, DetectionImport, DetectionImport.video_id == video_id)
     import_ids = _ids(imports)
-    raw = _rows(db, RawDetection, RawDetection.detection_import_id.in_(import_ids)) if import_ids else []
+    import_id_set = set(import_ids)
+    raw = _rows(db, RawDetection, RawDetection.detection_import_id.in_(target_import_ids))
     raw_ids = _ids(raw)
-    tracks = _rows(db, CorrectedTrack, CorrectedTrack.detection_import_id.in_(import_ids)) if import_ids else []
+    raw_id_set = set(raw_ids)
+    tracks = _rows(db, CorrectedTrack, CorrectedTrack.detection_import_id.in_(target_import_ids))
     track_ids = _ids(tracks)
+    track_id_set = set(track_ids)
     assignments = _rows(db, CorrectedDetectionAssignment, or_(
-        CorrectedDetectionAssignment.raw_detection_id.in_(raw_ids) if raw_ids else text("0"),
-        CorrectedDetectionAssignment.corrected_track_id.in_(track_ids) if track_ids else text("0"),
+        CorrectedDetectionAssignment.raw_detection_id.in_(target_raw_ids),
+        CorrectedDetectionAssignment.corrected_track_id.in_(target_track_ids),
     ))
     identity_edits = _rows(db, IdentityEdit, IdentityEdit.video_id == video_id)
     suppressions = _rows(db, DetectionSuppression, DetectionSuppression.video_id == video_id)
     suppression_ids = _ids(suppressions)
+    suppression_id_set = set(suppression_ids)
     suppression_detections = _rows(db, SuppressionDetection, or_(
-        SuppressionDetection.suppression_id.in_(suppression_ids)
-        if suppression_ids else text("0"),
-        SuppressionDetection.raw_detection_id.in_(raw_ids) if raw_ids else text("0"),
+        SuppressionDetection.suppression_id.in_(target_suppression_ids),
+        SuppressionDetection.raw_detection_id.in_(target_raw_ids),
     ))
     overrides = _rows(db, DetectionStateOverride,
                       DetectionStateOverride.detection_import_id.in_(import_ids)) if import_ids else []
@@ -180,6 +203,7 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     snapshots = _rows(db, DetectionSnapshot,
                       DetectionSnapshot.detection_import_id.in_(import_ids)) if import_ids else []
     snapshot_ids = _ids(snapshots)
+    snapshot_id_set = set(snapshot_ids)
     snapshot_states = _rows(db, DetectionSnapshotState,
                             DetectionSnapshotState.snapshot_id.in_(snapshot_ids)) if snapshot_ids else []
     batches = _rows(db, VideoImportBatch, VideoImportBatch.created_video_id == video_id)
@@ -191,25 +215,25 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
         raise VideoDeleteConflictError("A clip crosses the video project boundary")
     if any(row.project_id != project_id for row in batches):
         raise VideoDeleteConflictError("An import batch crosses the video project boundary")
-    if any(row.detection_import_id not in import_ids for row in identity_edits + suppressions):
+    if any(row.detection_import_id not in import_id_set for row in identity_edits + suppressions):
         raise VideoDeleteConflictError("A detection row crosses the video import boundary")
-    if any(row.submission_id is not None and row.submission_id not in submission_ids
+    if any(row.submission_id is not None and row.submission_id not in submission_id_set
            for row in reviews):
         raise VideoDeleteConflictError("A review crosses the video submission boundary")
-    if any((row.annotation_id is not None and row.annotation_id not in annotation_ids)
+    if any((row.annotation_id is not None and row.annotation_id not in annotation_id_set)
            or (row.submission_annotation_id is not None
-               and row.submission_annotation_id not in submission_annotation_ids)
+               and row.submission_annotation_id not in submission_annotation_id_set)
            for row in clips):
         raise VideoDeleteConflictError("A clip crosses the video annotation boundary")
-    if any(row.source_annotation_id is not None and row.source_annotation_id not in annotation_ids
+    if any(row.source_annotation_id is not None and row.source_annotation_id not in annotation_id_set
            for row in submission_annotations):
         raise VideoDeleteConflictError("A frozen annotation crosses the video boundary")
-    if any(row.merged_into_id is not None and row.merged_into_id not in track_ids for row in tracks):
+    if any(row.merged_into_id is not None and row.merged_into_id not in track_id_set for row in tracks):
         raise VideoDeleteConflictError("A corrected track crosses the video import boundary")
-    if any(row.raw_detection_id not in raw_ids or row.corrected_track_id not in track_ids
+    if any(row.raw_detection_id not in raw_id_set or row.corrected_track_id not in track_id_set
            for row in assignments):
         raise VideoDeleteConflictError("A corrected assignment crosses the video import boundary")
-    if any(row.suppression_id not in suppression_ids or row.raw_detection_id not in raw_ids
+    if any(row.suppression_id not in suppression_id_set or row.raw_detection_id not in raw_id_set
            for row in suppression_detections):
         raise VideoDeleteConflictError("A suppression detection crosses the video import boundary")
     external_audit = (db.query(IdentityEdit.id).filter(
@@ -242,7 +266,7 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     if any((incoming_identity_edit, incoming_suppression, incoming_track,
             incoming_annotation)):
         raise VideoDeleteConflictError("A frozen row is linked from another video")
-    if submissions and any(row.detection_snapshot_id not in snapshot_ids for row in submissions):
+    if submissions and any(row.detection_snapshot_id not in snapshot_id_set for row in submissions):
         raise VideoDeleteConflictError("A submission references a snapshot outside this video")
     external_snapshot_ref = (db.query(Submission.id).filter(
         Submission.detection_snapshot_id.in_(snapshot_ids), Submission.video_id != video_id
@@ -471,16 +495,37 @@ def freeze_video_delete(db: Session, *, project_id: int, video_id: int,
     """Fresh-read and freeze the complete target graph without modifying any row."""
     if not all(_positive(value) for value in (project_id, video_id, actor_user_id)):
         raise ValueError("project_id, video_id and actor_user_id must be positive integers")
-    return _collect(db, project_id=project_id, video_id=video_id,
-                    actor_user_id=actor_user_id, settings=settings)
+    try:
+        return _collect(db, project_id=project_id, video_id=video_id,
+                        actor_user_id=actor_user_id, settings=settings)
+    except VideoDeleteDBError:
+        raise
+    except SQLAlchemyError as exc:
+        raise VideoDeleteIntegrityError("Database integrity prevented video deletion") from exc
 
 
 def _delete_ids(db: Session, table: str, ids: tuple[int, ...]) -> None:
-    if not ids:
-        return
-    bind = ",".join(f":v{i}" for i in range(len(ids)))
-    db.execute(text(f"DELETE FROM {table} WHERE id IN ({bind})"),
-               {f"v{i}": value for i, value in enumerate(ids)})
+    for chunk in _chunks(ids):
+        bind = ",".join(f":v{i}" for i in range(len(chunk)))
+        db.execute(text(f"DELETE FROM {table} WHERE id IN ({bind})"),
+                   {f"v{i}": value for i, value in enumerate(chunk)})
+
+
+def _key_where(columns: tuple[str, ...], keys: Sequence[tuple[int, ...]]):
+    if len(columns) == 1:
+        bind = ",".join(f":v{i}" for i in range(len(keys)))
+        return f"{columns[0]} IN ({bind})", {
+            f"v{i}": key[0] for i, key in enumerate(keys)
+        }
+    clauses = []
+    params = {}
+    for row_index, key in enumerate(keys):
+        clauses.append("(" + " AND ".join(
+            f"{column}=:v{row_index}_{column_index}"
+            for column_index, column in enumerate(columns)
+        ) + ")")
+        params.update({f"v{row_index}_{i}": value for i, value in enumerate(key)})
+    return " OR ".join(clauses), params
 
 
 def _delete_keys(db: Session, table: str, keys: tuple[tuple[int, ...], ...]) -> None:
@@ -490,10 +535,9 @@ def _delete_keys(db: Session, table: str, keys: tuple[tuple[int, ...], ...]) -> 
         "suppression_detections": ("suppression_id", "raw_detection_id"),
         "detection_snapshot_states": ("snapshot_id", "raw_detection_id"),
     }[table]
-    for key in keys:
-        where = " AND ".join(f"{column}=:v{i}" for i, column in enumerate(columns))
-        db.execute(text(f"DELETE FROM {table} WHERE {where}"),
-                   {f"v{i}": value for i, value in enumerate(key)})
+    for chunk in _chunks(keys, binds_per_item=len(columns)):
+        where, params = _key_where(columns, chunk)
+        db.execute(text(f"DELETE FROM {table} WHERE {where}"), params)
 
 
 def _delete_frozen_video_core(db: Session, frozen: FrozenVideoDelete, *, settings: Settings,
@@ -527,11 +571,13 @@ def _delete_frozen_video_core(db: Session, frozen: FrozenVideoDelete, *, setting
             raise VideoDeleteIntegrityError("Authority triggers were not restored")
         for table, table_ids in ids.items():
             if table_ids and table in _TABLES_WITH_ID | {"background_jobs", "videos"}:
-                bind = ",".join(f":v{i}" for i in range(len(table_ids)))
-                count = db.execute(text(f"SELECT count(*) FROM {table} WHERE id IN ({bind})"),
-                                   {f"v{i}": value for i, value in enumerate(table_ids)}).scalar_one()
-                if count:
-                    raise VideoDeleteIntegrityError("Target rows remain after deletion")
+                for chunk in _chunks(table_ids):
+                    bind = ",".join(f":v{i}" for i in range(len(chunk)))
+                    params = {f"v{i}": value for i, value in enumerate(chunk)}
+                    if db.execute(text(
+                        f"SELECT 1 FROM {table} WHERE id IN ({bind}) LIMIT 1"
+                    ), params).first():
+                        raise VideoDeleteIntegrityError("Target rows remain after deletion")
         for table, table_keys in keys.items():
             columns = {
                 "detection_state_overrides": ("raw_detection_id",),
@@ -539,10 +585,10 @@ def _delete_frozen_video_core(db: Session, frozen: FrozenVideoDelete, *, setting
                 "suppression_detections": ("suppression_id", "raw_detection_id"),
                 "detection_snapshot_states": ("snapshot_id", "raw_detection_id"),
             }[table]
-            for key in table_keys:
-                where = " AND ".join(f"{column}=:v{i}" for i, column in enumerate(columns))
-                if db.execute(text(f"SELECT 1 FROM {table} WHERE {where}"),
-                              {f"v{i}": value for i, value in enumerate(key)}).first():
+            for chunk in _chunks(table_keys, binds_per_item=len(columns)):
+                where, params = _key_where(columns, chunk)
+                if db.execute(text(f"SELECT 1 FROM {table} WHERE {where} LIMIT 1"),
+                              params).first():
                     raise VideoDeleteIntegrityError("Target rows remain after deletion")
         if db.execute(text("PRAGMA foreign_key_check")).first() is not None:
             raise VideoDeleteIntegrityError("Foreign-key integrity check failed")
