@@ -26,6 +26,8 @@ from .process_lock import ProcessLock
 JOB_TYPE_DISPLAY_PROXY = "display_proxy"
 DISPLAY_PROXY_ESTIMATED_SIZE_RATIO = 0.30
 DISPLAY_PROXY_DISK_SPACE_ERROR = "display proxy disk space unavailable"
+DISPLAY_PROXY_FAILED_ERROR = "display proxy processing failed"
+logger = logging.getLogger(__name__)
 
 
 class DisplayProxyOwnershipLost(RuntimeError):
@@ -211,8 +213,70 @@ class DisplayProxyWorker:
                           status="failed", elapsed_ms=elapsed_ms,
                           error_category=error_category(exc), **identity)
 
-    def _claim(self, job_id: int) -> tuple[str, dict] | None:
-        token = uuid.uuid4().hex
+    def _terminalize_running(self, job_id: int, token: str) -> bool:
+        """Conditionally terminate a crashed claim using a fresh session."""
+        with self.session_factory() as db:
+            payload = db.query(BackgroundJob.payload).filter(
+                BackgroundJob.id == job_id).scalar()
+            query = db.query(BackgroundJob).filter(
+                BackgroundJob.id == job_id, BackgroundJob.job_type == JOB_TYPE_DISPLAY_PROXY,
+                BackgroundJob.status == "running", BackgroundJob.run_token == token)
+            changed = query.update({"status": "failed", "error": DISPLAY_PROXY_FAILED_ERROR,
+                                    "finished_at": _now(), "run_token": None},
+                                   synchronize_session=False)
+            if changed != 1:
+                db.rollback()
+                return False
+            if _valid_payload(payload):
+                db.query(Video).filter(
+                    Video.id == payload["video_id"], Video.project_id == payload["project_id"],
+                    Video.source_sha256 == payload["source_sha256"],
+                    Video.display_source_sha256.is_(None),
+                    Video.display_profile_version.is_(None),
+                    Video.display_status == "processing").update({
+                        "display_status": "failed", "display_error": DISPLAY_PROXY_FAILED_ERROR},
+                        synchronize_session=False)
+            db.commit()
+            return True
+
+    def _best_effort_cleanup(self, job_id: int, temp: Path | None, final: Path | None,
+                             replaced: bool, payload: dict) -> bool:
+        try:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+        except Exception:
+            logger.error("Display proxy job %s temp cleanup failed", job_id)
+        if not replaced or final is None:
+            return False
+        try:
+            if self._terminal_commit_is_visible(job_id, payload, final):
+                return True
+        except Exception:
+            logger.error("Display proxy job %s terminal visibility check failed", job_id)
+        try:
+            referenced = self._final_is_referenced(final)
+        except Exception:
+            logger.error("Display proxy job %s final reference check failed", job_id)
+            referenced = True
+        if not referenced:
+            try:
+                final.unlink(missing_ok=True)
+            except Exception:
+                logger.error("Display proxy job %s final cleanup failed", job_id)
+        return False
+
+    def _future_done(self, job_id: int, future) -> None:
+        if future.cancelled():
+            return
+        try:
+            failed = future.exception() is not None
+        except Exception:
+            logger.error("Display proxy job %s future inspection failed", job_id)
+            return
+        if failed:
+            logger.error("Display proxy job %s worker future failed", job_id)
+
+    def _claim(self, job_id: int, token: str) -> dict | None:
         with self.session_factory() as db:
             changed = db.query(BackgroundJob).filter(
                 BackgroundJob.id == job_id, BackgroundJob.job_type == JOB_TYPE_DISPLAY_PROXY,
@@ -243,7 +307,7 @@ class DisplayProxyWorker:
         log_display_event(logging.INFO, "display_proxy_claim", job_id=job_id,
                           video_id=payload["video_id"], project_id=payload["project_id"],
                           profile=payload["profile_version"], status="running")
-        return token, payload
+        return payload
 
     def _after_terminal_commit(self, job_id: int, payload: dict, final: Path) -> None:
         """Fault-injection seam called only after the terminal commit returns."""
@@ -274,13 +338,12 @@ class DisplayProxyWorker:
             return db.query(Video.id).filter(
                 Video.display_status == "ready", Video.display_path == final.name).first() is not None
 
-    def _run(self, job_id: int) -> None:
-        claim = self._claim(job_id)
-        if claim is None: return
-        token, payload = claim
+    def _run_claimed(self, job_id: int, token: str, payload: dict) -> None:
         started = time.monotonic()
-        temp, final = self._paths(payload); source = None; replaced = False
+        temp = final = source = None
+        replaced = False
         try:
+            temp, final = self._paths(payload)
             temp.unlink(missing_ok=True)
             with self.session_factory() as db:
                 if not self._owns(db, job_id, token, payload):
@@ -295,8 +358,6 @@ class DisplayProxyWorker:
                 raise DisplayProxyError("source SHA-256 changed during transcoding")
             with temp.open("rb+") as handle:
                 handle.flush(); os.fsync(handle.fileno())
-            # rename itself is allocation-free, but publishing while already below the
-            # reserve would make the generated final compete with recovery/deletion IO.
             self._require_disk_space(0)
             with self.session_factory() as db:
                 if not self._owns(db, job_id, token, payload):
@@ -332,27 +393,54 @@ class DisplayProxyWorker:
                               elapsed_ms=round((time.monotonic() - started) * 1000),
                               bytes=final.stat().st_size)
         except DisplayProxyOwnershipLost:
-            temp.unlink(missing_ok=True)
-            if replaced and self._terminal_commit_is_visible(job_id, payload, final):
+            if self._best_effort_cleanup(job_id, temp, final, replaced, payload):
                 return
-            if replaced and not self._final_is_referenced(final):
-                final.unlink(missing_ok=True)
             self._cancel_if_owned_job(job_id, token)
         except Exception as exc:
-            temp.unlink(missing_ok=True)
-            if replaced and self._terminal_commit_is_visible(job_id, payload, final):
+            if self._best_effort_cleanup(job_id, temp, final, replaced, payload):
                 return
-            if replaced and not self._final_is_referenced(final):
-                final.unlink(missing_ok=True)
             safe_exc = self._safe_processing_error(exc)
             self._fail(job_id, token, payload, safe_exc, source,
                        round((time.monotonic() - started) * 1000))
+        except BaseException:
+            self._best_effort_cleanup(job_id, temp, final, replaced, payload)
+            raise
+
+    def _run(self, job_id: int) -> None:
+        token = uuid.uuid4().hex
+        payload = None
+        try:
+            payload = self._claim(job_id, token)
+            if payload is None:
+                return
+            self._run_claimed(job_id, token, payload)
+        except BaseException:
+            for _attempt in range(2):
+                try:
+                    terminalized = self._terminalize_running(job_id, token)
+                except Exception:
+                    logger.error("Display proxy job %s fallback terminalization failed", job_id)
+                    log_display_event(logging.ERROR, "display_proxy_terminalization_failed",
+                                      job_id=job_id, status="running",
+                                      error_category="worker_uncaught")
+                    continue
+                if terminalized:
+                    identity = ({"video_id": payload["video_id"],
+                                 "project_id": payload["project_id"],
+                                 "profile": payload["profile_version"]}
+                                if _valid_payload(payload) else {})
+                    log_display_event(logging.ERROR, "display_proxy_failed", job_id=job_id,
+                                      status="failed", error_category="worker_uncaught",
+                                      **identity)
+                break
+            raise
 
     def submit(self, job_id: int) -> None:
         if self.settings.display_proxy_synchronous:
             self._run(job_id)
         elif self._executor is not None:
-            self._executor.submit(self._run, job_id)
+            future = self._executor.submit(self._run, job_id)
+            future.add_done_callback(lambda item: self._future_done(job_id, item))
 
     def recover(self) -> None:
         """Recover only this lane; never creates work by scanning videos."""
