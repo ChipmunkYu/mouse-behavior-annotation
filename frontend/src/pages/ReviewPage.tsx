@@ -3,12 +3,11 @@
  * - 队列列表（包含待审核 Submission 快照，但不预加载视频流）
  * - 选中视频的共享播放器 + 时间轴 + 只读标注列表
  * - 审核历史、意见输入、通过 / 退回（均有确认）
- * - 通过后自动开始片段生成：展示「审核已通过，片段生成已排队/处理中」，
- *   媒体状态面板轮询 media-status 直至任务落定（失败可重试生成）
+ * - 审核页只负责裁决；通过后的视频片段由后台继续生成
  * - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）
  * - 仅后端返回 can_review=true 的成员可访问
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   createVideoReview,
@@ -21,7 +20,6 @@ import type { Category, Project, Review, SubmissionAnnotationSnapshot, Video } f
 import { ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
-import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
 import DetectionOverlay from "../components/DetectionOverlay";
@@ -119,6 +117,62 @@ function ReviewHistory({ reviews }: { reviews: Review[] }) {
   );
 }
 
+type QueueAction = "toggle" | "select" | "escape" | "close";
+type BehaviorSummaryMode = "none" | "single" | "overlap" | "focused";
+
+export function nextReviewQueueOpen(open: boolean, action: QueueAction): boolean {
+  return action === "toggle" ? !open : false;
+}
+
+export function deriveReviewBehaviorSummary(
+  annotations: SubmissionAnnotationSnapshot[],
+  activeAnnotationIds: number[],
+  focusedAnnotationId: number | null,
+): { mode: BehaviorSummaryMode; items: SubmissionAnnotationSnapshot[]; categories: string[]; mouseIds: number[] } {
+  const activeIds = new Set(activeAnnotationIds);
+  const active = annotations.filter((annotation) => activeIds.has(annotation.id));
+  const focused = focusedAnnotationId == null ? undefined : active.find((annotation) => annotation.id === focusedAnnotationId);
+  const items = focused ? [focused] : active;
+  return {
+    mode: focused ? "focused" : active.length === 0 ? "none" : active.length === 1 ? "single" : "overlap",
+    items,
+    categories: [...new Set(items.map((annotation) => annotation.category_name ?? `类别 #${annotation.category_id}`))],
+    mouseIds: [...new Set(items.flatMap((annotation) => annotation.mouse_ids))].sort((a, b) => a - b),
+  };
+}
+
+function CurrentBehaviorSummary({
+  summary,
+  onExitFocus,
+}: {
+  summary: ReturnType<typeof deriveReviewBehaviorSummary>;
+  onExitFocus: () => void;
+}) {
+  if (summary.mode === "none") {
+    return <div className="review-current-empty">当前时刻无行为</div>;
+  }
+  return (
+    <section className="review-current-behavior" aria-label="当前行为摘要">
+      <div className="review-current-behavior-head">
+        <strong>{summary.mode === "focused" ? "聚焦中" : summary.mode === "overlap" ? `当前 ${summary.items.length} 条重叠行为` : "当前行为"}</strong>
+        {summary.mode === "focused" ? <button type="button" className="btn btn-sm btn-ghost" onClick={onExitFocus}>退出聚焦</button> : null}
+      </div>
+      <div className="review-current-facts">
+        <span>类别：{summary.categories.join("、")}</span>
+        <span>参与对象：{summary.mouseIds.length ? summary.mouseIds.map((id) => `Track ${id}`).join("、") : "无"}</span>
+      </div>
+      <div className="review-current-events">
+        {summary.items.map((annotation) => (
+          <div key={annotation.id} className="review-current-event">
+            <div><b>{annotation.category_name ?? `类别 #${annotation.category_id}`}</b><span>{formatTimeShort(annotation.start_time)}–{formatTimeShort(annotation.end_time)}</span></div>
+            <ParticipantSummary mode={annotation.category_participant_mode} roles={annotation.role_definitions} assignments={annotation.participant_roles} mouseIds={annotation.mouse_ids} compact />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /* ================= 审核工作台主页面 ================= */
 export default function ReviewPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -128,6 +182,7 @@ export default function ReviewPage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [queue, setQueue] = useState<Video[] | null>(null);
+  const [queueOpen, setQueueOpen] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
 
@@ -147,6 +202,10 @@ export default function ReviewPage() {
   const [reviewDisabled, setReviewDisabled] = useState(true);
   const selectGenRef = useRef(0);
   const selectedVideoRef = useRef<Video | null>(null);
+  const queueButtonRef = useRef<HTMLButtonElement>(null);
+  const queuePanelRef = useRef<HTMLElement>(null);
+  const mainHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusMainAfterSelectionRef = useRef(false);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [colorNotice, setColorNotice] = useState<string | null>(null);
@@ -181,6 +240,28 @@ export default function ReviewPage() {
     ? undefined
     : filteredAnnotations.find((annotation) => annotation.id === overlayState.focusedAnnotationId);
   const activeAnnotationIds = useMemo(() => new Set(overlayState.activeAnnotationIds), [overlayState.activeAnnotationIds]);
+  const behaviorSummary = useMemo(
+    () => deriveReviewBehaviorSummary(filteredAnnotations, overlayState.activeAnnotationIds, overlayState.focusedAnnotationId),
+    [filteredAnnotations, overlayState.activeAnnotationIds, overlayState.focusedAnnotationId]
+  );
+
+  useEffect(() => {
+    if (!queueOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      const panel = queuePanelRef.current;
+      const target = panel?.querySelector<HTMLButtonElement>("[data-queue-current='true']")
+        ?? panel?.querySelector<HTMLButtonElement>("[data-queue-item]")
+        ?? panel?.querySelector<HTMLButtonElement>("[data-queue-close]");
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [queueOpen, queue]);
+
+  useEffect(() => {
+    if (queueOpen || !focusMainAfterSelectionRef.current || selectedId == null) return;
+    focusMainAfterSelectionRef.current = false;
+    mainHeadingRef.current?.focus();
+  }, [queueOpen, selectedId]);
 
   useEffect(() => {
     if (focusedAnnotationId != null && overlayState.focusedAnnotationId == null) {
@@ -220,14 +301,37 @@ export default function ReviewPage() {
 
   /* 选中视频：从队列读取 Submission 快照，并加载类别颜色、审核历史与视频流。
    * selectedVideo 由 selectVideo 显式设置：审核通过后队列刷新不再覆盖已选视频，
-   * 便于在详情中继续查看片段生成进度。 */
+   * 便于继续核对本次裁决。 */
   const selectVideo = useCallback((v: Video) => {
     setSelectedId(v.id);
     setSelectedVideo(v);
+    focusMainAfterSelectionRef.current = true;
+    setQueueOpen((open) => nextReviewQueueOpen(open, "select"));
   }, []);
+
+  function closeQueue(returnFocus = true) {
+    setQueueOpen((open) => nextReviewQueueOpen(open, "close"));
+    if (returnFocus) window.requestAnimationFrame(() => queueButtonRef.current?.focus());
+  }
+
+  function handleQueueKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
+    if (e.key !== "Tab" || !window.matchMedia("(max-width: 960px)").matches) return;
+    const focusable = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), [href], textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   useEffect(() => {
     if (selectedId == null) {
+      setQueueOpen(true);
       setSelectedVideo(null);
       setAnnotations([]);
       setCategories([]);
@@ -337,6 +441,12 @@ export default function ReviewPage() {
     }
     // 确认对话框打开时不响应页面快捷键（对话框内部处理 Esc / Enter）。
     if (document.querySelector(".modal-overlay")) return;
+    if (e.code === "Escape" && queueOpen) {
+      e.preventDefault();
+      setQueueOpen((open) => nextReviewQueueOpen(open, "escape"));
+      window.requestAnimationFrame(() => queueButtonRef.current?.focus());
+      return;
+    }
     if (e.code === "Escape" && focusedAnnotationId != null) {
       if (isEditable(e.target) && (e.target as HTMLElement).tagName !== "BUTTON") return;
       e.preventDefault();
@@ -384,8 +494,7 @@ export default function ReviewPage() {
       message:
         result === "approved" ? (
           <>
-            通过后该视频审核完成、行为标注将被锁定，系统将自动开始<b>生成视频片段</b>，
-            任务会<b>排队 / 处理中</b>，可在下方查看进度；生成失败时可重试。
+            通过后该视频审核完成、行为标注将被锁定，系统将在后台自动开始<b>生成视频片段</b>。
           </>
         ) : (
           <>退回后该视频将返回标注者修改，本次审核意见将保留在历史记录中。修改行为标注将使其回到草稿并需要重新提交。</>
@@ -403,7 +512,7 @@ export default function ReviewPage() {
         comment: comment.trim() || null,
       });
       if (result === "approved") {
-        // 通过后保留当前视频在详情中，便于查看片段生成进度
+        // 通过后保留当前视频详情，便于核对本次裁决结果。
         setSelectedVideo((prev) =>
           prev
             ? { ...prev, workflow_status: "approved", approved_at: new Date().toISOString() }
@@ -412,7 +521,7 @@ export default function ReviewPage() {
       }
       setNotice(
         result === "approved"
-          ? `已通过：${selectedVideo.filename}。视频片段生成已排队 / 处理中，可在下方查看进度。`
+          ? `已通过：${selectedVideo.filename}。视频片段将在后台生成。`
           : `已退回：${selectedVideo.filename}，标注者将收到意见并修改。`
       );
       setComment("");
@@ -446,6 +555,16 @@ export default function ReviewPage() {
           </div>
         ) : null}
         <div className="actions">
+          <button
+            ref={queueButtonRef}
+            type="button"
+            className="btn btn-sm"
+            aria-expanded={queueOpen}
+            aria-controls="review-queue-panel"
+            onClick={() => setQueueOpen((open) => nextReviewQueueOpen(open, "toggle"))}
+          >
+            审核队列 {queue?.length ?? 0}
+          </button>
           <button type="button" className="btn btn-sm" onClick={() => void loadQueue()}>
             刷新队列
           </button>
@@ -469,42 +588,72 @@ export default function ReviewPage() {
         </Card>
       ) : (
         <div className="review-body">
-          {/* 队列 */}
-          <aside className="review-side">
-            <Card
-              title={`审核队列（${queue?.length ?? 0}）`}
-              extra={
-                <span className="review-side-note" title="仅展示待审核视频的元数据，选中后按需加载">
-                  待审核
-                </span>
-              }
-            >
-              {queue === null ? (
-                <Loading text="加载队列…" />
-              ) : queue.length === 0 ? (
-                <EmptyState compact title="队列为空" hint="暂无待审核视频。标注者提交审核后会出现在这里。" />
-              ) : (
-                <div className="review-queue" aria-label="审核队列">
-                  {queue.map((v) => (
-                    <button
-                      key={v.id}
-                      type="button"
-                      className={selectedId === v.id ? "queue-item active" : "queue-item"}
-                      onClick={() => selectVideo(v)}
-                      title={v.filename}
-                    >
-                      <span className="queue-name" title={v.filename}>
-                        {v.filename}
-                      </span>
-                      <span className="queue-meta">
-                        <WorkflowBadge value={v.workflow_status} revision={v.annotation_revision} />
-                        <span className="queue-date">{v.submitted_at ? formatDate(v.submitted_at) : "—"}</span>
-                      </span>
-                    </button>
-                  ))}
+          {queueOpen ? <button type="button" className="review-queue-backdrop" tabIndex={-1} aria-label="关闭审核队列" onClick={() => closeQueue()} /> : null}
+          <aside
+            id="review-queue-panel"
+            ref={queuePanelRef}
+            className={`review-rail${queueOpen ? " queue-open" : ""}`}
+            onKeyDown={handleQueueKeyDown}
+          >
+            {queueOpen ? (
+              <Card
+                title={`审核队列（${queue?.length ?? 0}）`}
+                extra={<button type="button" className="btn btn-sm btn-ghost" data-queue-close onClick={() => closeQueue()}>关闭</button>}
+              >
+                {queue === null ? (
+                  <Loading text="加载队列…" />
+                ) : queue.length === 0 ? (
+                  <EmptyState compact title="队列为空" hint="暂无待审核视频。标注者提交审核后会出现在这里。" />
+                ) : (
+                  <div className="review-queue" aria-label="审核队列">
+                    {queue.map((v) => (
+                      <button
+                        key={v.id}
+                        type="button"
+                        data-queue-item
+                        data-queue-current={selectedId === v.id ? "true" : undefined}
+                        className={selectedId === v.id ? "queue-item active" : "queue-item"}
+                        aria-current={selectedId === v.id ? "true" : undefined}
+                        onClick={() => selectVideo(v)}
+                        title={v.filename}
+                      >
+                        <span className="queue-name" title={v.filename}>{v.filename}</span>
+                        <span className="queue-meta">
+                          <WorkflowBadge value={v.workflow_status} revision={v.annotation_revision} />
+                          <span className="queue-date">{v.submitted_at ? formatDate(v.submitted_at) : "—"}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            ) : selectedId == null ? (
+              <Card title="审核意见"><EmptyState compact title="尚未选择视频" hint="打开审核队列选择待审核视频" /></Card>
+            ) : (
+              <Card title="审核裁决" className="review-decision-panel">
+                <CurrentBehaviorSummary summary={behaviorSummary} onExitFocus={exitAnnotationFocus} />
+                <div className="field review-comment-field">
+                  <label htmlFor="review-comment">审核意见（退回时必填，通过时可选）</label>
+                  <textarea
+                    id="review-comment"
+                    className="textarea"
+                    rows={5}
+                    value={comment}
+                    placeholder="例如：第 2 条行为标注起点偏晚，请重新校准后再提交"
+                    onChange={(e) => setComment(e.target.value)}
+                  />
                 </div>
-              )}
-            </Card>
+                <div className="review-actions">
+                  <button type="button" className="btn btn-danger" disabled={reviewBusy || reviewDisabled} onClick={() => void handleReview("rejected")}>{reviewBusy ? "提交中…" : "退回"}</button>
+                  <button type="button" className="btn btn-primary" disabled={reviewBusy || reviewDisabled || annotations.length === 0} title={annotations.length === 0 ? "该视频暂无行为标注，无法通过" : reviewDisabled ? "审核数据加载中" : "通过该视频"} onClick={() => void handleReview("approved")}>{reviewBusy ? "提交中…" : "通过"}</button>
+                </div>
+                {annotations.length === 0 ? <div className="frame-preview">该视频暂无行为标注，不能通过；可退回或等待标注者补充。</div> : null}
+                <details className="review-history-details">
+                  <summary>审核历史（{reviews.length}）</summary>
+                  <div className="review-history-scroll"><ReviewHistory reviews={reviews} /></div>
+                </details>
+              </Card>
+            )}
           </aside>
 
           {/* 选中视频详情 */}
@@ -518,6 +667,7 @@ export default function ReviewPage() {
               </Card>
             ) : (
               <>
+                <h2 ref={mainHeadingRef} className="review-current-heading" tabIndex={-1}>{selectedVideo?.filename ?? `视频 #${selectedId}`}</h2>
                 <div className="card review-player">
                   <div className="video-wrap">
                     <video
@@ -635,69 +785,14 @@ export default function ReviewPage() {
                   </div>
                 </section>
 
-                <div className="review-detail">
-                  <Card title={`行为标注（${filteredAnnotations.length} / ${annotations.length}）· 只读`} className="review-anns">
-                    <ReadOnlyAnnotationList
-                      annotations={filteredAnnotations}
-                      categoryById={categoryById}
-                      activeAnnotationIds={activeAnnotationIds}
-                      focusedAnnotationId={overlayState.focusedAnnotationId}
-                      filtered={selectedCategoryIds.size > 0}
-                      onActivate={activateAnnotation}
-                    />
-                  </Card>
-
-                  <div className="review-side-col">
-                    <Card title={`审核历史（${reviews.length}）`} className="review-history-card">
-                      <ReviewHistory reviews={reviews} />
-                    </Card>
-
-                    <Card title="审核意见" className="review-opinion">
-                      <div className="field">
-                        <label htmlFor="review-comment">意见（退回时必填，通过时可选）</label>
-                        <textarea
-                          id="review-comment"
-                          className="textarea"
-                          rows={4}
-                          value={comment}
-                          placeholder="例如：第 2 条行为标注起点偏晚，请重新校准后再提交"
-                          onChange={(e) => setComment(e.target.value)}
-                        />
-                      </div>
-                      <div className="review-actions">
-                        <button
-                          type="button"
-                          className="btn btn-danger"
-                          disabled={reviewBusy || reviewDisabled}
-                          onClick={() => void handleReview("rejected")}
-                        >
-                          {reviewBusy ? "提交中…" : "退回"}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          disabled={reviewBusy || reviewDisabled || annotations.length === 0}
-                          title={annotations.length === 0 ? "该视频暂无行为标注，无法通过" : reviewDisabled ? "检测数据加载中" : "通过该视频"}
-                          onClick={() => void handleReview("approved")}
-                        >
-                          {reviewBusy ? "提交中…" : "通过"}
-                        </button>
-                      </div>
-                      {annotations.length === 0 ? (
-                        <div className="frame-preview" style={{ marginTop: 8 }}>
-                          该视频暂无行为标注，不能通过；可退回或等待标注者补充。
-                        </div>
-                      ) : null}
-                    </Card>
-                  </div>
-                </div>
-
-                <Card title="视频片段生成" className="media-card">
-                  <MediaStatusPanel
-                    projectId={pid}
-                    videoId={selectedId}
-                    workflowStatus={selectedVideo?.workflow_status ?? "draft"}
-                    retryable
+                <Card title={`行为标注（${filteredAnnotations.length} / ${annotations.length}）· 只读`} className="review-anns">
+                  <ReadOnlyAnnotationList
+                    annotations={filteredAnnotations}
+                    categoryById={categoryById}
+                    activeAnnotationIds={activeAnnotationIds}
+                    focusedAnnotationId={overlayState.focusedAnnotationId}
+                    filtered={selectedCategoryIds.size > 0}
+                    onActivate={activateAnnotation}
                   />
                 </Card>
               </>

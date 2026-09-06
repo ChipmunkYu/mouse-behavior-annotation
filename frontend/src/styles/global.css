@@ -2503,18 +2503,22 @@ a:focus-visible,
 
 .review-body {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 320px minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
 
-.review-side {
+.review-rail {
+  position: sticky;
+  top: calc(var(--topbar-h) + 10px);
   min-width: 0;
+  max-height: calc(100vh - var(--topbar-h) - 30px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
-.review-side-note {
-  font-size: 11px;
-  color: var(--text-3);
+.review-queue-backdrop {
+  display: none;
 }
 
 .review-queue {
@@ -2582,6 +2586,112 @@ a:focus-visible,
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+}
+
+.review-current-heading {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-current-heading:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.review-decision-panel .card-body {
+  display: grid;
+  gap: 10px;
+}
+
+.review-current-empty,
+.review-current-behavior {
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+}
+
+.review-current-empty {
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.review-current-behavior {
+  display: grid;
+  gap: 7px;
+}
+
+.review-current-behavior-head,
+.review-current-event > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review-current-behavior-head strong {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.review-current-facts {
+  display: grid;
+  gap: 3px;
+  color: var(--text-2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.review-current-events {
+  display: grid;
+  gap: 5px;
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.review-current-event {
+  display: grid;
+  gap: 4px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--border-strong);
+  font-size: 11px;
+}
+
+.review-current-event > div:first-child span {
+  flex: none;
+  color: var(--text-3);
+  font-family: var(--mono);
+}
+
+.review-comment-field {
+  margin: 0;
+}
+
+.review-history-details {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.review-history-details summary {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.review-history-scroll {
+  max-height: 220px;
+  margin-top: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .review-category-overview {
@@ -2712,20 +2822,6 @@ a:focus-visible,
   border: 0;
 }
 
-.review-detail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 12px;
-  align-items: start;
-}
-
-.review-side-col {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
-
 .review-anns .card-body {
   max-height: 340px;
   overflow-y: auto;
@@ -2813,13 +2909,53 @@ a:focus-visible,
 
 /* ============ 审核工作台：窄屏堆叠 ============ */
 @media (max-width: 960px) {
-  .review-body,
-  .review-detail {
-    grid-template-columns: 1fr;
+  .review-body {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .review-main {
+    display: contents;
+  }
+
+  .review-current-heading { order: 0; }
+  .review-player { order: 1; }
+  .review-rail { order: 2; }
+  .review-category-overview { order: 3; }
+  .review-anns { order: 4; }
+
+  .review-rail {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .review-queue-backdrop {
+    position: fixed;
+    z-index: 79;
+    inset: 0;
+    display: block;
+    border: 0;
+    background: rgba(10, 12, 16, .56);
+  }
+
+  .review-rail.queue-open {
+    position: fixed;
+    z-index: 80;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(380px, 90vw);
+    max-height: none;
+    padding: 10px;
+    overflow-y: auto;
+    background: var(--bg);
+    box-shadow: 18px 0 48px rgba(0, 0, 0, .28);
   }
 
   .review-queue {
-    max-height: 260px;
+    max-height: calc(100dvh - 100px);
   }
 
   .review-anns .card-body {
