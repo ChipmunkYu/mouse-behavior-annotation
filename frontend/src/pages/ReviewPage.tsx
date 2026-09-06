@@ -28,19 +28,21 @@ import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 import { useMediaSource } from "../media";
-import { deriveReviewAnnotationView, toggleReviewCategory } from "./reviewAnnotationView";
+import { deriveReviewAnnotationView, deriveReviewOverlay, toggleReviewCategory } from "./reviewAnnotationView";
 
 /* ================= 只读标注列表（审核视角，无编辑/删除） ================= */
 function ReadOnlyAnnotationList({
   annotations,
   categoryById,
-  activeAnnotationId,
+  activeAnnotationIds,
+  focusedAnnotationId,
   filtered,
   onActivate,
 }: {
   annotations: SubmissionAnnotationSnapshot[];
   categoryById: Map<number, Category>;
-  activeAnnotationId: number | null;
+  activeAnnotationIds: ReadonlySet<number>;
+  focusedAnnotationId: number | null;
   filtered: boolean;
   onActivate: (annotation: SubmissionAnnotationSnapshot) => void;
 }) {
@@ -53,12 +55,14 @@ function ReadOnlyAnnotationList({
     <div className="anno-list-body">
       {annotations.map((a) => {
         const cat = categoryById.get(a.category_id);
+        const focused = focusedAnnotationId === a.id;
+        const current = activeAnnotationIds.has(a.id);
         return (
           <button
             key={a.id}
             type="button"
-            className={activeAnnotationId === a.id ? "anno-row review-anno-button active" : "anno-row review-anno-button"}
-            aria-current={activeAnnotationId === a.id ? "true" : undefined}
+            className={`anno-row review-anno-button${current ? " is-current" : ""}${focused ? " active" : ""}`}
+            aria-current={focused ? "true" : undefined}
             aria-label={`${a.category_name ?? `类别 ${a.category_id}`}，${formatTimeShort(a.start_time)} 至 ${formatTimeShort(a.end_time)}，参与对象 ${a.mouse_ids.join("、") || "无"}`}
             onClick={() => onActivate(a)}
           >
@@ -71,6 +75,7 @@ function ReadOnlyAnnotationList({
                 <b>{formatTimeShort(a.start_time)}</b> – <b>{formatTimeShort(a.end_time)}</b>
               </span>
               <span className="anno-row-actions">
+                {focused ? <span className="review-focus-badge">聚焦中</span> : null}
                 <StatusBadge value="pending" />
               </span>
             </div>
@@ -168,22 +173,21 @@ export default function ReviewPage() {
     elementDuration > 0 ? elementDuration : selectedVideo?.duration && selectedVideo.duration > 0 ? selectedVideo.duration : null;
 
   const canReview = project?.can_review === true;
-  const focusedSnapshot = focusedAnnotationId == null ? undefined : filteredAnnotations.find((a) => a.id === focusedAnnotationId);
-  const activeSnapshot = focusedSnapshot && currentTime >= focusedSnapshot.start_time && currentTime <= focusedSnapshot.end_time
-    ? focusedSnapshot
-    : filteredAnnotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time);
-  const activeMouseIds = activeSnapshot?.mouse_ids ?? [];
-  const activeRoleByTrack = useMemo(() => {
-    const result: Record<number, string> = {};
-    if (activeSnapshot?.category_participant_mode === "role_based") for (const role of activeSnapshot.role_definitions) for (const id of activeSnapshot.participant_roles[role.key] ?? []) result[id] = role.name;
-    return result;
-  }, [activeSnapshot]);
+  const overlayState = useMemo(
+    () => deriveReviewOverlay(filteredAnnotations, currentTime, focusedAnnotationId),
+    [filteredAnnotations, currentTime, focusedAnnotationId]
+  );
+  const focusedSnapshot = overlayState.focusedAnnotationId == null
+    ? undefined
+    : filteredAnnotations.find((annotation) => annotation.id === overlayState.focusedAnnotationId);
+  const activeAnnotationIds = useMemo(() => new Set(overlayState.activeAnnotationIds), [overlayState.activeAnnotationIds]);
 
   useEffect(() => {
-    if (!focusedSnapshot || currentTime < focusedSnapshot.start_time || currentTime > focusedSnapshot.end_time) {
+    if (focusedAnnotationId != null && overlayState.focusedAnnotationId == null) {
       setFocusedAnnotationId(null);
+      setSeekAnnouncement("已退出聚焦，显示当前重叠行为参与对象并集");
     }
-  }, [currentTime, focusedSnapshot]);
+  }, [focusedAnnotationId, overlayState.focusedAnnotationId]);
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
@@ -310,7 +314,17 @@ export default function ReviewPage() {
   function activateAnnotation(annotation: SubmissionAnnotationSnapshot) {
     setFocusedAnnotationId(annotation.id);
     seekTo(annotation.start_time);
-    setSeekAnnouncement(`已定位到 ${annotation.category_name ?? `类别 ${annotation.category_id}`}，${formatTime(annotation.start_time)}`);
+    setSeekAnnouncement(`已聚焦 ${annotation.category_name ?? `类别 ${annotation.category_id}`}，${formatTime(annotation.start_time)}，参与对象 ${annotation.mouse_ids.map((id) => `Track ${id}`).join("、") || "无"}`);
+  }
+
+  function exitAnnotationFocus() {
+    setFocusedAnnotationId(null);
+    setSeekAnnouncement("已退出聚焦，显示当前重叠行为参与对象并集");
+  }
+
+  function changeCategoryFilter(categoryId: number | null) {
+    if (focusedAnnotationId != null) exitAnnotationFocus();
+    setSelectedCategoryIds(toggleReviewCategory(selectedCategoryIds, categoryId));
   }
 
   /* ---------- 键盘快捷键（输入框聚焦时不触发） ---------- */
@@ -323,6 +337,12 @@ export default function ReviewPage() {
     }
     // 确认对话框打开时不响应页面快捷键（对话框内部处理 Esc / Enter）。
     if (document.querySelector(".modal-overlay")) return;
+    if (e.code === "Escape" && focusedAnnotationId != null) {
+      if (isEditable(e.target) && (e.target as HTMLElement).tagName !== "BUTTON") return;
+      e.preventDefault();
+      exitAnnotationFocus();
+      return;
+    }
     if (e.code === "Space") {
       if (isEditable(e.target)) return;
       e.preventDefault();
@@ -511,7 +531,7 @@ export default function ReviewPage() {
                       playsInline
                       preload="metadata"
                     />
-                    {videoReady ? <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={activeMouseIds} trackRoleLabels={activeRoleByTrack} /> : null}
+                    {videoReady ? <DetectionOverlay projectId={pid} videoId={selectedId} video={videoRef.current} currentTime={currentTime} fallbackFps={selectedVideo?.fps} selectedIds={overlayState.mouseIds} showOnlySelected trackRoleLabels={overlayState.roleLabels} /> : null}
                     <MediaLoadProgress state={media} onCancel={media.cancel} />
                     {media.status === "pending" || media.status === "failed" || media.status === "cancelled" ? <div className="media-status-overlay"><EmptyState compact title={media.status === "pending" ? "播放资源处理中" : media.status === "cancelled" ? "下载已取消" : "视频下载失败"} hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>{media.status === "cancelled" ? "重新下载" : "重试"}</button></div> : null}
                   </div>
@@ -555,6 +575,14 @@ export default function ReviewPage() {
                         <span className="revision-context mono">Submission 快照 · 只读</span>
                         <WorkflowBadge value={selectedVideo?.workflow_status ?? "draft"} revision={selectedVideo?.annotation_revision} />
                       </div>
+                      {focusedSnapshot ? (
+                        <div className="review-focus-status" role="status">
+                          <span><b>聚焦：</b>{focusedSnapshot.category_name ?? `类别 #${focusedSnapshot.category_id}`} · {formatTimeShort(focusedSnapshot.start_time)}–{formatTimeShort(focusedSnapshot.end_time)}</span>
+                          <button type="button" className="btn btn-sm btn-ghost" onClick={exitAnnotationFocus} aria-label="退出单条行为聚焦">退出聚焦</button>
+                        </div>
+                      ) : overlayState.activeAnnotationIds.length > 1 ? (
+                        <div className="review-union-status" role="status">当前 {overlayState.activeAnnotationIds.length} 条重叠行为 · 显示参与对象并集</div>
+                      ) : null}
                       {timelineDuration && timelineDuration > 0 ? (
                         <div style={{ padding: "0 10px 10px" }}>
                           <Timeline
@@ -562,6 +590,7 @@ export default function ReviewPage() {
                             currentTime={currentTime}
                             annotations={filteredAnnotations}
                             categoryById={categoryById}
+                            focusedAnnotationId={overlayState.focusedAnnotationId}
                             onSeek={seekTo}
                           />
                         </div>
@@ -584,7 +613,7 @@ export default function ReviewPage() {
                       type="button"
                       className={selectedCategoryIds.size === 0 ? "review-filter active" : "review-filter"}
                       aria-pressed={selectedCategoryIds.size === 0}
-                      onClick={() => setSelectedCategoryIds(toggleReviewCategory(selectedCategoryIds, null))}
+                      onClick={() => changeCategoryFilter(null)}
                     >
                       全部 <b>{annotations.length}</b>
                     </button>
@@ -596,7 +625,7 @@ export default function ReviewPage() {
                         aria-pressed={selectedCategoryIds.has(category.id)}
                         aria-label={`${category.name}，${category.count} 条`}
                         title={category.name}
-                        onClick={() => setSelectedCategoryIds(toggleReviewCategory(selectedCategoryIds, category.id))}
+                        onClick={() => changeCategoryFilter(category.id)}
                       >
                         <span className="swatch" style={{ background: category.color ?? "var(--text-3)" }} aria-hidden="true" />
                         <span className="review-filter-name">{category.name}</span>
@@ -611,7 +640,8 @@ export default function ReviewPage() {
                     <ReadOnlyAnnotationList
                       annotations={filteredAnnotations}
                       categoryById={categoryById}
-                      activeAnnotationId={activeSnapshot?.id ?? null}
+                      activeAnnotationIds={activeAnnotationIds}
+                      focusedAnnotationId={overlayState.focusedAnnotationId}
                       filtered={selectedCategoryIds.size > 0}
                       onActivate={activateAnnotation}
                     />

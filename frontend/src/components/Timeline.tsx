@@ -17,6 +17,7 @@ export default function Timeline({
   draftStartFrame,
   draftEndFrame,
   draftColor,
+  focusedAnnotationId,
   onSeek,
 }: {
   duration: number;
@@ -28,6 +29,7 @@ export default function Timeline({
   draftStartFrame?: number | null;
   draftEndFrame?: number | null;
   draftColor?: string | null;
+  focusedAnnotationId?: number | null;
   onSeek: (t: number) => void;
 }) {
   const ticks = useMemo(() => Array.from({ length: 11 }, (_, i) => (duration * i) / 10), [duration]);
@@ -61,7 +63,11 @@ export default function Timeline({
           return (
             <div
               key={a.id}
-              className="timeline-interval"
+              className={focusedAnnotationId == null
+                ? "timeline-interval"
+                : a.id === focusedAnnotationId
+                  ? "timeline-interval is-focused"
+                  : "timeline-interval is-muted"}
               style={{ left: `${left}%`, width: `${width}%`, background: cat?.color ?? "var(--text-3)" }}
               title={`${cat?.name ?? "未知类别"}：${formatTimeShort(a.start_time)} – ${formatTimeShort(a.end_time)}`}
             />

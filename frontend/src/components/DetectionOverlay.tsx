@@ -29,6 +29,7 @@ export default function DetectionOverlay({
   currentTime,
   fallbackFps,
   selectedIds = [],
+  showOnlySelected = false,
   interactive = false,
   onToggleTrack,
   onFrameData,
@@ -44,6 +45,7 @@ export default function DetectionOverlay({
   currentTime: number;
   fallbackFps?: number | null;
   selectedIds?: number[];
+  showOnlySelected?: boolean;
   interactive?: boolean;
   onToggleTrack?: (id: number) => void;
   onFrameData?: (data: { frame: number; detections: DetectionWithTrack[]; detectionImport: DetectionImport | null }) => void;
@@ -159,6 +161,7 @@ export default function DetectionOverlay({
     ctx.clearRect(0, 0, geo.cssW, geo.cssH);
     for (const det of detections) {
       const selected = selectedIds.includes(det.display_track_id);
+      if (showOnlySelected && !selected) continue;
       const box = det.box_xyxy_px;
       if (box && box.length >= 4) {
         const [x1, y1, x2, y2] = box;
@@ -195,7 +198,7 @@ export default function DetectionOverlay({
         pts.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(geo.ox + x * geo.scale, geo.oy + y * geo.scale, 2.5, 0, Math.PI * 2); ctx.fill(); });
       }
     }
-  }, [detections, geometry, options, selectedIds, trackRoleLabels]);
+  }, [detections, geometry, options, selectedIds, showOnlySelected, trackRoleLabels]);
 
   useEffect(() => {
     if (!video) return;

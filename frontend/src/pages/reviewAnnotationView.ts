@@ -3,6 +3,12 @@ import type { Category, SubmissionAnnotationSnapshot } from "../api/types";
 export const REVIEW_FALLBACK_COLOR = "var(--text-3)";
 
 export type ReviewCategorySummary = Category & { count: number };
+export interface ReviewOverlayState {
+  activeAnnotationIds: number[];
+  focusedAnnotationId: number | null;
+  mouseIds: number[];
+  roleLabels: Record<number, string>;
+}
 
 export function safeCategoryColor(color: string | null | undefined): string {
   const value = color?.trim();
@@ -66,4 +72,39 @@ export function toggleReviewCategory(
   if (next.has(categoryId)) next.delete(categoryId);
   else next.add(categoryId);
   return next;
+}
+
+export function deriveReviewOverlay(
+  annotations: SubmissionAnnotationSnapshot[],
+  currentTime: number,
+  focusedAnnotationId: number | null,
+): ReviewOverlayState {
+  const active = annotations
+    .filter((annotation) => currentTime >= annotation.start_time && currentTime <= annotation.end_time)
+    .sort((a, b) => a.start_time - b.start_time || a.id - b.id);
+  const focused = focusedAnnotationId == null
+    ? undefined
+    : active.find((annotation) => annotation.id === focusedAnnotationId);
+  const visible = focused ? [focused] : active;
+  const mouseIds = [...new Set(visible.flatMap((annotation) => annotation.mouse_ids))].sort((a, b) => a - b);
+  const labels = new Map<number, Set<string>>();
+
+  for (const annotation of visible) {
+    if (annotation.category_participant_mode !== "role_based") continue;
+    const behavior = annotation.category_name ?? `类别 #${annotation.category_id}`;
+    for (const role of [...annotation.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order || a.key.localeCompare(b.key))) {
+      for (const trackId of annotation.participant_roles[role.key] ?? []) {
+        const trackLabels = labels.get(trackId) ?? new Set<string>();
+        trackLabels.add(`${behavior}：${role.name}`);
+        labels.set(trackId, trackLabels);
+      }
+    }
+  }
+
+  return {
+    activeAnnotationIds: active.map((annotation) => annotation.id),
+    focusedAnnotationId: focused?.id ?? null,
+    mouseIds,
+    roleLabels: Object.fromEntries([...labels].map(([trackId, values]) => [trackId, [...values].join(" / ")])),
+  };
 }
