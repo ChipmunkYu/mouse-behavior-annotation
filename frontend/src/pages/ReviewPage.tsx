@@ -1,6 +1,6 @@
 /**
  * 审核工作台 /projects/:projectId/review：
- * - 队列列表（仅元数据，避免一次加载所有视频的标注与流）
+ * - 队列列表（包含待审核 Submission 快照，但不预加载视频流）
  * - 选中视频的共享播放器 + 时间轴 + 只读标注列表
  * - 审核历史、意见输入、通过 / 退回（均有确认）
  * - 通过后自动开始片段生成：展示「审核已通过，片段生成已排队/处理中」，
@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   createVideoReview,
+  listCategories,
   listProjects,
   listReviewQueue,
   listVideoReviews,
@@ -27,18 +28,25 @@ import DetectionOverlay from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 import { useMediaSource } from "../media";
+import { deriveReviewAnnotationView, toggleReviewCategory } from "./reviewAnnotationView";
 
 /* ================= 只读标注列表（审核视角，无编辑/删除） ================= */
 function ReadOnlyAnnotationList({
   annotations,
   categoryById,
+  activeAnnotationId,
+  filtered,
+  onActivate,
 }: {
   annotations: SubmissionAnnotationSnapshot[];
   categoryById: Map<number, Category>;
+  activeAnnotationId: number | null;
+  filtered: boolean;
+  onActivate: (annotation: SubmissionAnnotationSnapshot) => void;
 }) {
   if (annotations.length === 0) {
     return (
-      <EmptyState compact title="暂无行为标注" hint="该视频尚未添加行为标注，无法通过" />
+      <EmptyState compact title={filtered ? "当前筛选下暂无行为标注" : "暂无行为标注"} hint={filtered ? "调整类别筛选或选择“全部”" : "该视频尚未添加行为标注，无法通过"} />
     );
   }
   return (
@@ -46,7 +54,14 @@ function ReadOnlyAnnotationList({
       {annotations.map((a) => {
         const cat = categoryById.get(a.category_id);
         return (
-          <div key={a.id} className="anno-row">
+          <button
+            key={a.id}
+            type="button"
+            className={activeAnnotationId === a.id ? "anno-row review-anno-button active" : "anno-row review-anno-button"}
+            aria-current={activeAnnotationId === a.id ? "true" : undefined}
+            aria-label={`${a.category_name ?? `类别 ${a.category_id}`}，${formatTimeShort(a.start_time)} 至 ${formatTimeShort(a.end_time)}，参与对象 ${a.mouse_ids.join("、") || "无"}`}
+            onClick={() => onActivate(a)}
+          >
             <div className="anno-row-top">
               <span className="anno-cat" title={cat?.group ?? ""}>
                 <span className="swatch" style={{ background: cat?.color ?? "var(--text-3)" }} />
@@ -65,7 +80,7 @@ function ReadOnlyAnnotationList({
               {a.category_group ? <span>{a.category_group}</span> : null}
               <ParticipantSummary mode={a.category_participant_mode} roles={a.role_definitions} assignments={a.participant_roles} mouseIds={a.mouse_ids} />
             </div>
-          </div>
+          </button>
         );
       })}
     </div>
@@ -113,6 +128,9 @@ export default function ReviewPage() {
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [annotations, setAnnotations] = useState<SubmissionAnnotationSnapshot[]>([]);
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<number>>(new Set());
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<number | null>(null);
+  const [seekAnnouncement, setSeekAnnouncement] = useState("");
   const [reviews, setReviews] = useState<Review[]>([]);
 
   const [elementDuration, setElementDuration] = useState(0);
@@ -126,6 +144,7 @@ export default function ReviewPage() {
   const selectedVideoRef = useRef<Video | null>(null);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [colorNotice, setColorNotice] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmDialog, confirm] = useConfirm();
   const handleMediaReady = useCallback((_reason: "initial" | "retry-restored", element: HTMLVideoElement) => {
@@ -134,22 +153,37 @@ export default function ReviewPage() {
   const media = useMediaSource({ videoId: selectedId, surface: "review", videoRef, onReady: handleMediaReady });
   selectedVideoRef.current = selectedVideo;
 
+  const annotationView = useMemo(
+    () => deriveReviewAnnotationView(annotations, categories, selectedCategoryIds),
+    [annotations, categories, selectedCategoryIds]
+  );
+  const filteredAnnotations = annotationView.annotations;
+  const categorySummaries = annotationView.categories;
   const categoryById = useMemo(
-    () => new Map(categories.map((c) => [c.id, c] as const)),
-    [categories]
+    () => new Map(categorySummaries.map((category) => [category.id, category] as const)),
+    [categorySummaries]
   );
 
   const timelineDuration =
     elementDuration > 0 ? elementDuration : selectedVideo?.duration && selectedVideo.duration > 0 ? selectedVideo.duration : null;
 
   const canReview = project?.can_review === true;
-  const activeSnapshot = annotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time);
+  const focusedSnapshot = focusedAnnotationId == null ? undefined : filteredAnnotations.find((a) => a.id === focusedAnnotationId);
+  const activeSnapshot = focusedSnapshot && currentTime >= focusedSnapshot.start_time && currentTime <= focusedSnapshot.end_time
+    ? focusedSnapshot
+    : filteredAnnotations.find((a) => currentTime >= a.start_time && currentTime <= a.end_time);
   const activeMouseIds = activeSnapshot?.mouse_ids ?? [];
   const activeRoleByTrack = useMemo(() => {
     const result: Record<number, string> = {};
     if (activeSnapshot?.category_participant_mode === "role_based") for (const role of activeSnapshot.role_definitions) for (const id of activeSnapshot.participant_roles[role.key] ?? []) result[id] = role.name;
     return result;
   }, [activeSnapshot]);
+
+  useEffect(() => {
+    if (!focusedSnapshot || currentTime < focusedSnapshot.start_time || currentTime > focusedSnapshot.end_time) {
+      setFocusedAnnotationId(null);
+    }
+  }, [currentTime, focusedSnapshot]);
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
@@ -180,7 +214,7 @@ export default function ReviewPage() {
     void loadQueue();
   }, [loadQueue]);
 
-  /* 选中视频：只加载该视频的标注 / 类别 / 审核历史 / 视频流，避免一次加载全部。
+  /* 选中视频：从队列读取 Submission 快照，并加载类别颜色、审核历史与视频流。
    * selectedVideo 由 selectVideo 显式设置：审核通过后队列刷新不再覆盖已选视频，
    * 便于在详情中继续查看片段生成进度。 */
   const selectVideo = useCallback((v: Video) => {
@@ -193,6 +227,10 @@ export default function ReviewPage() {
       setSelectedVideo(null);
       setAnnotations([]);
       setCategories([]);
+      setSelectedCategoryIds(new Set());
+      setFocusedAnnotationId(null);
+      setSeekAnnouncement("");
+      setColorNotice(null);
       setReviews([]);
       setElementDuration(0);
       setCurrentTime(0);
@@ -206,24 +244,39 @@ export default function ReviewPage() {
 
     setNotice(null);
     setErrorMsg(null);
+    setColorNotice(null);
     setElementDuration(0);
+    setCurrentTime(0);
+    setPlaying(false);
     setReviewDisabled(true);
-    setAnnotations([]);
+    const snapshots = selectedVideoRef.current?.submission_annotations ?? [];
+    setAnnotations(snapshots);
     setCategories([]);
+    setSelectedCategoryIds(new Set());
+    setFocusedAnnotationId(null);
+    setSeekAnnouncement("");
     setReviews([]);
 
-    Promise.all([listVideoReviews(pid, vid)])
-      .then(([revs]) => {
+    listVideoReviews(pid, vid)
+      .then((revs) => {
         if (cancelled || gen !== selectGenRef.current) return;
-        const snapshots = selectedVideoRef.current?.submission_annotations ?? [];
-        setAnnotations(snapshots);
-        setCategories(snapshots.map((a, index) => ({ id: a.category_id, project_id: pid, name: a.category_name, group: a.category_group ?? "历史类别", color: null, sort_order: index, is_active: true, mouse_count_min: 1, mouse_count_max: null, participant_mode: a.category_participant_mode, role_definitions: a.role_definitions })));
         setReviews(revs);
         setReviewDisabled(false);
       })
       .catch((err: unknown) => {
         if (cancelled || gen !== selectGenRef.current) return;
         setErrorMsg(err instanceof Error ? err.message : "加载审核数据失败");
+      });
+
+    listCategories(pid)
+      .then((loadedCategories) => {
+        if (cancelled || gen !== selectGenRef.current) return;
+        setCategories(loadedCategories);
+      })
+      .catch(() => {
+        if (cancelled || gen !== selectGenRef.current) return;
+        setCategories([]);
+        setColorNotice("类别颜色暂不可用，已使用灰色显示");
       });
 
     return () => {
@@ -251,6 +304,13 @@ export default function ReviewPage() {
     const v = videoRef.current;
     if (!v) return;
     v.currentTime = Math.min(Math.max(0, t), v.duration || t);
+    setCurrentTime(v.currentTime);
+  }
+
+  function activateAnnotation(annotation: SubmissionAnnotationSnapshot) {
+    setFocusedAnnotationId(annotation.id);
+    seekTo(annotation.start_time);
+    setSeekAnnouncement(`已定位到 ${annotation.category_name ?? `类别 ${annotation.category_id}`}，${formatTime(annotation.start_time)}`);
   }
 
   /* ---------- 键盘快捷键（输入框聚焦时不触发） ---------- */
@@ -259,7 +319,7 @@ export default function ReviewPage() {
     function isEditable(target: EventTarget | null): boolean {
       if (!(target instanceof HTMLElement)) return false;
       const tag = target.tagName;
-      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || target.isContentEditable;
     }
     // 确认对话框打开时不响应页面快捷键（对话框内部处理 Esc / Enter）。
     if (document.querySelector(".modal-overlay")) return;
@@ -376,6 +436,8 @@ export default function ReviewPage() {
         <div className="ok-box" role="status">✓ {notice}</div>
       ) : null}
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
+      {colorNotice ? <div className="review-color-notice" role="status">{colorNotice}</div> : null}
+      <span className="sr-only" aria-live="polite">{seekAnnouncement}</span>
       {confirmDialog}
 
       {project && !canReview ? (
@@ -498,7 +560,7 @@ export default function ReviewPage() {
                           <Timeline
                             duration={timelineDuration}
                             currentTime={currentTime}
-                            annotations={annotations}
+                            annotations={filteredAnnotations}
                             categoryById={categoryById}
                             onSeek={seekTo}
                           />
@@ -512,18 +574,47 @@ export default function ReviewPage() {
                   ) : null}
                 </div>
 
-                <Card title="视频片段生成" className="media-card">
-                  <MediaStatusPanel
-                    projectId={pid}
-                    videoId={selectedId}
-                    workflowStatus={selectedVideo?.workflow_status ?? "draft"}
-                    retryable
-                  />
-                </Card>
+                <section className="review-category-overview" aria-label="按行为类别筛选">
+                  <div className="review-overview-heading">
+                    <strong>行为概览</strong>
+                    <span>共 {annotations.length} 条 · {categorySummaries.length} 类</span>
+                  </div>
+                  <div className="review-category-filters">
+                    <button
+                      type="button"
+                      className={selectedCategoryIds.size === 0 ? "review-filter active" : "review-filter"}
+                      aria-pressed={selectedCategoryIds.size === 0}
+                      onClick={() => setSelectedCategoryIds(toggleReviewCategory(selectedCategoryIds, null))}
+                    >
+                      全部 <b>{annotations.length}</b>
+                    </button>
+                    {categorySummaries.map((category) => (
+                      <button
+                        key={category.id}
+                        type="button"
+                        className={selectedCategoryIds.has(category.id) ? "review-filter active" : "review-filter"}
+                        aria-pressed={selectedCategoryIds.has(category.id)}
+                        aria-label={`${category.name}，${category.count} 条`}
+                        title={category.name}
+                        onClick={() => setSelectedCategoryIds(toggleReviewCategory(selectedCategoryIds, category.id))}
+                      >
+                        <span className="swatch" style={{ background: category.color ?? "var(--text-3)" }} aria-hidden="true" />
+                        <span className="review-filter-name">{category.name}</span>
+                        <b>{category.count}</b>
+                      </button>
+                    ))}
+                  </div>
+                </section>
 
                 <div className="review-detail">
-                  <Card title={`行为标注（${annotations.length}）· 只读`} className="review-anns">
-                    <ReadOnlyAnnotationList annotations={annotations} categoryById={categoryById} />
+                  <Card title={`行为标注（${filteredAnnotations.length} / ${annotations.length}）· 只读`} className="review-anns">
+                    <ReadOnlyAnnotationList
+                      annotations={filteredAnnotations}
+                      categoryById={categoryById}
+                      activeAnnotationId={activeSnapshot?.id ?? null}
+                      filtered={selectedCategoryIds.size > 0}
+                      onActivate={activateAnnotation}
+                    />
                   </Card>
 
                   <div className="review-side-col">
@@ -570,6 +661,15 @@ export default function ReviewPage() {
                     </Card>
                   </div>
                 </div>
+
+                <Card title="视频片段生成" className="media-card">
+                  <MediaStatusPanel
+                    projectId={pid}
+                    videoId={selectedId}
+                    workflowStatus={selectedVideo?.workflow_status ?? "draft"}
+                    retryable
+                  />
+                </Card>
               </>
             )}
           </section>

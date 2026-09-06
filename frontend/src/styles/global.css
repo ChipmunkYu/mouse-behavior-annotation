@@ -1462,6 +1462,24 @@ a:focus-visible,
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
+.review-anno-button {
+  width: 100%;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-anno-button:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.review-anno-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .anno-row-top {
   display: flex;
   align-items: center;
@@ -2460,6 +2478,104 @@ a:focus-visible,
   min-width: 0;
 }
 
+.review-category-overview {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+
+.review-overview-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.review-overview-heading strong {
+  font-size: 13px;
+}
+
+.review-overview-heading span {
+  color: var(--text-3);
+}
+
+.review-category-filters {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 1px;
+  scrollbar-width: thin;
+}
+
+.review-filter {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.review-filter:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.review-filter.active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.review-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.review-filter .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.review-filter-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-color-notice {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-3);
+  background: var(--bg-elev);
+  font-size: 11px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .review-detail {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -2576,6 +2692,11 @@ a:focus-visible,
 }
 
 @media (max-width: 640px) {
+  .review-filter,
+  .review-anno-button {
+    min-height: 44px;
+  }
+
   .review-actions .btn {
     flex: 1 1 100%;
   }
