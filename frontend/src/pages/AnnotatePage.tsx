@@ -658,7 +658,7 @@ function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive,
   }, [focusIndex, navigationActive]);
   return <Card title="参与对象" className={`mouse-ids-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
     {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
-    <div className="selected-mice">{selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>)}</div>
+    {selected.length ? <div className="selected-mice">{selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>)}</div> : null}
     <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
     {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
   </Card>;
@@ -811,7 +811,7 @@ export default function AnnotatePage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reviewHistory, setReviewHistory] = useState<Review[]>([]);
   const reviewRequestRef = useRef(0);
-  const [hint, setHint] = useState("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
+  const [hint, setHint] = useState("");
 
   useEffect(() => {
     setParticipantNavigationActive(false);
@@ -890,7 +890,7 @@ export default function AnnotatePage() {
     setNavigationPending(false);
     setErrorMsg(null);
     setReviewHistory([]);
-    setHint("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
+    setHint("");
   }, [pid, vid]);
 
   useEffect(() => {
@@ -2129,18 +2129,6 @@ export default function AnnotatePage() {
       </div>
 
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
-      {visibleRejection ? (
-        <section className="annotation-rejection" aria-labelledby="annotation-rejection-title">
-          <div className="annotation-rejection-heading">
-            <strong id="annotation-rejection-title">退回意见</strong>
-            <span>请按意见修改后重新提交</span>
-          </div>
-          <p>{rejectionComment(visibleRejection)}</p>
-          <div className="annotation-rejection-meta">
-            审核人 {visibleRejection.reviewer ?? `#${visibleRejection.reviewer_id}`} · {formatDate(visibleRejection.created_at)}
-          </div>
-        </section>
-      ) : null}
       {invalidTrackCounts.roleBased > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.roleBased} 条行为标注的 Track 已失效，需要重新分配；完成前不能提交审核。</div> : null}
       {invalidTrackCounts.unordered > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.unordered} 条行为标注的 Track 已失效，需要重新选择；完成前不能提交审核。</div> : null}
       {annotations.some((a) => a.participant_status === "needs_participants") ? <div className="mouse-warning-banner role-warning" role="status">⚠ 有 {annotations.filter((a) => a.participant_status === "needs_participants").length} 条行为标注角色待补全；草稿可继续保存，补全前不能提交审核。</div> : null}
@@ -2149,6 +2137,18 @@ export default function AnnotatePage() {
 
       <div className="annotate-body">
         <section className="annotate-main">
+          {visibleRejection ? (
+            <section className="annotation-rejection" aria-labelledby="annotation-rejection-title">
+              <div className="annotation-rejection-heading">
+                <strong id="annotation-rejection-title">退回意见</strong>
+                <span>请按意见修改后重新提交</span>
+              </div>
+              <p>{rejectionComment(visibleRejection)}</p>
+              <div className="annotation-rejection-meta">
+                审核人 {visibleRejection.reviewer ?? `#${visibleRejection.reviewer_id}`} · {formatDate(visibleRejection.created_at)}
+              </div>
+            </section>
+          ) : null}
           <div className="card player-card">
             <div className="video-wrap">
               <video
@@ -2216,9 +2216,6 @@ export default function AnnotatePage() {
                   >
                     进一帧 [→] ⟩
                   </button>
-                  <span className="time-display">
-                    <b>{formatTime(currentTime)}</b> / {timelineDuration ? formatTime(timelineDuration) : "?"}
-                  </span>
                   <span className="flex-spacer" />
                   <div className="workspace-tabs" role="tablist" aria-label="标注工作模式">
                     <button id="behavior-tab" type="button" role="tab" aria-selected={workspaceMode === "behavior"} aria-controls="behavior-panel" tabIndex={workspaceMode === "behavior" ? 0 : -1} className={workspaceMode === "behavior" ? "active" : ""} onClick={() => setWorkspaceMode("behavior")} onKeyDown={(e) => { if (e.key === "ArrowRight" && detectionImport) { e.preventDefault(); e.stopPropagation(); setWorkspaceMode("identity"); document.getElementById("identity-tab")?.focus(); } }}>行为标注</button>
@@ -2262,13 +2259,21 @@ export default function AnnotatePage() {
                   </button>
                 </div>
 
-                <div className="draft-summary" style={{ padding: "0 10px 8px" }}>
-                  <strong>未保存行为</strong>
-                  <span className={activeCategory ? "" : "pending"}>· 类别 {activeCategory ? "✓" : "—"}</span>
-                  <span className={startPoint ? "" : "pending"}>· 开始 {startPoint ? "✓" : "—"}</span>
-                  <span className={endPoint ? "" : "pending"}>· 结束 {endPoint ? "✓" : "—"}</span>
-                  <span>· 参与对象 {behaviorSelectedIds.length}</span>
-                  {draftIntervalInvalid ? <span className="invalid">· 区间待修正</span> : null}
+                <div className="draft-summary">
+                  <div className="draft-summary-row">
+                    <div className="draft-state-summary">
+                      <strong>未保存行为</strong>
+                      <span className={activeCategory ? "" : "pending"}>· 类别 {activeCategory ? "✓" : "—"}</span>
+                      <span className={startPoint && endPoint && !draftIntervalInvalid ? "" : draftIntervalInvalid ? "invalid" : "pending"}>· 区间 {startPoint && endPoint && !draftIntervalInvalid ? "✓" : "—"}</span>
+                      <span>· 参与对象 {behaviorSelectedIds.length}</span>
+                    </div>
+                    <div className="draft-time-context">
+                      <span>当前 <b>{formatTime(currentTime)}</b></span>
+                      <span>起点 <b>{startDisplayTime != null ? `${formatTime(startDisplayTime)}（帧 ${startPoint?.frame}）` : startPoint ? `帧 ${startPoint.frame}` : "未设置"}</b></span>
+                      <span>终点 <b>{endDisplayTime != null ? `${formatTime(endDisplayTime)}（帧 ${endPoint?.frame} inclusive）` : endPoint ? `帧 ${endPoint.frame}` : "未设置"}</b></span>
+                    </div>
+                  </div>
+                  {hint || saveState !== "idle" ? <div className="draft-feedback"><span className="hint">{hint}</span><SaveStatus state={saveState} message={errorMsg} /></div> : null}
                   <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
                     {`未保存行为。类别${activeCategory ? `：${activeCategory.name}` : "未设置"}；开始${startPoint ? `：帧 ${startPoint.frame}${startDisplayTime == null ? "" : `，${formatTime(startDisplayTime)}`}` : "未设置"}；结束${endPoint ? `：帧 ${endPoint.frame}${endDisplayTime == null ? "" : `，${formatTime(endDisplayTime)}`}` : "未设置"}；参与对象 ${behaviorSelectedIds.length} 个${draftIntervalInvalid ? "；区间待修正" : ""}。`}
                   </span>
@@ -2299,26 +2304,6 @@ export default function AnnotatePage() {
             ) : null}
           </div>
 
-          <div className="statusbar">
-            <span>
-              时间 <b className="mono">{formatTime(currentTime)}</b>
-            </span>
-            <span>
-              开始{" "}
-              <b className="mono">
-                {startDisplayTime != null ? `${formatTime(startDisplayTime)}（帧 ${startPoint?.frame}）` : startPoint ? `帧 ${startPoint.frame}` : "未设置"}
-              </b>
-            </span>
-            <span>
-              结束{" "}
-              <b className="mono">
-                {endDisplayTime != null ? `${formatTime(endDisplayTime)}（帧 ${endPoint?.frame} inclusive）` : endPoint ? `帧 ${endPoint.frame}` : "未设置"}
-              </b>
-            </span>
-            <span className="flex-spacer" />
-            <span className="hint">{hint}</span>
-            <SaveStatus state={saveState} message={errorMsg} />
-          </div>
         </section>
 
         <aside className="annotate-side">

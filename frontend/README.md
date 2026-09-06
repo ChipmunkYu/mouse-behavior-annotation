@@ -40,7 +40,7 @@
   - 行为标注列表支持 PATCH 类别/时间、DELETE 删除。
   - 标注页不再提供单视频“导出 JSON”下载按钮；legacy `GET .../annotations/export`、前端 API wrapper 与类型继续保留以兼容既有调用，但不替代正式项目 ZIP 导出页。
   - 保存中 / 已保存 / 失败状态提示。
-  - **批次 3 审核工作流**：顶部清晰显示视频工作流状态与行为标注版本（草稿 / 待审核 / 已通过 / 已退回，即 `draft/submitted/approved/rejected`，以及提交/通过时间）；`draft/rejected` 可「提交审核」（至少一条标注、有 detection import、无 `needs_mouse_ids`，有确认），`submitted` 显示「等待审核」，`approved` 显示「已通过」。最近一次审核结果为退回，且视频为 `rejected` 或开始修改后变回 `draft` 时，工作区上方持续展示该次退回意见、审核人和时间；重新提交为 `submitted`、通过或后续审核已覆盖该退回结果时隐藏。单条行为标注的 `review_status` 是独立的 `pending/approved/rejected`，不得与视频工作流混用。标注 CRUD 的非草稿失效与 track 修正的细粒度失效范围不同：track 修正后全部 Annotation 被重校验，有效项推进修订，无效项 `needs_mouse_ids`；仅实际受影响的 approved 单条标注改 pending，视频仅在 submitted/approved 时退回 draft，不声称全部审核状态重置。
+  - **批次 3 审核工作流**：顶部清晰显示视频工作流状态与行为标注版本（草稿 / 待审核 / 已通过 / 已退回，即 `draft/submitted/approved/rejected`，以及提交/通过时间）；`draft/rejected` 可「提交审核」（至少一条标注、有 detection import、无 `needs_mouse_ids`，有确认），`submitted` 显示「等待审核」，`approved` 显示「已通过」。最近一次审核结果为退回，且视频为 `rejected` 或开始修改后变回 `draft` 时，左侧视频列顶部持续展示该次退回意见、审核人和时间；正文超出固定可读高度时仅在卡片内纵向滚动，重新提交为 `submitted`、通过或后续审核已覆盖该退回结果时隐藏。单条行为标注的 `review_status` 是独立的 `pending/approved/rejected`，不得与视频工作流混用。标注 CRUD 的非草稿失效与 track 修正的细粒度失效范围不同：track 修正后全部 Annotation 被重校验，有效项推进修订，无效项 `needs_mouse_ids`；仅实际受影响的 approved 单条标注改 pending，视频仅在 submitted/approved 时退回 draft，不声称全部审核状态重置。
   - **批次 4 媒体状态**：approved 视频在侧栏只读展示「媒体片段生成」面板（总数/就绪/处理中/待处理/失败、aria 进度条、最近任务状态；无生成 / 重试按钮），仅在任务进行中轮询，任务落定或离开页面即停止。
 - **审核工作台** `/projects/:projectId/review`：
   - 待审队列（仅元数据，避免一次加载全部视频的标注与流）；选中后按需加载标注 / 类别 / 审核历史 / 视频流。

@@ -1148,11 +1148,12 @@ a:focus-visible,
 
 .annotation-rejection {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 7px;
-  align-self: flex-start;
-  width: fit-content;
-  min-width: min(100%, 36ch);
-  max-width: min(100%, 68ch);
+  flex: none;
+  width: 100%;
+  height: 152px;
+  min-width: 0;
   box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
@@ -1182,7 +1183,10 @@ a:focus-visible,
 }
 
 .annotation-rejection p {
+  min-height: 0;
   margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   color: var(--text);
   font-size: 12px;
   line-height: 1.55;
@@ -1627,28 +1631,6 @@ a:focus-visible,
   font-family: var(--mono);
 }
 
-/* 状态栏 */
-.statusbar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  padding: 7px 10px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 12px;
-  color: var(--text-2);
-}
-
-.statusbar b {
-  color: var(--text);
-}
-
-.statusbar .hint {
-  color: var(--text-3);
-}
-
 .save-pill {
   display: inline-flex;
   align-items: center;
@@ -1675,16 +1657,60 @@ a:focus-visible,
 }
 
 .draft-summary {
-  display: inline-flex;
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 8px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.draft-summary-row,
+.draft-state-summary,
+.draft-time-context,
+.draft-feedback {
+  display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--text-2);
+  min-width: 0;
+}
+
+.draft-summary-row {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.draft-state-summary,
+.draft-time-context {
+  flex-wrap: wrap;
   font-family: var(--mono);
 }
 
-.draft-summary strong { color: var(--text); }
+.draft-time-context {
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.draft-time-context span {
+  white-space: nowrap;
+}
+
+.draft-summary strong,
+.draft-time-context b { color: var(--text); }
 .draft-summary .pending { color: var(--text-3); }
 .draft-summary .invalid { color: var(--danger); font-weight: 700; }
+
+.draft-feedback {
+  justify-content: flex-end;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+
+.draft-feedback .hint {
+  min-width: 0;
+  margin-right: auto;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
 
 .draft-errors {
   margin: 0 10px 10px;
@@ -1770,8 +1796,7 @@ a:focus-visible,
     object-fit: contain;
   }
 
-  .player-controls,
-  .statusbar {
+  .player-controls {
     flex: none;
   }
 }
@@ -1872,6 +1897,12 @@ a:focus-visible,
 
   .player-controls .btn {
     flex: 1;
+  }
+
+  .draft-time-context {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
   }
 
   .annotate-page > .annotate-header .annotate-video-nav {

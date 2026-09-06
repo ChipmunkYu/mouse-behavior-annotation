@@ -12,6 +12,16 @@ describe("annotation and project export entry points", () => {
 
   it("does not show the obsolete participant selection instruction", () => {
     expect(annotateSource).not.toContain("点击视频框或下方 track ID 选择参与对象");
+    expect(annotateSource).toContain('selected.length ? <div className="selected-mice"');
+    expect(annotateSource).not.toContain("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
+  });
+
+  it("keeps rejection feedback inside the left workspace column and merges time context into the draft summary", () => {
+    expect(annotateSource).toMatch(/<div className="annotate-body">\s*<section className="annotate-main">\s*\{visibleRejection \? \(/);
+    expect(annotateSource.indexOf('className="annotation-rejection"')).toBeLessThan(annotateSource.indexOf('className="card player-card"'));
+    expect(annotateSource).toContain('className="draft-time-context"');
+    expect(annotateSource).not.toContain('className="statusbar"');
+    expect(annotateSource).not.toContain('className="time-display"');
   });
 
   it("keeps the formal project ZIP export page", () => {
