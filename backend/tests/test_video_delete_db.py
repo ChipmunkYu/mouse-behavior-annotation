@@ -310,6 +310,8 @@ def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):
         assert db.get(Video, video_id) is None
         assert not db.query(BackgroundJob).filter(
             BackgroundJob.id.in_(frozen.terminal_job_ids)).count()
+    with ctx.session_factory() as checkout:
+        assert checkout.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
 
 
 def test_delete_and_residual_checks_chunk_ids_and_composite_keys(
@@ -844,3 +846,189 @@ def test_trigger_drop_fault_rolls_back_schema_and_rows(ctx, tmp_path):
             db.query(SubmissionAnnotation).filter_by(id=protected_id).delete()
         db.rollback()
         assert db.get(SubmissionAnnotation, protected_id) is not None
+    with ctx.session_factory() as checkout:
+        assert checkout.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+
+
+def test_begin_failure_restores_foreign_keys(ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+
+    def fail_begin(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement == "BEGIN IMMEDIATE":
+            raise SQLAlchemyError("injected begin failure")
+
+    event.listen(engine, "before_cursor_execute", fail_begin)
+    try:
+        with pytest.raises(VideoDeleteIntegrityError, match="Database integrity"):
+            delete_frozen_video(ctx.session_factory, frozen, settings=settings)
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_begin)
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is not None
+        assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+
+
+def test_foreign_key_check_failure_rolls_back_and_restores(ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+
+    def fail_check(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement == "PRAGMA foreign_key_check":
+            raise SQLAlchemyError("injected check failure")
+
+    event.listen(engine, "before_cursor_execute", fail_check)
+    try:
+        with pytest.raises(VideoDeleteIntegrityError, match="Database integrity"):
+            delete_frozen_video(ctx.session_factory, frozen, settings=settings)
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_check)
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is not None
+        assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+
+
+def test_rollback_failure_invalidates_connection_and_preserves_original_error(
+        ctx, tmp_path, monkeypatch):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+    invalidated = []
+    connected = []
+
+    def record_invalidation(connection, *_args):
+        invalidated.append(connection)
+
+    def record_connection(connection, *_args):
+        connected.append(connection)
+
+    event.listen(engine, "invalidate", record_invalidation)
+    event.listen(engine, "connect", record_connection)
+
+    def fail_rollback(_db):
+        raise SQLAlchemyError("injected rollback failure")
+
+    def fail_business(_stage):
+        raise RuntimeError("original business failure")
+
+    monkeypatch.setattr(video_delete_db.Session, "rollback", fail_rollback)
+    try:
+        with pytest.raises(RuntimeError, match="original business failure"):
+            delete_frozen_video(
+                ctx.session_factory, frozen, settings=settings,
+                fault_hook=fail_business,
+            )
+        assert invalidated
+        with ctx.session_factory() as db:
+            assert db.get(Video, video_id) is not None
+            assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+        assert connected[-1] is not invalidated[-1]
+    finally:
+        event.remove(engine, "connect", record_connection)
+        event.remove(engine, "invalidate", record_invalidation)
+
+
+def test_success_foreign_key_transaction_event_order(ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+    events = []
+
+    def record_sql(_conn, cursor, statement, _parameters, _context, _executemany):
+        normalized = " ".join(statement.lower().split())
+        if normalized == "pragma foreign_keys=0":
+            events.append("foreign_keys OFF")
+        elif normalized == "begin immediate":
+            events.append("BEGIN IMMEDIATE")
+        elif normalized == "pragma foreign_key_check":
+            assert _conn.in_transaction()
+            assert cursor.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+            events.append("foreign_key_check")
+        elif normalized == "pragma foreign_keys=1":
+            events.append("foreign_keys ON")
+
+    def record_commit(_conn):
+        events.append("COMMIT")
+
+    event.listen(engine, "before_cursor_execute", record_sql)
+    event.listen(engine, "commit", record_commit)
+    try:
+        delete_frozen_video(ctx.session_factory, frozen, settings=settings)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_sql)
+        event.remove(engine, "commit", record_commit)
+    assert events == [
+        "foreign_keys OFF", "BEGIN IMMEDIATE", "foreign_key_check", "COMMIT",
+        "foreign_keys ON",
+    ]
+
+
+def test_initial_foreign_keys_off_is_rejected_and_connection_invalidated(
+        ctx, tmp_path):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+    invalidated = []
+    def record_invalidation(*_args):
+        invalidated.append(True)
+    def disable_foreign_keys(dbapi_connection, *_args):
+        dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+    event.listen(engine, "invalidate", record_invalidation)
+    event.listen(engine, "checkout", disable_foreign_keys)
+    try:
+        with pytest.raises(VideoDeleteIntegrityError, match="not enabled"):
+            delete_frozen_video(ctx.session_factory, frozen, settings=settings)
+    finally:
+        event.remove(engine, "checkout", disable_foreign_keys)
+        event.remove(engine, "invalidate", record_invalidation)
+    assert invalidated
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is not None
+        assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+
+
+def test_restore_failure_after_commit_returns_success_and_discards_connection(
+        ctx, tmp_path, monkeypatch):
+    project_id, video_id, actor_id, _ = _base(ctx)
+    settings = _settings(tmp_path)
+    with ctx.session_factory() as db:
+        frozen = _freeze(db, settings, project_id, video_id, actor_id)
+        db.rollback()
+    engine = ctx.session_factory.kw["bind"]
+    invalidated = []
+    def record_invalidation(*_args):
+        invalidated.append(True)
+    event.listen(engine, "invalidate", record_invalidation)
+    original = video_delete_db._sqlite_foreign_keys
+
+    def fail_restore(connection, enabled=None):
+        if enabled is True:
+            raise SQLAlchemyError("injected restore failure")
+        return original(connection, enabled)
+
+    monkeypatch.setattr(video_delete_db, "_sqlite_foreign_keys", fail_restore)
+    try:
+        delete_frozen_video(ctx.session_factory, frozen, settings=settings)
+    finally:
+        event.remove(engine, "invalidate", record_invalidation)
+    assert invalidated
+    with ctx.session_factory() as db:
+        assert db.get(Video, video_id) is None
+        assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 1

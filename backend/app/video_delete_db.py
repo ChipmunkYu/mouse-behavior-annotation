@@ -7,6 +7,7 @@ independent SQLite ``BEGIN IMMEDIATE`` transaction completely.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -28,6 +29,9 @@ from .models import (
 )
 from .related_video_jobs import identify_related_video_jobs
 from .video_delete_io import DeletePath
+
+
+logger = logging.getLogger(__name__)
 
 
 class VideoDeleteDBError(RuntimeError):
@@ -622,6 +626,21 @@ def _same_frozen_graph(current: FrozenVideoDelete, frozen: FrozenVideoDelete) ->
     return current_regular == frozen_regular and current_ephemeral <= frozen_ephemeral
 
 
+def _sqlite_foreign_keys(connection, enabled: bool | None = None) -> int:
+    """Set (optionally) and read FK enforcement while SQLite has no transaction."""
+    if connection.in_transaction():
+        raise VideoDeleteIntegrityError("Foreign-key mode cannot change during a transaction")
+    try:
+        if enabled is not None:
+            connection.exec_driver_sql(f"PRAGMA foreign_keys={1 if enabled else 0}")
+            connection.rollback()  # End SQLAlchemy's logical autobegin; PRAGMA is connection state.
+        value = connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+        return int(value)
+    finally:
+        if connection.in_transaction():
+            connection.rollback()
+
+
 def delete_frozen_video(session_source, frozen: FrozenVideoDelete, *, settings: Settings,
                         fault_hook: Callable[[str], None] | None = None) -> None:
     """Own an independent IMMEDIATE transaction and atomically delete ``frozen``.
@@ -634,26 +653,66 @@ def delete_frozen_video(session_source, frozen: FrozenVideoDelete, *, settings: 
     factory = sessionmaker(bind=session_source) if isinstance(session_source, Engine) else session_source
     if not callable(factory):
         raise VideoDeleteIntegrityError("A session factory or engine is required")
-    db = factory()
-    if not isinstance(db, Session):
+    probe = factory()
+    if not isinstance(probe, Session):
         raise VideoDeleteIntegrityError("The session factory returned an invalid session")
-    if db.in_transaction():
+    if probe.in_transaction():
         # Do not rollback or close a possibly shared/scoped caller transaction.
         raise VideoDeleteIntegrityError("The deletion session already has a transaction")
+    engine = probe.get_bind()
+    probe.close()
+    if not isinstance(engine, Engine) or engine.dialect.name != "sqlite":
+        raise VideoDeleteIntegrityError("Hard video deletion requires SQLite")
+
+    connection = engine.connect()
+    db = Session(bind=connection)
+    foreign_keys_may_be_off = False
+    committed = False
     try:
-        if db.get_bind().dialect.name != "sqlite":
-            raise VideoDeleteIntegrityError("Hard video deletion requires SQLite")
+        if _sqlite_foreign_keys(connection) != 1:
+            connection.invalidate()
+            raise VideoDeleteIntegrityError("SQLite foreign-key enforcement is not enabled")
+        foreign_keys_may_be_off = True
+        if _sqlite_foreign_keys(connection, False) != 0:
+            raise VideoDeleteIntegrityError("SQLite foreign-key enforcement could not be disabled")
         db.execute(text("BEGIN IMMEDIATE"))
         _delete_frozen_video_core(db, frozen, settings=settings, fault_hook=fault_hook)
         db.commit()
-    except VideoDeleteDBError:
-        db.rollback()
-        raise
-    except SQLAlchemyError as exc:
-        db.rollback()
-        raise VideoDeleteIntegrityError("Database integrity prevented video deletion") from exc
-    except BaseException:
-        db.rollback()
+        committed = True
+    except BaseException as exc:
+        try:
+            db.rollback()
+        except BaseException:
+            logger.critical("Failed to roll back video-delete transaction", exc_info=True)
+            connection.invalidate()
+        if foreign_keys_may_be_off and not connection.invalidated:
+            try:
+                if _sqlite_foreign_keys(connection, True) != 1:
+                    raise VideoDeleteIntegrityError(
+                        "SQLite foreign-key enforcement could not be restored")
+            except BaseException:
+                logger.critical("Failed to restore SQLite foreign keys after video-delete rollback",
+                                exc_info=True)
+                connection.invalidate()
+        elif not connection.invalidated:
+            # Initial mode could not be proved ON, so this physical connection is unsafe.
+            connection.invalidate()
+        if isinstance(exc, VideoDeleteDBError):
+            raise
+        if isinstance(exc, SQLAlchemyError):
+            raise VideoDeleteIntegrityError("Database integrity prevented video deletion") from exc
         raise
     finally:
         db.close()
+        if committed and not connection.invalidated:
+            try:
+                if _sqlite_foreign_keys(connection, True) != 1:
+                    raise VideoDeleteIntegrityError(
+                        "SQLite foreign-key enforcement could not be restored")
+            except BaseException:
+                # The database commit is authoritative: reporting failure would make the
+                # service restore quarantined media for rows which no longer exist.
+                logger.critical("Failed to restore SQLite foreign keys after committed video delete",
+                                exc_info=True)
+                connection.invalidate()
+        connection.close()
