@@ -207,7 +207,7 @@ class DisplayProxyProcessor:
             raise DisplayProxyError("media probe omitted duration or frame count") from None
         if not math.isfinite(duration) or duration <= 0 or frames <= 0:
             raise DisplayProxyError("media duration and frame count must be positive")
-        if abs(frames - duration * fps) > max(2.0, fps * 0.1):
+        if output and abs(frames - duration * fps) > max(2.0, fps * 0.1):
             raise DisplayProxyError("media frame count, duration, and FPS are inconsistent")
         if output:
             if (video.get("codec_name") != "h264" or video.get("pix_fmt") != "yuv420p"

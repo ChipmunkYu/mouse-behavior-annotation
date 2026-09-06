@@ -81,6 +81,13 @@ def test_source_metrics_accepts_realistic_30fps_vfr_rates():
     assert (duration, frames) == (179.9834, 5402)
 
 
+def test_frame_count_duration_consistency_is_only_required_for_output():
+    document = _probe(frames="300", duration="20.0")
+    assert DisplayProxyProcessor._metrics(document, output=False) == (30.0, 20.0, 300)
+    with pytest.raises(DisplayProxyError, match="inconsistent"):
+        DisplayProxyProcessor._metrics(document, output=True)
+
+
 @pytest.mark.parametrize("change", [{"sar": "4:3"}, {"rotation": 90}])
 def test_source_rejects_non_square_sar_and_rotation(change):
     with pytest.raises(UnsupportedDisplaySource):
@@ -173,6 +180,14 @@ def test_render_probes_transcodes_then_fully_decodes(monkeypatch):
     assert calls[0] == processor.transcode_command("in.mp4", "out.part", "30/1")
     assert calls[1] == ["faststart", "out.part"]
     assert calls[2][-4:] == ["0:v:0", "-f", "null", "-"]
+
+
+def test_render_rejects_source_timestamp_timeline_inconsistency(monkeypatch):
+    processor = DisplayProxyProcessor()
+    monkeypatch.setattr(processor, "probe", lambda _path: _probe(duration="20.0"))
+    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: _timestamps())
+    with pytest.raises(UnsupportedDisplaySource, match="timestamps and duration"):
+        processor.render(input_path="in.mp4", output_path="out.part")
 
 
 @pytest.mark.parametrize(("output", "message"), [
