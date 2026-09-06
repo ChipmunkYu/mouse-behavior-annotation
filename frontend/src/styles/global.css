@@ -1149,6 +1149,11 @@ a:focus-visible,
 .annotation-rejection {
   display: grid;
   gap: 7px;
+  align-self: flex-start;
+  width: fit-content;
+  min-width: min(100%, 36ch);
+  max-width: min(100%, 68ch);
+  box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
   border-left: 4px solid var(--danger);
@@ -1160,6 +1165,7 @@ a:focus-visible,
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -1172,6 +1178,7 @@ a:focus-visible,
 .annotation-rejection-meta {
   color: var(--text-2);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .annotation-rejection p {

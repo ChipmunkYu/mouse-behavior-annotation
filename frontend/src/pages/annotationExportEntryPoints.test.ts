@@ -10,6 +10,10 @@ describe("annotation and project export entry points", () => {
     expect(annotateSource).not.toContain("exportAnnotations");
   });
 
+  it("does not show the obsolete participant selection instruction", () => {
+    expect(annotateSource).not.toContain("点击视频框或下方 track ID 选择参与对象");
+  });
+
   it("keeps the formal project ZIP export page", () => {
     expect(exportSource).toContain("开始导出 ZIP");
     expect(exportSource).toContain("createExport");
