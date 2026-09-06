@@ -2521,6 +2521,34 @@ a:focus-visible,
   display: none;
 }
 
+.review-rail-tabs {
+  display: inline-flex;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+
+.review-rail-tabs button {
+  flex: 1;
+  border: 0;
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.review-rail-tabs button.active {
+  background: var(--bg-elev);
+  color: var(--accent);
+  box-shadow: var(--shadow);
+  font-weight: 700;
+}
+
 .review-queue {
   display: flex;
   flex-direction: column;

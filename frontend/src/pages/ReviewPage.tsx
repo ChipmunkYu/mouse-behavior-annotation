@@ -202,7 +202,7 @@ export default function ReviewPage() {
   const [reviewDisabled, setReviewDisabled] = useState(true);
   const selectGenRef = useRef(0);
   const selectedVideoRef = useRef<Video | null>(null);
-  const queueButtonRef = useRef<HTMLButtonElement>(null);
+  const queueTabRef = useRef<HTMLButtonElement>(null);
   const queuePanelRef = useRef<HTMLElement>(null);
   const mainHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusMainAfterSelectionRef = useRef(false);
@@ -311,7 +311,7 @@ export default function ReviewPage() {
 
   function closeQueue(returnFocus = true) {
     setQueueOpen((open) => nextReviewQueueOpen(open, "close"));
-    if (returnFocus) window.requestAnimationFrame(() => queueButtonRef.current?.focus());
+    if (returnFocus) window.requestAnimationFrame(() => queueTabRef.current?.focus());
   }
 
   function handleQueueKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
@@ -444,7 +444,7 @@ export default function ReviewPage() {
     if (e.code === "Escape" && queueOpen) {
       e.preventDefault();
       setQueueOpen((open) => nextReviewQueueOpen(open, "escape"));
-      window.requestAnimationFrame(() => queueButtonRef.current?.focus());
+      window.requestAnimationFrame(() => queueTabRef.current?.focus());
       return;
     }
     if (e.code === "Escape" && focusedAnnotationId != null) {
@@ -555,16 +555,6 @@ export default function ReviewPage() {
           </div>
         ) : null}
         <div className="actions">
-          <button
-            ref={queueButtonRef}
-            type="button"
-            className="btn btn-sm"
-            aria-expanded={queueOpen}
-            aria-controls="review-queue-panel"
-            onClick={() => setQueueOpen((open) => nextReviewQueueOpen(open, "toggle"))}
-          >
-            审核队列 {queue?.length ?? 0}
-          </button>
           <button type="button" className="btn btn-sm" onClick={() => void loadQueue()}>
             刷新队列
           </button>
@@ -595,6 +585,28 @@ export default function ReviewPage() {
             className={`review-rail${queueOpen ? " queue-open" : ""}`}
             onKeyDown={handleQueueKeyDown}
           >
+            <div className="review-rail-tabs" role="tablist" aria-label="审核视图">
+              <button
+                ref={queueTabRef}
+                type="button"
+                role="tab"
+                aria-selected={queueOpen}
+                aria-controls="review-queue-panel"
+                className={queueOpen ? "active" : ""}
+                onClick={() => setQueueOpen(true)}
+              >
+                审核队列 {queue?.length ?? 0}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!queueOpen}
+                className={!queueOpen ? "active" : ""}
+                onClick={() => setQueueOpen(false)}
+              >
+                审核裁决
+              </button>
+            </div>
             {queueOpen ? (
               <Card
                 title={`审核队列（${queue?.length ?? 0}）`}

@@ -37,9 +37,11 @@ describe("review workspace layout", () => {
   });
 
   it("keeps queue and history accessibility contracts without media generation UI", () => {
-    expect(reviewSource).toContain('aria-expanded={queueOpen}');
+    expect(reviewSource).toContain('role="tablist"');
+    expect(reviewSource).toContain('aria-selected={queueOpen}');
+    expect(reviewSource).not.toContain('aria-expanded={queueOpen}');
     expect(reviewSource).toContain('aria-controls="review-queue-panel"');
-    expect(reviewSource).toContain('queueButtonRef.current?.focus()');
+    expect(reviewSource).toContain('queueTabRef.current?.focus()');
     expect(reviewSource).toContain('<details className="review-history-details">');
     expect(reviewSource).not.toContain('<details className="review-history-details" open');
     expect(reviewSource).not.toContain("MediaStatusPanel");
