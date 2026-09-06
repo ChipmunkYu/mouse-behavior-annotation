@@ -1145,6 +1145,43 @@ a:focus-visible,
 .mouse-id-item.keyboard-focused, .identity-track.keyboard-focused { outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: 0 0 0 3px var(--accent-weak); }
 .participant-nav-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: var(--radius); background: var(--accent-weak); color: var(--accent); font-size: 11px; font-weight: 700; }
 .mouse-rule-warning, .mouse-warning-banner { padding: 7px 10px; border: 1px solid var(--warn); border-radius: var(--radius); background: var(--warn-weak); color: var(--warn); font-size: 11px; }
+
+.annotation-rejection {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-weak);
+}
+
+.annotation-rejection-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.annotation-rejection-heading strong {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.annotation-rejection-heading span,
+.annotation-rejection-meta {
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.annotation-rejection p {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .mouse-status.warning { color: var(--warn); font-weight: 700; }
 .role-slots-panel .card-body { display: grid; gap: 9px; }.role-slot-legend { color: var(--text-3); font-size: 10px; }
 .role-slots { display: flex; gap: 7px; overflow-x: auto; padding: 2px 1px 5px; scroll-snap-type: x proximity; }

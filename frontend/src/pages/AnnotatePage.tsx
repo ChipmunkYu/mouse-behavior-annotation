@@ -3,11 +3,11 @@ import { Link, useBlocker, useNavigate, useParams, useSearchParams } from "react
 import {
   createAnnotation,
   deleteAnnotation,
-  exportAnnotations,
   listAnnotations,
   listCategories,
   listDetectionSuppressions,
   listProjects,
+  listVideoReviews,
   listVideos,
   submitVideoForReview,
   updateAnnotation,
@@ -30,6 +30,7 @@ import type {
   DetectionWithTrack,
   DetectionSuppression,
   IdentityEditResult,
+  Review,
 } from "../api/types";
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
@@ -43,6 +44,7 @@ import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, fr
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
 import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
 import { useMediaSource } from "../media";
+import { latestVisibleRejection, rejectionComment } from "./annotateReviewFeedback";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type Point = { frame: number };
@@ -807,6 +809,8 @@ export default function AnnotatePage() {
   const [confirmDialog, confirm] = useConfirm();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [reviewHistory, setReviewHistory] = useState<Review[]>([]);
+  const reviewRequestRef = useRef(0);
   const [hint, setHint] = useState("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
 
   useEffect(() => {
@@ -832,6 +836,7 @@ export default function AnnotatePage() {
   // 同一组件承载相邻视频路由；路由变化时先彻底移除旧视频的交互与临时状态。
   useLayoutEffect(() => {
     loadAllRequestRef.current += 1;
+    reviewRequestRef.current += 1;
     navigationPendingRef.current = false;
     allowNavigationRef.current = false;
     const element = videoRef.current;
@@ -884,7 +889,20 @@ export default function AnnotatePage() {
     setAnnotationMutationBusy(false);
     setNavigationPending(false);
     setErrorMsg(null);
+    setReviewHistory([]);
     setHint("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
+  }, [pid, vid]);
+
+  useEffect(() => {
+    const requestId = ++reviewRequestRef.current;
+    setReviewHistory([]);
+    listVideoReviews(pid, vid)
+      .then((reviews) => {
+        if (reviewRequestRef.current === requestId) setReviewHistory(reviews);
+      })
+      .catch(() => {
+        if (reviewRequestRef.current === requestId) setReviewHistory([]);
+      });
   }, [pid, vid]);
 
   // 供键盘监听读取最新值（避免闭包过期）
@@ -1691,26 +1709,6 @@ export default function AnnotatePage() {
     }
   }
 
-  async function handleExport() {
-    setErrorMsg(null);
-    try {
-      const events = await exportAnnotations(pid, vid);
-      const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json;charset=utf-8" });
-      const base = video?.filename?.replace(/\.[^/.]+$/, "") ?? `video_${vid}`;
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `${base}_annotations.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      // 延迟回收 object URL，确保下载请求已完成携带 blob（部分浏览器同步 revoke 会中断下载）
-      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-      setHint(`已导出 ${events.length} 条行为事件 JSON`);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "导出失败");
-    }
-  }
-
   function clearDraft(keepCategory = false) {
     const retainedCategory = keepCategory ? activeCategory : null;
     setStartPoint(null);
@@ -2058,6 +2056,7 @@ export default function AnnotatePage() {
     ].filter(Boolean).join("；");
   }, [annotations, detectionImport, invalidTrackCounts]);
   const visibleIdentityEditFeedback = identityEditFeedbackForRoute(identityEditFeedback, `${pid}:${vid}`);
+  const visibleRejection = latestVisibleRejection(reviewHistory, video?.workflow_status);
 
   return (
     <div className="annotate-page">
@@ -2126,13 +2125,22 @@ export default function AnnotatePage() {
           <button type="button" className="btn btn-sm" onClick={() => void loadAnnotations()}>
             刷新行为标注
           </button>
-          <button type="button" className="btn btn-sm" onClick={() => void handleExport()}>
-            导出 JSON
-          </button>
         </div>
       </div>
 
       {errorMsg ? <div className="error-box" role="alert">⚠ {errorMsg}</div> : null}
+      {visibleRejection ? (
+        <section className="annotation-rejection" aria-labelledby="annotation-rejection-title">
+          <div className="annotation-rejection-heading">
+            <strong id="annotation-rejection-title">退回意见</strong>
+            <span>请按意见修改后重新提交</span>
+          </div>
+          <p>{rejectionComment(visibleRejection)}</p>
+          <div className="annotation-rejection-meta">
+            审核人 {visibleRejection.reviewer ?? `#${visibleRejection.reviewer_id}`} · {formatDate(visibleRejection.created_at)}
+          </div>
+        </section>
+      ) : null}
       {invalidTrackCounts.roleBased > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.roleBased} 条行为标注的 Track 已失效，需要重新分配；完成前不能提交审核。</div> : null}
       {invalidTrackCounts.unordered > 0 ? <div className="mouse-warning-banner" role="status">⚠ 有 {invalidTrackCounts.unordered} 条行为标注的 Track 已失效，需要重新选择；完成前不能提交审核。</div> : null}
       {annotations.some((a) => a.participant_status === "needs_participants") ? <div className="mouse-warning-banner role-warning" role="status">⚠ 有 {annotations.filter((a) => a.participant_status === "needs_participants").length} 条行为标注角色待补全；草稿可继续保存，补全前不能提交审核。</div> : null}
