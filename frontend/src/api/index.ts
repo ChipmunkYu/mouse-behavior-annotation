@@ -250,14 +250,14 @@ export function getCurrentDetectionImport(projectId: number | string, videoId: n
   return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detection-imports/current"]["get"]>(`/projects/${projectId}/videos/${videoId}/detection-imports/current`);
 }
 
-export function getDetections(projectId: number | string, videoId: number | string, startFrame: number, endFrame: number): Promise<DetectionsResponse> {
-  return apiFetch<DetectionsResponse>(`/projects/${projectId}/videos/${videoId}/detections?start_frame=${startFrame}&end_frame=${endFrame}`);
+export function getDetections(projectId: number | string, videoId: number | string, startFrame: number, endFrame: number, signal?: AbortSignal): Promise<DetectionsResponse> {
+  return apiFetch<DetectionsResponse>(`/projects/${projectId}/videos/${videoId}/detections?start_frame=${startFrame}&end_frame=${endFrame}`, { signal });
 }
 
-export function getCorrectedTracks(projectId: number | string, videoId: number | string, params: CorrectedTracksParams = {}): Promise<CorrectedTracksResponse> {
+export function getCorrectedTracks(projectId: number | string, videoId: number | string, params: CorrectedTracksParams = {}, signal?: AbortSignal): Promise<CorrectedTracksResponse> {
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => { if (value != null && value !== "") qs.set(key, String(value)); });
-  return apiFetch<CorrectedTracksResponse>(`/projects/${projectId}/videos/${videoId}/corrected-tracks${qs.size ? `?${qs}` : ""}`);
+  return apiFetch<CorrectedTracksResponse>(`/projects/${projectId}/videos/${videoId}/corrected-tracks${qs.size ? `?${qs}` : ""}`, { signal });
 }
 
 export function checkIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCheckRequest): Promise<IdentityEditCheckResponse> {

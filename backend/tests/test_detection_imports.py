@@ -14,6 +14,7 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1914,13 +1915,29 @@ def test_get_corrected_tracks(ctx, login_headers):
         assert t["detection_count"] > 0
         assert t["visible_in_current_frame"] is None
 
-    resp2 = ctx.client.get(
-        f"/api/projects/{pid}/videos/{vid}/corrected-tracks?current_frame=1",
-        headers=headers,
-    )
+    detection_selects = 0
+
+    def count_detection_selects(_conn, _cursor, statement, *_args):
+        nonlocal detection_selects
+        if statement.lstrip().lower().startswith("select") and "raw_detections" in statement.lower():
+            detection_selects += 1
+
+    engine = ctx.session_factory.kw["bind"]
+    event.listen(engine, "before_cursor_execute", count_detection_selects)
+    try:
+        resp2 = ctx.client.get(
+            f"/api/projects/{pid}/videos/{vid}/corrected-tracks?current_frame=2",
+            headers=headers,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_detection_selects)
+
+    assert resp2.status_code == 200, resp2.text
     body2 = resp2.json()
-    for t in body2["items"]:
-        assert t["visible_in_current_frame"] is not None
+    assert {
+        t["display_track_id"]: t["visible_in_current_frame"] for t in body2["items"]
+    } == {1: True, 2: False, 3: True}
+    assert detection_selects <= 2
 
     resp3 = ctx.client.get(
         f"/api/projects/{pid}/videos/{vid}/corrected-tracks?search=2",

@@ -1592,21 +1592,21 @@ def get_corrected_tracks(
     pages = max(1, math.ceil(total / page_size)) if total > 0 else 0
     summaries = summaries[(page - 1) * page_size:page * page_size]
 
+    visible_track_ids = set()
+    if current_frame is not None:
+        visible_track_ids = {
+            row.display_track_id
+            for row in effective_detection_query(
+                db,
+                imp.id,
+                start_frame=current_frame,
+                end_frame=current_frame,
+            ).all()
+        }
+
     items = []
     for row in summaries:
-        visible = None
-        if current_frame is not None:
-            visible = (
-                effective_detection_query(
-                    db,
-                    imp.id,
-                    start_frame=current_frame,
-                    end_frame=current_frame,
-                    display_track_id=row.display_track_id,
-                )
-                .first()
-                is not None
-            )
+        visible = None if current_frame is None else row.display_track_id in visible_track_ids
 
         items.append({
             "display_track_id": row.display_track_id,

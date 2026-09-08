@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CorrectedTrackSummary } from "../api/types";
-import { buildIdentityEditFeedback, identityEditFeedbackForRoute, mergePinnedTracks } from "./AnnotatePage";
+import { buildIdentityEditFeedback, identityEditFeedbackForRoute, mergePinnedTracks, tracksForOverlayFrame } from "./AnnotatePage";
 
 const track = (display_track_id: number): CorrectedTrackSummary => ({
   display_track_id,
@@ -47,5 +47,30 @@ describe("track 修正列表置顶", () => {
   it("补取返回 substring 匹配时只合并 exact track", () => {
     expect(mergePinnedTracks([track(1)], [20], [track(120), track(20), track(201)]).map((item) => item.display_track_id))
       .toEqual([20, 1]);
+  });
+});
+
+describe("当前帧 track 可见性", () => {
+  it("完整空帧隐藏未选 track，并保留已选 track", () => {
+    expect(tracksForOverlayFrame([track(1), track(2)], { status: "complete", detections: [] }, [2], false, ""))
+      .toEqual([{ ...track(2), visible_in_current_frame: false }]);
+  });
+
+  it("未加载或不完整时不隐藏任何 track", () => {
+    const expected = [
+      { ...track(1), visible_in_current_frame: null },
+      { ...track(2), visible_in_current_frame: null },
+    ];
+    expect(tracksForOverlayFrame([track(1), track(2)], { status: "loading", detections: [] }, [], false, "")).toEqual(expected);
+    expect(tracksForOverlayFrame([track(1), track(2)], { status: "incomplete", detections: [] }, [], false, "")).toEqual(expected);
+  });
+
+  it("只以 Overlay 返回的 display track ID 标记当前可见", () => {
+    const detections = [{ display_track_id: 2 }] as Parameters<typeof tracksForOverlayFrame>[1]["detections"];
+    expect(tracksForOverlayFrame([track(1), track(2)], { status: "complete", detections }, [], true, ""))
+      .toEqual([
+        { ...track(1), visible_in_current_frame: false },
+        { ...track(2), visible_in_current_frame: true },
+      ]);
   });
 });

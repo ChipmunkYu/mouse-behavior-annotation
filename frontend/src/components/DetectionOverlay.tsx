@@ -11,8 +11,25 @@ export interface OverlayOptions {
 }
 
 const DEFAULT_OPTIONS: OverlayOptions = { boxes: true, ids: true, keypoints: false, skeleton: false };
-const BLOCK_RADIUS = 15;
-const MAX_DETECTIONS_PER_REQUEST = 500;
+const BLOCK_SIZE = 31;
+const EMPTY_DETECTIONS: DetectionWithTrack[] = [];
+
+export type FrameDataStatus = "loading" | "complete" | "incomplete";
+export interface OverlayFrameData {
+  frame: number;
+  detections: DetectionWithTrack[];
+  detectionImport: DetectionImport | null;
+  status: FrameDataStatus;
+}
+
+export function detectionBlockForFrame(frame: number): { start: number; end: number } {
+  const start = Math.floor(Math.max(0, frame) / BLOCK_SIZE) * BLOCK_SIZE;
+  return { start, end: start + BLOCK_SIZE - 1 };
+}
+
+export function detectionRangeComplete(total: number, returned: number): boolean {
+  return total <= returned;
+}
 
 function pointXY(point: unknown): [number, number, number] | null {
   if (!point || typeof point !== "object") return null;
@@ -48,7 +65,7 @@ export default function DetectionOverlay({
   showOnlySelected?: boolean;
   interactive?: boolean;
   onToggleTrack?: (id: number) => void;
-  onFrameData?: (data: { frame: number; detections: DetectionWithTrack[]; detectionImport: DetectionImport | null }) => void;
+  onFrameData?: (data: OverlayFrameData) => void;
   options?: OverlayOptions;
   onOptionsChange?: (options: OverlayOptions) => void;
   refreshKey?: number;
@@ -57,7 +74,7 @@ export default function DetectionOverlay({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheRef = useRef(new Map<number, DetectionWithTrack[]>());
-  const pendingRef = useRef(new Set<string>());
+  const completeFramesRef = useRef(new Set<number>());
   const genRef = useRef(0);
   const hitCycleRef = useRef<{ key: string; index: number }>({ key: "", index: 0 });
   const [detectionImport, setDetectionImport] = useState<DetectionImport | null>(null);
@@ -73,8 +90,12 @@ export default function DetectionOverlay({
     if (!video) return Math.max(0, Math.floor(currentTime * fps));
     return Math.max(0, Math.floor(video.currentTime * fps));
   }, [currentTime, fps, video]);
+  const block = detectionBlockForFrame(frame);
 
-  const detections = cacheRef.current.get(frame) ?? [];
+  const detections = cacheRef.current.get(frame) ?? EMPTY_DETECTIONS;
+  const frameStatus: FrameDataStatus = completeFramesRef.current.has(frame)
+    ? "complete"
+    : cacheRef.current.has(frame) ? "incomplete" : "loading";
 
   const setOption = (key: keyof OverlayOptions, value: boolean) => {
     const next = { ...options, [key]: value };
@@ -85,7 +106,8 @@ export default function DetectionOverlay({
   useEffect(() => {
     let alive = true;
     cacheRef.current.clear();
-    pendingRef.current.clear();
+    completeFramesRef.current.clear();
+    setDetectionImport(null);
     setLoadState("loading");
     setTruncatedAt(null);
     genRef.current += 1;
@@ -102,37 +124,48 @@ export default function DetectionOverlay({
 
   useEffect(() => {
     if (!detectionImport || loadState !== "ready") return;
-    if (cacheRef.current.has(frame)) return;
-    const start = Math.max(0, frame - BLOCK_RADIUS);
-    const end = frame + BLOCK_RADIUS;
-    const key = `${start}-${end}-${detectionImport.revision}`;
-    if (pendingRef.current.has(key)) return;
-    pendingRef.current.add(key);
-    const currentGen = genRef.current;
-    getDetections(projectId, videoId, start, end)
-      .then(({ detections: rows, total }) => {
-        if (currentGen !== genRef.current) return;
-        for (let f = start; f <= end; f += 1) cacheRef.current.set(f, []);
-        for (const row of rows) {
-          const list = cacheRef.current.get(row.frame_index) ?? [];
-          list.push(row);
-          cacheRef.current.set(row.frame_index, list);
-        }
-        if (total >= MAX_DETECTIONS_PER_REQUEST) {
-          setTruncatedAt(start);
-          onTruncated?.(start);
-        } else {
-          setTruncatedAt(null);
-        }
-        setCacheVersion((v) => v + 1);
+    let blockComplete = true;
+    for (let f = block.start; f <= block.end; f += 1) blockComplete &&= completeFramesRef.current.has(f);
+    if (blockComplete) { setTruncatedAt(null); return; }
+    const controller = new AbortController();
+    const currentGen = ++genRef.current;
+
+    const loadRange = async (start: number, end: number): Promise<number | null> => {
+      const { detections: rows, total } = await getDetections(projectId, videoId, start, end, controller.signal);
+      if (controller.signal.aborted || currentGen !== genRef.current) return null;
+      if (!detectionRangeComplete(total, rows.length) && start < end) {
+        const middle = Math.floor((start + end) / 2);
+        const [left, right] = await Promise.all([loadRange(start, middle), loadRange(middle + 1, end)]);
+        return left ?? right;
+      }
+      for (let f = start; f <= end; f += 1) cacheRef.current.set(f, []);
+      for (const row of rows) {
+        const list = cacheRef.current.get(row.frame_index) ?? [];
+        list.push(row);
+        cacheRef.current.set(row.frame_index, list);
+      }
+      if (detectionRangeComplete(total, rows.length)) {
+        for (let f = start; f <= end; f += 1) completeFramesRef.current.add(f);
+      }
+      setCacheVersion((v) => v + 1);
+      return detectionRangeComplete(total, rows.length) ? null : start;
+    };
+
+    void loadRange(block.start, block.end)
+      .then((incompleteAt) => {
+        if (controller.signal.aborted || currentGen !== genRef.current) return;
+        setTruncatedAt(incompleteAt);
+        if (incompleteAt != null) onTruncated?.(incompleteAt);
       })
-      .catch(() => setLoadState("error"))
-      .finally(() => pendingRef.current.delete(key));
-  }, [detectionImport, frame, loadState, projectId, videoId, onTruncated]);
+      .catch((err: unknown) => {
+        if (!(err instanceof DOMException && err.name === "AbortError") && currentGen === genRef.current) setLoadState("error");
+      });
+    return () => controller.abort();
+  }, [block.end, block.start, detectionImport, loadState, projectId, videoId, onTruncated]);
 
   useEffect(() => {
-    onFrameData?.({ frame, detections, detectionImport });
-  }, [frame, cacheVersion, detectionImport, onFrameData, detections]);
+    onFrameData?.({ frame, detections, detectionImport, status: frameStatus });
+  }, [frame, cacheVersion, detectionImport, onFrameData, detections, frameStatus]);
 
   const geometry = useCallback(() => {
     const canvas = canvasRef.current;

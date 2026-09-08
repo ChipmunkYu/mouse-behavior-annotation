@@ -27,7 +27,6 @@ import type {
   Video,
   CorrectedTrackSummary,
   DetectionImport,
-  DetectionWithTrack,
   DetectionSuppression,
   IdentityEditResult,
   Review,
@@ -38,7 +37,7 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
-import DetectionOverlay from "../components/DetectionOverlay";
+import DetectionOverlay, { type OverlayFrameData } from "../components/DetectionOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, frameToStartTime } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
@@ -93,6 +92,24 @@ export function mergePinnedTracks(
   const seen = new Set<number>();
   return [...selectedTrackIds.map((id) => byId.get(id)), ...baseItems]
     .filter((item): item is CorrectedTrackSummary => item != null && !seen.has(item.display_track_id) && !!seen.add(item.display_track_id));
+}
+
+export function tracksForOverlayFrame(
+  items: CorrectedTrackSummary[],
+  frameData: Pick<OverlayFrameData, "status" | "detections">,
+  selectedTrackIds: number[],
+  showAll: boolean,
+  search: string,
+): CorrectedTrackSummary[] {
+  const complete = frameData.status === "complete";
+  const visibleIds = new Set(frameData.detections.map((item) => item.display_track_id));
+  const withVisibility = items.map((item) => ({
+    ...item,
+    visible_in_current_frame: complete ? visibleIds.has(item.display_track_id) : null,
+  }));
+  return showAll || search || !complete
+    ? withVisibility
+    : withVisibility.filter((item) => item.visible_in_current_frame || selectedTrackIds.includes(item.display_track_id));
 }
 
 /**
@@ -772,7 +789,8 @@ export default function AnnotatePage() {
   const [activeRoleKey, setActiveRoleKey] = useState<string | null>(null);
   const [unlockedRoleKeys, setUnlockedRoleKeys] = useState<Set<string>>(new Set());
   const [roleMessage, setRoleMessage] = useState<string | null>(null);
-  const [tracks, setTracks] = useState<CorrectedTrackSummary[]>([]);
+  const [trackSummaries, setTrackSummaries] = useState<CorrectedTrackSummary[]>([]);
+  const [overlayFrameData, setOverlayFrameData] = useState<Pick<OverlayFrameData, "status" | "detections">>({ status: "loading", detections: [] });
   const [currentFrame, setCurrentFrame] = useState(0);
   const [detectionImport, setDetectionImport] = useState<DetectionImport | null>(null);
   const [identityRevision, setIdentityRevision] = useState(0);
@@ -862,7 +880,8 @@ export default function AnnotatePage() {
     setSelectedMouseIds([]);
     setIdentitySelectedMouseIds([]);
     setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
-    setTracks([]);
+    setTrackSummaries([]);
+    setOverlayFrameData({ status: "loading", detections: [] });
     setCurrentFrame(0);
     setDetectionImport(null);
     setIdentityRevision(0);
@@ -954,6 +973,10 @@ export default function AnnotatePage() {
   const roleSelectedIds = useMemo(() => [...new Set(Object.values(participantRoles).flat())].sort((a, b) => a - b), [participantRoles]);
   const behaviorSelectedIds = useMemo(() => [...new Set([...selectedMouseIds, ...roleSelectedIds])].sort((a, b) => a - b), [roleSelectedIds, selectedMouseIds]);
   const overlaySelectedIds = workspaceMode === "identity" ? identitySelectedMouseIds : behaviorSelectedIds;
+  const tracks = useMemo(
+    () => tracksForOverlayFrame(trackSummaries, overlayFrameData, overlaySelectedIds, showAllTracks, identitySearch),
+    [identitySearch, overlayFrameData, overlaySelectedIds, showAllTracks, trackSummaries],
+  );
   const trackRoleLabels = useMemo(() => { const map: Record<number, string> = {}; roleDefinitions.forEach((role) => (participantRoles[role.key] ?? []).forEach((id) => { map[id] = role.name; })); return map; }, [participantRoles, roleDefinitions]);
 
   const activateRole = useCallback((key: string) => {
@@ -1052,41 +1075,51 @@ export default function AnnotatePage() {
     return ids.length >= category.mouse_count_min && (category.mouse_count_max == null || ids.length <= category.mouse_count_max);
   }, []);
 
-  const handleFrameData = useCallback((data: { frame: number; detections: DetectionWithTrack[]; detectionImport: DetectionImport | null }) => {
+  const handleFrameData = useCallback((data: OverlayFrameData) => {
     setCurrentFrame(data.frame);
     setDetectionImport(data.detectionImport);
+    setOverlayFrameData((previous) => previous.status === data.status && previous.detections === data.detections
+      ? previous
+      : { status: data.status, detections: data.detections });
   }, []);
 
   useEffect(() => {
-    if (!detectionImport) { setTracks([]); return; }
-    let alive = true;
-    getCorrectedTracks(pid, vid, { current_frame: currentFrame, search: identitySearch || undefined, page_size: 200 })
+    if (!detectionImport) { setTrackSummaries([]); return; }
+    const controller = new AbortController();
+    getCorrectedTracks(pid, vid, { search: identitySearch || undefined, page_size: 200 }, controller.signal)
       .then(async (result) => {
-        if (!alive) return;
-        const baseItems = showAllTracks || identitySearch
-          ? result.items
-          : result.items.filter((t) => t.visible_in_current_frame || overlaySelectedIds.includes(t.display_track_id));
-        if (workspaceMode !== "identity") { setTracks(baseItems); return; }
+        if (controller.signal.aborted) return;
+        if (workspaceMode !== "identity") { setTrackSummaries(result.items); return; }
         const baseIds = new Set(result.items.map((item) => item.display_track_id));
         const missingSelectedIds = identitySelectedMouseIds.filter((id) => !baseIds.has(id));
         const cacheKey = `${pid}:${vid}:${detectionImport.id}:${identityRevision}`;
         if (supplementalTrackRequestsRef.current.key !== cacheKey) {
           supplementalTrackRequestsRef.current = { key: cacheKey, byId: new Map() };
         }
+        const requestMap = supplementalTrackRequestsRef.current.byId;
         const supplementalItems = await Promise.all(missingSelectedIds.map((id) => {
-          const cached = supplementalTrackRequestsRef.current.byId.get(id);
+          const cached = requestMap.get(id);
           if (cached) return cached;
-          const request = getCorrectedTracks(pid, vid, { search: String(id), page_size: 200 })
-            .then((exactResult) => exactResult.items.find((item) => item.display_track_id === id) ?? null);
-          supplementalTrackRequestsRef.current.byId.set(id, request);
+          const request = getCorrectedTracks(pid, vid, { search: String(id), page_size: 200 }, controller.signal)
+            .then((exactResult) => exactResult.items.find((item) => item.display_track_id === id) ?? null)
+            .catch((error: unknown) => {
+              requestMap.delete(id);
+              throw error;
+            });
+          requestMap.set(id, request);
           return request;
         }));
-        if (!alive) return;
-        setTracks(mergePinnedTracks(baseItems, identitySelectedMouseIds, supplementalItems.filter((item): item is CorrectedTrackSummary => item != null)));
+        if (controller.signal.aborted) return;
+        setTrackSummaries(mergePinnedTracks(result.items, identitySelectedMouseIds, supplementalItems.filter((item): item is CorrectedTrackSummary => item != null)));
       })
-      .catch((err: unknown) => { if (alive) setErrorMsg(err instanceof Error ? err.message : "加载 track ID 失败"); });
-    return () => { alive = false; };
-  }, [pid, vid, detectionImport, currentFrame, identitySearch, showAllTracks, identityRevision, overlaySelectedIds, workspaceMode, identitySelectedMouseIds]);
+      .catch((err: unknown) => {
+        if (!(err instanceof DOMException && err.name === "AbortError")) setErrorMsg(err instanceof Error ? err.message : "加载 track ID 失败");
+      });
+    return () => {
+      controller.abort();
+      supplementalTrackRequestsRef.current = { key: supplementalTrackRequestsRef.current.key, byId: new Map() };
+    };
+  }, [pid, vid, detectionImport?.id, detectionImport?.revision, identitySearch, identityRevision, workspaceMode, identitySelectedMouseIds]);
 
   // 优先使用浏览器实际解析的媒体时长（elementDuration）作为时间轴基准，
   // DB 元数据时长仅作回退：避免元数据 duration 与真实播放时长不一致时时间轴错位。
