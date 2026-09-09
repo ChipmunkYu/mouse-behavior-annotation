@@ -339,9 +339,9 @@ def test_role_submission_snapshots_are_complete_immutable_and_review_authoritati
     assert frozen["role_definitions"] == categories[0]["role_definitions"]
     assert frozen["participant_roles"] == {first: [1], second: [2]}
     assert frozen["mouse_ids"] == [1, 2]
-    decision = ctx.client.post(
-        f"/api/projects/{project_id}/videos/{video_id}/review",
-        json={"result": "rejected", "comment": "snapshot"}, headers=headers)
+    from tests.test_reviews import _review as review_with_context
+    decision = review_with_context(ctx, headers, {"id": project_id}, {"id": video_id},
+                                   "rejected", comment="snapshot")
     assert decision.status_code == 200, decision.text
     assert decision.json()["submission_annotations"][0] == frozen
     history = ctx.client.get(
@@ -356,9 +356,8 @@ def test_clips_library_reads_role_summary_from_submission_snapshot(ctx):
     ann = _annotation(ctx, setup, {first: [3], second: [1]})
     assert ctx.client.post(
         f"/api/projects/{project_id}/videos/{video_id}/submit", headers=headers).status_code == 200
-    approved = ctx.client.post(
-        f"/api/projects/{project_id}/videos/{video_id}/review",
-        json={"result": "approved", "comment": "snapshot"}, headers=headers)
+    from tests.test_reviews import _review
+    approved = _review(ctx, headers, {"id": project_id}, {"id": video_id}, "approved", "snapshot")
     assert approved.status_code == 200, approved.text
     with ctx.session_factory() as db:
         # Change the live projection after freezing; clips must not follow it.

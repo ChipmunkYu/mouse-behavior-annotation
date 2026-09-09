@@ -19,13 +19,13 @@ export function safeCategoryColor(color: string | null | undefined): string {
   return /^#[0-9a-f]{6}$/i.test(value) ? value : REVIEW_FALLBACK_COLOR;
 }
 
-export function deriveReviewAnnotationView(
-  annotations: SubmissionAnnotationSnapshot[],
+export function deriveReviewAnnotationView<T extends SubmissionAnnotationSnapshot>(
+  annotations: T[],
   currentCategories: Category[],
   selectedCategoryIds: ReadonlySet<number>,
-): { annotations: SubmissionAnnotationSnapshot[]; categories: ReviewCategorySummary[] } {
+): { annotations: T[]; categories: ReviewCategorySummary[] } {
   const currentById = new Map(currentCategories.map((category) => [category.id, category]));
-  const firstByCategory = new Map<number, { annotation: SubmissionAnnotationSnapshot; index: number; count: number }>();
+  const firstByCategory = new Map<number, { annotation: T; index: number; count: number }>();
 
   annotations.forEach((annotation, index) => {
     const existing = firstByCategory.get(annotation.category_id);

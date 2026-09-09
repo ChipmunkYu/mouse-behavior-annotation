@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
+from ..behavior_review import current_final_approval
 from ..media_jobs import (clip_entities_ready, enqueue_media_job, enqueue_submission_media,
                           media_dedupe_key, submission_media_dedupe_key)
 from ..models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
@@ -62,7 +63,7 @@ def media_status(
 ) -> MediaStatusOut:
     """项目成员可读：当前修订的片段生成进度与该视频对应任务。"""
     video = _get_video_in_project(db, project_id, video_id)
-    submission = db.query(Submission).filter_by(video_id=video.id, status="approved").first()
+    submission = current_final_approval(db, video.id)
     revision = submission.source_media_revision if submission else video.media_revision
     clips = (
         db.query(Clip)
@@ -116,7 +117,7 @@ def generate_media(
             detail="Only owner/admin/reviewer can generate media",
         )
     video = _get_video_in_project(db, project_id, video_id)
-    submission = db.query(Submission).filter_by(video_id=video.id, status="approved").first()
+    submission = current_final_approval(db, video.id)
     if submission is None and video.workflow_status != "approved":
         raise HTTPException(
             status_code=400,

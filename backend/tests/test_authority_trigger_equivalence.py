@@ -52,10 +52,12 @@ def _seed_matrix(conn):
         "(1,1,1,1,1,1,'locked.mp4','locked.mp4','" + "0" * 64 +
         "','submitted',1,CURRENT_TIMESTAMP,0,1,1,1,1)",
         # SubmissionAnnotation INSERT is intentionally valid; only subsequent mutation is forbidden.
-        "INSERT INTO submission_annotations(id,submission_id,category_id,category_name,category_group,"
-        "category_participant_mode,role_definitions_snapshot,participant_roles_snapshot,start_time,end_time,"
-        "start_frame,end_frame,confidence,mouse_ids) VALUES "
-        "(1,1,1,'locked category','test','unordered','[]','{}',0,1,0,25,'certain','[]')",
+        "INSERT INTO submission_annotations(id,submission_id,source_annotation_key,source_material_revision,"
+        "material_digest,category_id,category_name,category_group,"
+         "category_participant_mode,role_definitions_snapshot,participant_roles_snapshot,start_time,end_time,"
+         "start_frame,end_frame,confidence,mouse_ids) VALUES "
+        "(1,1,1,1,'" + "0" * 64 + "',1,'locked category','test','unordered','[]','{}',"
+        "0,1,0,25,'certain','[]')",
         "UPDATE projects SET category_scheme_version=1,category_scheme_locked_at=CURRENT_TIMESTAMP,"
         "category_scheme_locked_by=1 WHERE id=1",
         "INSERT INTO category_scheme_audits(id,project_id,actor_id,action,scheme_version,after_json,scheme_hash,"

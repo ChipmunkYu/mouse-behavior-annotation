@@ -611,7 +611,7 @@ def test_future_submitted_submission_also_locks_draft(ctx, login_headers):
 
 
 @pytest.mark.parametrize("workflow", ["approved", "rejected"])
-def test_approved_rejected_projection_returns_to_draft(ctx, login_headers, workflow):
+def test_track_only_projection_preserves_review_workflow(ctx, login_headers, workflow):
     headers, project_id, video_id = _setup(ctx, login_headers)
     with ctx.session_factory() as db:
         video = db.get(models.Video, video_id)
@@ -622,7 +622,7 @@ def test_approved_rejected_projection_returns_to_draft(ctx, login_headers, workf
     )
     assert response.status_code == 200, response.text
     with ctx.session_factory() as db:
-        assert db.get(models.Video, video_id).workflow_status == "draft"
+        assert db.get(models.Video, video_id).workflow_status == workflow
 
 
 def test_annotation_revalidation_and_revision_projection(ctx, login_headers):

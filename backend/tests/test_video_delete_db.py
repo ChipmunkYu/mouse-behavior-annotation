@@ -10,7 +10,7 @@ from app import video_delete_db
 from app.config import Settings
 from app.display_proxy_processor import DISPLAY_PROXY_PROFILE_VERSION
 from app.models import (
-    Annotation, BackgroundJob, Clip, CorrectedDetectionAssignment, CorrectedTrack,
+    Annotation, BackgroundJob, BehaviorReviewDecision, BehaviorReviewReopen, Clip, CorrectedDetectionAssignment, CorrectedTrack,
     DetectionImport, DetectionSnapshot, DetectionSuppression,
     DetectionSnapshotState, DetectionStateOverride, DraftDetectionChange,
     DraftIdentityEdit, IdentityEdit, ProjectMembership, RawDetection, Review, Submission,
@@ -113,12 +113,23 @@ def _full_graph(db, project_id, video_id, actor_id, category_id, *,
     db.add(submission); db.flush()
     frozen_annotation = SubmissionAnnotation(
         submission_id=submission.id, source_annotation_id=annotation.id,
+        source_annotation_key=annotation.id,
+        source_material_revision=1, material_digest="a" * 64,
         category_id=category_id, category_name="test", category_group="group",
         category_participant_mode="unordered", role_definitions_snapshot=[],
         participant_roles_snapshot={}, start_time=0, end_time=1,
         start_frame=0, end_frame=1, confidence="certain", mouse_ids=[1],
     )
     db.add(frozen_annotation); db.flush()
+    decision = BehaviorReviewDecision(submission_annotation_id=frozen_annotation.id,
+                                      status="approved", sequence=1, reviewer_id=actor_id)
+    db.add(decision); db.flush()
+    db.add_all([
+        BehaviorReviewDecision(submission_annotation_id=frozen_annotation.id,
+                               status="approved", sequence=2, origin="carried",
+                               carried_from_decision_id=decision.id, reviewer_id=actor_id),
+        BehaviorReviewReopen(submission_id=submission.id, actor_id=actor_id, reason="audit"),
+    ])
     db.add_all([
         Review(project_id=project_id, video_id=video_id, result="rejected",
                annotation_revision=1, submission_id=submission.id),
@@ -179,6 +190,8 @@ def _other_graph(db, project_id, actor_id, category_id, *, suffix="other",
         submission_id=submission.id,
         source_annotation_id=(annotation.id if source_annotation_id is None
                               else source_annotation_id),
+        source_annotation_key=(annotation.id if source_annotation_id is None else source_annotation_id),
+        source_material_revision=1, material_digest="a" * 64,
         category_id=category_id, category_name="test", category_group="group",
         category_participant_mode="unordered", role_definitions_snapshot=[],
         participant_roles_snapshot={}, start_time=0, end_time=1,
@@ -305,6 +318,7 @@ def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):
         for table in (
             "corrected_tracks", "corrected_detection_assignments", "identity_edits",
             "detection_suppressions", "suppression_detections",
+            "behavior_review_decisions", "behavior_review_reopens",
         ):
             assert db.execute(text(f"SELECT count(*) FROM {table}")).scalar_one() == 0
         assert db.get(Video, video_id) is None
@@ -817,7 +831,7 @@ def test_triggers_protect_before_and_after_success(ctx, tmp_path):
         names = {row[0] for row in db.execute(text(
             "SELECT name FROM sqlite_master WHERE type='trigger'"
         ))}
-        assert {"trg_annotation_delete", "trg_live_annotation_delete"} <= names
+        assert set(video_delete_db._DROPPED_TRIGGERS) <= names
         with pytest.raises(IntegrityError, match="submission annotation immutable"):
             db.query(SubmissionAnnotation).filter_by(id=protected_id).delete()
         db.rollback()
@@ -841,13 +855,34 @@ def test_trigger_drop_fault_rolls_back_schema_and_rows(ctx, tmp_path):
         names = {row[0] for row in db.execute(text(
             "SELECT name FROM sqlite_master WHERE type='trigger'"
         ))}
-        assert {"trg_annotation_delete", "trg_live_annotation_delete"} <= names
+        assert set(video_delete_db._DROPPED_TRIGGERS) <= names
         with pytest.raises(IntegrityError, match="submission annotation immutable"):
             db.query(SubmissionAnnotation).filter_by(id=protected_id).delete()
         db.rollback()
         assert db.get(SubmissionAnnotation, protected_id) is not None
     with ctx.session_factory() as checkout:
         assert checkout.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+
+
+@pytest.mark.parametrize("incoming", [True, False])
+def test_cross_video_behavior_carry_blocks_purge(ctx, tmp_path, incoming):
+    project_id, video_id, actor_id, category_id = _base(ctx)
+    with ctx.session_factory() as db:
+        _, target_id = _full_graph(db, project_id, video_id, actor_id, category_id)
+        other = _other_graph(db, project_id, actor_id, category_id)
+        other_id = other["submission_annotation"].id
+        source_id, destination_id = (target_id, other_id) if incoming else (other_id, target_id)
+        source = BehaviorReviewDecision(submission_annotation_id=source_id,
+                                        status="approved", sequence=10)
+        db.add(source); db.flush()
+        db.add(BehaviorReviewDecision(submission_annotation_id=destination_id,
+                                     status="approved", sequence=11, origin="carried",
+                                     carried_from_decision_id=source.id))
+        db.commit()
+        with pytest.raises(VideoDeleteConflictError, match="behavior decision"):
+            _freeze(db, _settings(tmp_path), project_id, video_id, actor_id)
+        assert db.query(BehaviorReviewDecision).count() == 4
+        assert db.get(Video, video_id) is not None
 
 
 def test_begin_failure_restores_foreign_keys(ctx, tmp_path):

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .authority_triggers import TRIGGERS
 from .config import Settings
 from .models import (
-    Annotation, BackgroundJob, Clip, CorrectedDetectionAssignment, CorrectedTrack,
+    Annotation, BackgroundJob, BehaviorReviewDecision, BehaviorReviewReopen, Clip, CorrectedDetectionAssignment, CorrectedTrack,
     DetectionImport, DetectionSnapshot, DetectionSnapshotState, DetectionStateOverride,
     DetectionSuppression, DraftDetectionChange, DraftIdentityEdit, IdentityEdit,
     ProjectMembership, RawDetection, Review, Submission, SubmissionAnnotation,
@@ -77,13 +77,14 @@ class FrozenVideoDelete:
 
 
 _ID_MODELS = (
-    Annotation, Review, Clip, Submission, SubmissionAnnotation, DetectionImport,
+    Annotation, Review, BehaviorReviewDecision, BehaviorReviewReopen, Clip, Submission, SubmissionAnnotation, DetectionImport,
     RawDetection, CorrectedTrack, CorrectedDetectionAssignment, IdentityEdit,
     DetectionSuppression, DraftIdentityEdit, DetectionSnapshot, VideoImportBatch,
 )
 _TABLES_WITH_ID = {model.__tablename__ for model in _ID_MODELS}
 _DELETE_ORDER = (
-    "clips", "reviews", "submission_annotations", "submissions",
+    "clips", "reviews", "behavior_review_decisions", "behavior_review_reopens",
+    "submission_annotations", "submissions",
     "detection_snapshot_states", "detection_snapshots", "draft_detection_changes",
     "detection_state_overrides", "suppression_detections",
     "corrected_detection_assignments", "identity_edits", "detection_suppressions",
@@ -91,7 +92,8 @@ _DELETE_ORDER = (
     "detection_imports", "annotations", "video_import_batches", "background_jobs",
     "videos",
 )
-_DROPPED_TRIGGERS = ("trg_annotation_delete", "trg_live_annotation_delete")
+_DROPPED_TRIGGERS = ("trg_annotation_delete", "trg_live_annotation_delete",
+                     "trg_behavior_decision_delete", "trg_behavior_reopen_delete")
 _SQLITE_BIND_BUDGET = 500
 
 
@@ -142,6 +144,9 @@ def _authorize(db: Session, project_id: int, video_id: int, actor_user_id: int) 
         raise VideoDeleteForbiddenError("An active project owner or admin is required")
     if video.workflow_status not in {"draft", "rejected"}:
         raise VideoDeleteConflictError("Only draft or rejected videos may be deleted")
+    if db.query(Submission.id).filter(
+            Submission.video_id == video_id, Submission.status.in_(("submitted", "approved"))).first():
+        raise VideoDeleteConflictError("Submitted or approved authority forbids video deletion")
     return video
 
 
@@ -160,6 +165,24 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     ) if submission_ids else []
     submission_annotation_ids = _ids(submission_annotations)
     submission_annotation_id_set = set(submission_annotation_ids)
+    behavior_decisions = _rows(
+        db, BehaviorReviewDecision,
+        BehaviorReviewDecision.submission_annotation_id.in_(submission_annotation_ids)
+    ) if submission_annotation_ids else []
+    behavior_reopens = _rows(
+        db, BehaviorReviewReopen, BehaviorReviewReopen.submission_id.in_(submission_ids)
+    ) if submission_ids else []
+    decision_ids = _ids(behavior_decisions)
+    if any(row.carried_from_decision_id is not None
+           and row.carried_from_decision_id not in set(decision_ids)
+           for row in behavior_decisions):
+        raise VideoDeleteConflictError("A behavior decision crosses the video boundary")
+    incoming_decision = (db.query(BehaviorReviewDecision.id).filter(
+        BehaviorReviewDecision.carried_from_decision_id.in_(decision_ids),
+        ~BehaviorReviewDecision.id.in_(decision_ids),
+    ).first() if decision_ids else None)
+    if incoming_decision:
+        raise VideoDeleteConflictError("A behavior decision is linked from another video")
     reviews = _rows(db, Review, Review.video_id == video_id)
     clips = _rows(db, Clip, or_(
         Clip.annotation_id.in_(annotation_ids) if annotation_ids else text("0"),
@@ -293,6 +316,8 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
 
     rows_by_table: dict[str, Sequence[object]] = {
         "annotations": annotations, "reviews": reviews, "clips": clips,
+        "behavior_review_decisions": behavior_decisions,
+        "behavior_review_reopens": behavior_reopens,
         "submissions": submissions, "submission_annotations": submission_annotations,
         "detection_imports": imports, "raw_detections": raw,
         "corrected_tracks": tracks, "corrected_detection_assignments": assignments,
@@ -567,9 +592,10 @@ def _delete_frozen_video_core(db: Session, frozen: FrozenVideoDelete, *, setting
                 _delete_ids(db, table, ids.get(table, ()))
         for name in _DROPPED_TRIGGERS:
             db.execute(text(f"CREATE TRIGGER {name} {TRIGGERS[name]}"))
+        trigger_names = ",".join(f"'{name}'" for name in _DROPPED_TRIGGERS)
         trigger_count = db.execute(text(
             "SELECT count(*) FROM sqlite_master WHERE type='trigger' "
-            "AND name IN ('trg_annotation_delete','trg_live_annotation_delete')"
+            f"AND name IN ({trigger_names})"
         )).scalar_one()
         if trigger_count != len(_DROPPED_TRIGGERS):
             raise VideoDeleteIntegrityError("Authority triggers were not restored")

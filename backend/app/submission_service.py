@@ -23,6 +23,8 @@ from .file_identity import FileIdentity, file_identity, hash_file_handle
 from .integrity_canonical import (canonical_digest as _canonical_digest, canonical_rows_digest,
                                   validate_pose_metadata)
 from .participant_roles import ParticipantRoleError, canonicalize_participant_roles
+from .behavior_review import (assert_video_not_final_approved, carry_approved_decisions, ensure_material_evidence,
+                              rejected_blockers)
 
 SNAPSHOT_SCHEMA_VERSION = 1
 
@@ -310,11 +312,19 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
 
 def create_submission(db: Session, settings, video: Video, imp: DetectionImport, submitter_id: int,
                       *, source_identity: tuple[str, str, FileIdentity]) -> Submission:
+    assert_video_not_final_approved(db, video)
     if imp.video_id != video.id or not imp.active:
         raise HTTPException(status_code=409, detail="Active detection import does not belong to video")
     if db.query(Submission.id).filter_by(video_id=video.id, status="submitted").first():
         raise HTTPException(status_code=409, detail="Video already has a submitted attempt")
     rows = validate_annotations(db, video, imp)
+    blockers = rejected_blockers(db, video.id, imp.id)
+    if blockers:
+        raise HTTPException(status_code=409, detail={
+            "code": "rejected_annotations_not_addressed",
+            "message": "Rejected annotations must be materially modified or deleted before resubmission",
+            "items": blockers,
+        })
     key, digest, identity = source_identity
     if video.storage_path != key:
         raise HTTPException(status_code=409, detail="Video storage key changed concurrently")
@@ -335,8 +345,12 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
     db.add(submission)
     db.flush()
     _fault("submission")
+    for ann, _category in rows:
+        ensure_material_evidence(ann)
     db.execute(insert(SubmissionAnnotation), [dict(
         submission_id=submission.id, source_annotation_id=ann.id,
+        source_annotation_key=ann.id, source_material_revision=ann.material_revision,
+        material_digest=ann.material_digest,
         category_id=category.id, category_name=category.name,
         category_group=category.group,
         category_participant_mode=category.participant_mode,
@@ -347,6 +361,9 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
         confidence=ann.confidence, crop_region=ann.crop_region,
         mouse_ids=list(ann.mouse_ids),
     ) for ann, category in rows])
+    db.flush()
+    db.expire(submission, ["annotations"])
+    carry_approved_decisions(db, submission)
     _fault("submission_annotations")
     video.workflow_status = "submitted"
     video.submitted_at = submission.submitted_at

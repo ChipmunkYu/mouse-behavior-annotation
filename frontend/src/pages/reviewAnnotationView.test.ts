@@ -111,6 +111,7 @@ function snapshot(
     category_name: categoryName,
     category_group: "社交行为",
     category_participant_mode: "role_based",
+    confidence: "certain",
     start_frame: Math.round(startTime * 30),
     end_frame: Math.round(endTime * 30),
     start_time: startTime,

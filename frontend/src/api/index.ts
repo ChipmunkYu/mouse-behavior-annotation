@@ -54,6 +54,10 @@ import type {
   AssigneeDirectoryItem,
   CategoryScheme, CategorySchemePut, CategorySchemeLock, CategorySchemeAudit,
   StreamTicket,
+  BehaviorReviewState,
+  BehaviorDecisionInput,
+  ReviewReopenInput,
+  ReviewSubmissionContext,
 } from "./types";
 
 type JsonContent<T> = T extends { content: { "application/json": infer Body } } ? Body : never;
@@ -444,10 +448,12 @@ export function exportAnnotations(
  */
 export function submitVideoForReview(
   projectId: number | string,
-  videoId: number | string
+  videoId: number | string,
+  context?: Partial<ReviewSubmissionContext>,
 ): Promise<Video> {
   return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submit"]["post"]>(`/projects/${projectId}/videos/${videoId}/submit`, {
     method: "POST",
+    body: JSON.stringify(context ?? {}),
   });
 }
 
@@ -474,6 +480,18 @@ export function createVideoReview(
     method: "POST",
     body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/review"]["post"]>(input),
   });
+}
+
+export function getBehaviorReviewState(projectId: number | string, videoId: number | string): Promise<BehaviorReviewState> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/review-state"]["get"]>(`/projects/${projectId}/videos/${videoId}/review-state`);
+}
+
+export function putBehaviorDecision(projectId: number | string, videoId: number | string, submissionId: number, snapshotId: number, input: BehaviorDecisionInput): Promise<BehaviorReviewState> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/decision"]["put"]>(`/projects/${projectId}/videos/${videoId}/submissions/${submissionId}/annotations/${snapshotId}/decision`, { method: "PUT", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/decision"]["put"]>(input) });
+}
+
+export function reopenBehaviorReview(projectId: number | string, videoId: number | string, submissionId: number, input: ReviewReopenInput): Promise<BehaviorReviewState> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen"]["post"]>(`/projects/${projectId}/videos/${videoId}/submissions/${submissionId}/reopen`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen"]["post"]>(input) });
 }
 
 // ---------- 媒体（片段）生成（批次 4） ----------

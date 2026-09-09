@@ -76,6 +76,8 @@ ALL_TABLES = (
         "submissions",
         "submission_annotations",
         "category_scheme_audits",
+        "behavior_review_decisions",
+        "behavior_review_reopens",
     ]
 )
 VIDEO_NEW_COLUMNS = {"workflow_status", "annotation_revision", "submitted_at", "approved_at", "approved_by"}
@@ -260,7 +262,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -297,6 +299,10 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
     assert {"source_relative", "edit_version", "next_display_track_id"} <= detection_import_columns
     assert "submission_id" in {c["name"] for c in insp.get_columns("reviews")}
     assert "submission_annotation_id" in {c["name"] for c in insp.get_columns("clips")}
+    assert {"material_revision", "material_digest"} <= ann_columns
+    assert "decision_revision" in {c["name"] for c in insp.get_columns("submissions")}
+    assert {"source_annotation_key", "source_material_revision", "material_digest"} <= {
+        c["name"] for c in insp.get_columns("submission_annotations")}
     # 0003：四处 users 外键具备显式 ON DELETE 策略
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
@@ -321,7 +327,9 @@ def test_0015_blocks_dirty_single_frame_rows_until_explicitly_repaired(tmp_path)
         )
     with pytest.raises(RuntimeError, match="explicitly correct or remove"):
         upgrade_to(url, "0015")
-    assert current_revision(url) == "0014"
+    # The supported migration wrapper restores the whole failed invocation,
+    # including a preceding revision that succeeded inside the same command.
+    assert current_revision(url) == "0013"
 
     with db_mod.engine.begin() as conn:
         conn.execute(
@@ -528,7 +536,10 @@ def test_0016_historical_row_and_round_trip_preserve_data_and_triggers(tmp_path)
             "VALUES (1,'display','running',0,0,CURRENT_TIMESTAMP)"
         ))
 
-    expected_triggers = set(AUTHORITY_TRIGGERS) | set(ASSIGNEE_TRIGGERS)
+    expected_triggers = (set(AUTHORITY_TRIGGERS) - {
+        "trg_behavior_decision_update", "trg_behavior_decision_delete",
+        "trg_behavior_reopen_update", "trg_behavior_reopen_delete",
+    }) | set(ASSIGNEE_TRIGGERS)
 
     def assert_integrity(revision: str, has_display: bool) -> None:
         assert current_revision(url) == revision
@@ -570,6 +581,48 @@ def test_0016_historical_row_and_round_trip_preserve_data_and_triggers(tmp_path)
     assert_integrity("0015", False)
     upgrade_to(url, "0016")
     assert_integrity("0016", True)
+
+
+def test_failed_0017_restores_schema_version_and_authority_triggers(tmp_path, monkeypatch):
+    """SQLite batch DDL failure restores the durable 0016 image before retry."""
+    from sqlalchemy import create_engine, text
+
+    from app.authority_triggers import TRIGGERS
+    from app import migration as migration_mod
+
+    url = _settings(tmp_path, "failed-0017.db").resolved_database_url
+    upgrade_to(url, "0016")
+
+    def interrupted_upgrade(_cfg, _revision):
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TRIGGER trg_annotation_delete"))
+            conn.execute(text("ALTER TABLE annotations ADD COLUMN interrupted INTEGER"))
+        engine.dispose()
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(migration_mod.command, "upgrade", interrupted_upgrade)
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        run_migrations(url)
+
+    assert current_revision(url) == "0016"
+    engine = create_engine(url)
+    try:
+        assert "interrupted" not in {column["name"] for column in sa_inspect(engine).get_columns("annotations")}
+        with engine.connect() as conn:
+            triggers = set(conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )).scalars())
+        assert set(TRIGGERS) - {
+            "trg_behavior_decision_update", "trg_behavior_decision_delete",
+            "trg_behavior_reopen_update", "trg_behavior_reopen_delete",
+        } <= triggers
+    finally:
+        engine.dispose()
+    assert not (tmp_path / "failed-0017.db.pre-migration").exists()
+    monkeypatch.undo()
+    run_migrations(url)
+    assert current_revision(url) == "0017"
 
 
 def test_p1_old_db_upgrade_preserves_data(tmp_path):
@@ -693,7 +746,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -712,7 +765,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -786,7 +839,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -818,7 +871,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -1010,7 +1063,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -1060,7 +1113,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1131,7 +1184,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -1187,7 +1240,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0016" in proc.stdout
+    assert "0017" in proc.stdout
 
 
 
@@ -1348,7 +1401,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1393,7 +1446,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1403,7 +1456,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1509,7 +1562,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1803,7 +1856,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1845,7 +1898,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1867,7 +1920,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1977,7 +2030,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
             conn.execute(text(sql), params)
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.engine.connect() as conn:
         imports = conn.execute(
             text(
@@ -1999,7 +2052,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
 
     # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
     db_mod.ensure_schema(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
 
@@ -2112,7 +2165,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
     fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
     run_migrations(fresh_url)
     fresh_engine = create_engine(fresh_url)
-    assert current_revision(fresh_url) == "0016"
+    assert current_revision(fresh_url) == "0017"
     assert {"raw_digest", "state_digest", "metadata_digest"} <= {
         column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
     }
@@ -2147,7 +2200,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         ))
 
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         snapshot = db.get(models.DetectionSnapshot, 93)
         assert all(len(getattr(snapshot, name)) == 64 for name in
@@ -2160,7 +2213,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
     })
     run_migrations(url)
-    assert current_revision(url) == "0016"
+    assert current_revision(url) == "0017"
     with db_mod.SessionLocal() as db:
         assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
 
@@ -2343,6 +2396,8 @@ def test_0008_key_delete_policies(tmp_path):
         submitted_annotation = models.SubmissionAnnotation(
             submission_id=submission.id,
             source_annotation_id=source_annotation.id,
+            source_annotation_key=source_annotation.id,
+            source_material_revision=1, material_digest="a" * 64,
             category_id=category.id,
             category_name="行走",
             start_time=0.0,
@@ -2524,6 +2579,8 @@ def test_0008_draft_submission_review_clip_constraints(tmp_path):
         submitted_annotation = models.SubmissionAnnotation(
             submission_id=submitted.id,
             source_annotation_id=annotation.id,
+            source_annotation_key=annotation.id,
+            source_material_revision=1, material_digest="a" * 64,
             category_id=category.id,
             category_name="攻击行为",
             start_time=0.0,
@@ -2540,6 +2597,8 @@ def test_0008_draft_submission_review_clip_constraints(tmp_path):
             models.SubmissionAnnotation(
                 submission_id=submitted.id,
                 source_annotation_id=annotation.id,
+                source_annotation_key=annotation.id,
+                source_material_revision=1, material_digest="a" * 64,
                 category_id=category.id,
                 category_name="攻击行为",
                 start_time=1.0,

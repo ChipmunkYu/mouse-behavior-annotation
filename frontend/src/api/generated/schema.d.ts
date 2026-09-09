@@ -940,6 +940,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/videos/{video_id}/review-state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Behavior Review State */
+        get: operations["behavior_review_state_api_projects__project_id__videos__video_id__review_state_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/videos/{video_id}/reviews": {
         parameters: {
             query?: never;
@@ -951,6 +968,40 @@ export interface paths {
         get: operations["review_history_api_projects__project_id__videos__video_id__reviews_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Behavior Decision */
+        put: operations["put_behavior_decision_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__decision_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reopen Behavior Review */
+        post: operations["reopen_behavior_review_api_projects__project_id__videos__video_id__submissions__submission_id__reopen_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1280,6 +1331,152 @@ export interface components {
             video_filename?: string | null;
             /** Video Upload State */
             video_upload_state: string;
+        };
+        /** BehaviorDecisionIn */
+        BehaviorDecisionIn: {
+            /** Expected Decision Revision */
+            expected_decision_revision: number;
+            /** Feedback */
+            feedback?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected";
+        };
+        /** BehaviorReopenIn */
+        BehaviorReopenIn: {
+            /** Reason */
+            reason?: string | null;
+        };
+        /** BehaviorReviewAnnotationOut */
+        BehaviorReviewAnnotationOut: {
+            /** Category Group */
+            category_group?: string | null;
+            /** Category Id */
+            category_id: number;
+            /** Category Name */
+            category_name: string;
+            /**
+             * Category Participant Mode
+             * @default unordered
+             * @enum {string}
+             */
+            category_participant_mode: "unordered" | "role_based";
+            /** Confidence */
+            confidence: string;
+            /** Crop Region */
+            crop_region?: {
+                [key: string]: unknown;
+            } | null;
+            decision: components["schemas"]["BehaviorReviewDecisionOut"];
+            /** End Frame */
+            end_frame: number;
+            /** End Time */
+            end_time: number;
+            /** Id */
+            id: number;
+            /**
+             * Mouse Ids
+             * @default []
+             */
+            mouse_ids: number[];
+            /**
+             * Participant Roles
+             * @default {}
+             */
+            participant_roles: {
+                [key: string]: number[];
+            };
+            /**
+             * Role Definitions
+             * @default []
+             */
+            role_definitions: components["schemas"]["RoleDefinitionOut"][];
+            /** Source Annotation Id */
+            source_annotation_id?: number | null;
+            /** Start Frame */
+            start_frame: number;
+            /** Start Time */
+            start_time: number;
+        };
+        /** BehaviorReviewCountsOut */
+        BehaviorReviewCountsOut: {
+            /** Approved */
+            approved: number;
+            /** Pending */
+            pending: number;
+            /** Rejected */
+            rejected: number;
+        };
+        /** BehaviorReviewDecisionOut */
+        BehaviorReviewDecisionOut: {
+            /** Carried From Decision Id */
+            carried_from_decision_id?: number | null;
+            /** Decided At */
+            decided_at?: string | null;
+            /** Decision Id */
+            decision_id?: number | null;
+            /** Feedback */
+            feedback?: string | null;
+            /** Origin */
+            origin?: string | null;
+            /** Reviewer */
+            reviewer?: string | null;
+            /** Reviewer Id */
+            reviewer_id?: number | null;
+            /** Sequence */
+            sequence?: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected";
+        };
+        /** BehaviorReviewFeedbackItemOut */
+        BehaviorReviewFeedbackItemOut: {
+            baseline: components["schemas"]["SubmissionAnnotationSnapshotOut"];
+            /**
+             * Comparison
+             * @enum {string}
+             */
+            comparison: "unchanged" | "modified" | "deleted" | "reverted";
+            current?: components["schemas"]["AnnotationOut"] | null;
+            /** Decided At */
+            decided_at?: string | null;
+            /** Feedback */
+            feedback?: string | null;
+            /** Reviewer */
+            reviewer?: string | null;
+            /** Source Annotation Id */
+            source_annotation_id?: number | null;
+            /** Submission Annotation Id */
+            submission_annotation_id: number;
+        };
+        /** BehaviorReviewStateOut */
+        BehaviorReviewStateOut: {
+            /** Annotations */
+            annotations: components["schemas"]["BehaviorReviewAnnotationOut"][];
+            /** Attempt No */
+            attempt_no?: number | null;
+            /** Can Finalize Approval */
+            can_finalize_approval: boolean;
+            /** Can Reopen */
+            can_reopen: boolean;
+            counts: components["schemas"]["BehaviorReviewCountsOut"];
+            /**
+             * Decision Revision
+             * @default 0
+             */
+            decision_revision: number;
+            /** Feedback Items */
+            feedback_items: components["schemas"]["BehaviorReviewFeedbackItemOut"][];
+            /** Locked Annotation Ids */
+            locked_annotation_ids: number[];
+            /** Submission Id */
+            submission_id?: number | null;
+            /** Submission Status */
+            submission_status?: string | null;
         };
         /** Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post */
         Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post: {
@@ -1842,6 +2039,10 @@ export interface components {
         ReviewCreate: {
             /** Comment */
             comment?: string | null;
+            /** Expected Decision Revision */
+            expected_decision_revision: number;
+            /** Expected Submission Id */
+            expected_submission_id: number;
             /**
              * Result
              * @enum {string}
@@ -1891,6 +2092,13 @@ export interface components {
             submission_id?: number | null;
             /** Video Id */
             video_id: number;
+        };
+        /** ReviewSubmissionContextIn */
+        ReviewSubmissionContextIn: {
+            /** Expected Decision Revision */
+            expected_decision_revision?: number | null;
+            /** Expected Submission Id */
+            expected_submission_id?: number | null;
         };
         /** RoleDefinitionIn */
         RoleDefinitionIn: {
@@ -1942,6 +2150,12 @@ export interface components {
              * @enum {string}
              */
             category_participant_mode: "unordered" | "role_based";
+            /** Confidence */
+            confidence: string;
+            /** Crop Region */
+            crop_region?: {
+                [key: string]: unknown;
+            } | null;
             /** End Frame */
             end_frame: number;
             /** End Time */
@@ -4145,6 +4359,38 @@ export interface operations {
             };
         };
     };
+    behavior_review_state_api_projects__project_id__videos__video_id__review_state_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BehaviorReviewStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     review_history_api_projects__project_id__videos__video_id__reviews_get: {
         parameters: {
             query?: never;
@@ -4177,6 +4423,81 @@ export interface operations {
             };
         };
     };
+    put_behavior_decision_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__decision_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+                submission_id: number;
+                snapshot_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BehaviorDecisionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BehaviorReviewStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reopen_behavior_review_api_projects__project_id__videos__video_id__submissions__submission_id__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+                submission_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BehaviorReopenIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BehaviorReviewStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     submit_video_api_projects__project_id__videos__video_id__submit_post: {
         parameters: {
             query?: never;
@@ -4187,7 +4508,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ReviewSubmissionContextIn"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

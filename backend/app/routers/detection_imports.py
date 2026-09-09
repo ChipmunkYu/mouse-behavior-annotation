@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..behavior_review import assert_video_not_final_approved
 from ..display_proxy_enqueue import enqueue_for_video, hash_display_proxy_source, submit_after_commit
 from ..draft_detection_edits import revalidate_annotations
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
@@ -1404,6 +1405,7 @@ async def replace_detection_import(
             expected_edit_version=initial_edit_version,
         ) as state:
             video = state.video
+            assert_video_not_final_approved(db, video)
             new_revision = video.detection_import_revision + 1
             old_active = state.detection_import
             if old_active is not None:
@@ -1447,11 +1449,6 @@ async def replace_detection_import(
             db.query(Annotation).filter(
                 Annotation.video_id == video_id, Annotation.review_status == "approved"
             ).update({"review_status": "pending", "reviewer_id": None}, synchronize_session=False)
-            if video.workflow_status == "approved":
-                video.workflow_status = "draft"
-                video.submitted_at = None
-                video.approved_at = None
-                video.approved_by = None
             db.commit()
     except Exception:
         db.rollback()

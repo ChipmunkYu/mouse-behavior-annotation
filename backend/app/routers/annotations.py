@@ -40,6 +40,8 @@ from ..permissions import MANAGER_ROLES, require_editor as require_edit_permissi
 from ..participant_roles import ParticipantRoleError, canonicalize_participant_roles
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
 from ..video_write_gate import video_write_gate
+from ..behavior_review import (assert_annotation_unlocked, assert_video_not_final_approved, ensure_material_evidence,
+                               material_digest, material_values)
 
 router = APIRouter(tags=["annotations"])
 
@@ -272,6 +274,7 @@ def _invalidate_video(db: Session, video: Video, settings: Settings, *, incremen
     - Review 历史保留（不删除任何 Review 行）。
     已处于 draft 时不重复执行工作流/Clip 清理，但仍推进相应修订号。
     """
+    assert_video_not_final_approved(db, video)
     plan = _InvalidationPlan()
     was_draft = video.workflow_status == "draft"
     video.annotation_revision += 1
@@ -488,6 +491,7 @@ def create_annotation(
             participant_roles=participant_roles, participant_status=participant_status,
             detection_import_revision=di_rev, identity_revision=id_rev,
         )
+        ensure_material_evidence(annotation)
         db.add(annotation)
         db.commit()
         db.refresh(annotation)
@@ -545,6 +549,8 @@ def update_annotation(
     ) as state:
         video = state.video
         annotation = _get_annotation_in_video(db, video_id, annotation_id)
+        assert_annotation_unlocked(db, video_id, annotation_id)
+        ensure_material_evidence(annotation)
         if not _can_modify(access[1].role, annotation, access[1].user_id):
             raise HTTPException(
                 status_code=403,
@@ -643,6 +649,18 @@ def update_annotation(
                 )
                 annotation.detection_import_revision = imp.revision if imp else 0
                 annotation.identity_revision = video.identity_revision
+        if changed_fields:
+            # Preserve authored participant evidence when only projected track IDs changed.
+            fields = changed_fields & material_values(annotation).keys()
+            if "participant_roles" in fields or "mouse_ids" in fields:
+                fields |= {"participant_roles", "mouse_ids"}
+            values = material_values(annotation)
+            annotation.material_state = {**annotation.material_state,
+                                         **{field: values[field] for field in fields}}
+            digest = material_digest(annotation)
+            if digest != annotation.material_digest:
+                annotation.material_revision += 1
+                annotation.material_digest = digest
         db.commit()
         db.refresh(annotation)
         result = _to_out(annotation)
@@ -675,6 +693,7 @@ def delete_annotation(
     ) as state:
         video = state.video
         annotation = _get_annotation_in_video(db, video_id, annotation_id)
+        assert_annotation_unlocked(db, video_id, annotation_id)
         if not _can_modify(access[1].role, annotation, access[1].user_id):
             raise HTTPException(
                 status_code=403,

@@ -11,32 +11,26 @@ from ..database import get_db
 from ..deps import project_access
 from ..media_jobs import enqueue_submission_media
 from ..models import (
-    Annotation, DetectionImport, DraftIdentityEdit, Review, Submission,
-    SubmissionAnnotation, Video,
+    Annotation, BehaviorReviewDecision, BehaviorReviewReopen, DetectionImport,
+    DraftIdentityEdit, Review, Submission, SubmissionAnnotation, Video,
 )
-from ..permissions import require_editor, require_reviewer
-from ..schemas import ReviewCreate, ReviewOut, VideoOut
+from ..permissions import can_review, require_editor, require_reviewer
+from ..schemas import (BehaviorDecisionIn, BehaviorReopenIn, BehaviorReviewStateOut,
+                       ReviewCreate, ReviewOut, ReviewSubmissionContextIn, VideoOut)
+from ..behavior_review import current_final_approval
 from ..submission_service import (create_submission, resolve_and_hash_source,
                                   validate_snapshot_integrity)
 from ..video_write_gate import video_write_gate
 from ..video_playback import public_video
+from ..behavior_review import (decision_comparison, decision_dict, latest_decisions,
+                               locked_annotation_ids, reviewer_names, serialize_snapshot)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reviews"])
 
 
 def _snapshot_annotation(copy: SubmissionAnnotation) -> dict:
-    return {
-        "id": copy.id, "source_annotation_id": copy.source_annotation_id,
-        "category_id": copy.category_id, "category_name": copy.category_name,
-        "category_group": copy.category_group,
-        "category_participant_mode": copy.category_participant_mode,
-        "role_definitions": copy.role_definitions_snapshot or [],
-        "participant_roles": copy.participant_roles_snapshot or {},
-        "mouse_ids": copy.mouse_ids or [], "start_time": copy.start_time,
-        "end_time": copy.end_time, "start_frame": copy.start_frame,
-        "end_frame": copy.end_frame,
-    }
+    return serialize_snapshot(copy)
 
 
 def _now() -> datetime:
@@ -64,8 +58,162 @@ def _to_review_out(review: Review) -> ReviewOut:
     )
 
 
+def _annotation_out(annotation: Annotation) -> dict:
+    return {
+        "id": annotation.id, "video_id": annotation.video_id,
+        "annotator_id": annotation.annotator_id, "category_id": annotation.category_id,
+        "start_time": annotation.start_time, "end_time": annotation.end_time,
+        "start_frame": annotation.start_frame, "end_frame": annotation.end_frame,
+        "confidence": annotation.confidence, "review_status": annotation.review_status,
+        "crop_region": annotation.crop_region, "mouse_ids": annotation.mouse_ids or [],
+        "participant_roles": annotation.participant_roles or {},
+        "participant_status": annotation.participant_status,
+        "mouse_id_status": annotation.mouse_id_status,
+        "detection_import_revision": annotation.detection_import_revision,
+        "identity_revision": annotation.identity_revision,
+        "created_at": annotation.created_at, "updated_at": annotation.updated_at,
+        "annotator": annotation.annotator.username if annotation.annotator else None,
+        "category_name": annotation.category.name if annotation.category else None,
+    }
+
+
+def _review_state(db: Session, video: Video, membership) -> dict:
+    submission = (db.query(Submission).filter_by(video_id=video.id, status="submitted").first()
+                  or db.query(Submission).filter_by(video_id=video.id)
+                  .order_by(Submission.attempt_no.desc()).first())
+    locks = locked_annotation_ids(db, video.id)
+    if submission is None:
+        return {"submission_id": None, "attempt_no": None, "submission_status": None,
+                "decision_revision": 0, "counts": {"pending": 0, "approved": 0, "rejected": 0},
+                "can_finalize_approval": False, "annotations": [], "feedback_items": [],
+                "locked_annotation_ids": locks, "can_reopen": False}
+    snapshots = list(submission.annotations)
+    decisions = latest_decisions(db, [row.id for row in snapshots])
+    names = reviewer_names(db, list(decisions.values()))
+    annotations = [{**serialize_snapshot(row), "decision": decision_dict(decisions.get(row.id), names)}
+                   for row in snapshots]
+    statuses = [decisions[row.id].status if row.id in decisions else "pending" for row in snapshots]
+    counts = {name: statuses.count(name) for name in ("pending", "approved", "rejected")}
+
+    rejected_submission = (submission if submission.status == "rejected" else
+        db.query(Submission).filter_by(video_id=video.id, status="rejected")
+        .order_by(Submission.attempt_no.desc()).first())
+    feedback_items = []
+    if rejected_submission is not None:
+        rejected_snapshots = list(rejected_submission.annotations)
+        rejected_latest = latest_decisions(db, [row.id for row in rejected_snapshots])
+        rejected_names = reviewer_names(db, list(rejected_latest.values()))
+        live = {row.id: row for row in db.query(Annotation).filter_by(video_id=video.id).all()}
+        current_import = db.query(DetectionImport).filter_by(video_id=video.id, active=True).first()
+        for row in rejected_snapshots:
+            decision = rejected_latest.get(row.id)
+            if decision is None or decision.status != "rejected":
+                continue
+            current = live.get(row.source_annotation_id)
+            feedback_items.append({
+                "submission_annotation_id": row.id,
+                "source_annotation_id": row.source_annotation_key,
+                "comparison": decision_comparison(row, current,
+                    current_detection_import_id=current_import.id if current_import else None),
+                "feedback": decision.feedback, "baseline": serialize_snapshot(row),
+                "current": _annotation_out(current) if current else None,
+                "reviewer": rejected_names.get(decision.reviewer_id),
+                "decided_at": decision.decided_at,
+            })
+    return {
+        "submission_id": submission.id, "attempt_no": submission.attempt_no,
+        "submission_status": submission.status, "decision_revision": submission.decision_revision,
+        "counts": counts,
+        "can_finalize_approval": submission.status == "submitted" and can_review(membership)
+                                 and bool(snapshots) and counts["approved"] == len(snapshots),
+        "annotations": annotations, "feedback_items": feedback_items,
+        "locked_annotation_ids": locks,
+        "can_reopen": submission.status == "approved" and can_review(membership),
+    }
+
+
+@router.get("/api/projects/{project_id}/videos/{video_id}/review-state",
+            response_model=BehaviorReviewStateOut)
+def behavior_review_state(project_id: int, video_id: int, access: tuple = Depends(project_access),
+                          db: Session = Depends(get_db)) -> dict:
+    return _review_state(db, _get_video(db, project_id, video_id), access[1])
+
+
+@router.put("/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/decision",
+            response_model=BehaviorReviewStateOut)
+def put_behavior_decision(project_id: int, video_id: int, submission_id: int, snapshot_id: int,
+                          body: BehaviorDecisionIn, request: Request,
+                          access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
+    membership = access[1]
+    require_reviewer(membership)
+    _get_video(db, project_id, video_id)
+    with video_write_gate(db, project_id=project_id, video_id=video_id, allow_submitted=True,
+                          operation_gate=request.app.state.video_operation_gate) as state:
+        submission = db.get(Submission, submission_id)
+        snapshot = db.get(SubmissionAnnotation, snapshot_id)
+        if submission is None or submission.video_id != video_id or snapshot is None or snapshot.submission_id != submission_id:
+            raise HTTPException(status_code=404, detail="Submission annotation snapshot not found")
+        latest = db.query(Submission).filter_by(video_id=video_id).order_by(Submission.attempt_no.desc()).first()
+        if latest.id != submission.id or not (submission.status == "submitted" or
+                (submission.status in {"rejected", "withdrawn"} and body.status == "pending")):
+            raise HTTPException(status_code=409, detail="Only the submitted attempt accepts decisions; reopen a final approval first")
+        if submission.decision_revision != body.expected_decision_revision:
+            raise HTTPException(status_code=409, detail={"code": "stale_decision_revision",
+                "expected": submission.decision_revision, "received": body.expected_decision_revision})
+        submission.decision_revision += 1
+        feedback = body.feedback.strip() if body.feedback is not None else None
+        decision = BehaviorReviewDecision(
+            submission_annotation_id=snapshot.id, status=body.status, feedback=feedback,
+            sequence=submission.decision_revision, reviewer_id=membership.user_id,
+            decided_at=_now(), origin="manual",
+        )
+        db.add(decision)
+        live = db.get(Annotation, snapshot.source_annotation_id) if snapshot.source_annotation_id is not None else None
+        if live is not None and live.video_id == video_id:
+            live.review_status = body.status
+            live.reviewer_id = membership.user_id if body.status != "pending" else None
+        db.commit()
+        return _review_state(db, state.video, membership)
+
+
+@router.post("/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen",
+             response_model=BehaviorReviewStateOut)
+def reopen_behavior_review(project_id: int, video_id: int, submission_id: int,
+                           body: BehaviorReopenIn, request: Request,
+                           access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> dict:
+    membership = access[1]
+    require_reviewer(membership)
+    _get_video(db, project_id, video_id)
+    with video_write_gate(db, project_id=project_id, video_id=video_id, allow_submitted=True,
+                          operation_gate=request.app.state.video_operation_gate) as state:
+        submission = db.get(Submission, submission_id)
+        latest = db.query(Submission).filter_by(video_id=video_id).order_by(Submission.attempt_no.desc()).first()
+        if submission is None or latest is None or submission.id != latest.id or submission.status != "approved":
+            raise HTTPException(status_code=409, detail="Only the latest approved attempt can be reopened")
+        submission.status = "superseded"
+        db.add(BehaviorReviewReopen(submission_id=submission.id, actor_id=membership.user_id,
+                                    reason=(body.reason or "").strip() or None, created_at=_now()))
+        decisions = latest_decisions(db, [row.id for row in submission.annotations])
+        for snapshot in submission.annotations:
+            if decisions.get(snapshot.id) and decisions[snapshot.id].status == "approved":
+                submission.decision_revision += 1
+                db.add(BehaviorReviewDecision(submission_annotation_id=snapshot.id, status="pending",
+                    feedback=None, sequence=submission.decision_revision, reviewer_id=membership.user_id,
+                    decided_at=_now(), origin="reopen"))
+                live = db.get(Annotation, snapshot.source_annotation_id) if snapshot.source_annotation_id is not None else None
+                if live is not None:
+                    live.review_status, live.reviewer_id = "pending", None
+        state.video.workflow_status = "draft"
+        state.video.submitted_at = None
+        state.video.approved_at = None
+        state.video.approved_by = None
+        db.commit()
+        return _review_state(db, state.video, membership)
+
+
 @router.post("/api/projects/{project_id}/videos/{video_id}/submit", response_model=VideoOut)
 def submit_video(project_id: int, video_id: int, request: Request,
+                 body: ReviewSubmissionContextIn | None = None,
                  access: tuple = Depends(project_access), db: Session = Depends(get_db)) -> Video:
     membership = access[1]
     require_editor(membership, "Only active project members can submit")
@@ -89,21 +237,21 @@ def submit_video(project_id: int, video_id: int, request: Request,
             raise HTTPException(status_code=400, detail=(
                 f"Video identity revision projection is stale: video={video.identity_revision}, import={imp.edit_version}"
             ))
-        current_approved = db.query(Submission).filter_by(video_id=video.id, status="approved").first()
-        if current_approved and (
-            current_approved.source_annotation_version == video.annotation_revision
-            and current_approved.source_media_revision == video.media_revision
-            and current_approved.detection_snapshot.detection_import_id == imp.id
-            and current_approved.detection_snapshot.detection_import.revision == imp.revision
-            and current_approved.detection_snapshot.source_edit_version == imp.edit_version
-            and current_approved.source_storage_key == source_identity[0]
-            and current_approved.source_video_sha256 == source_identity[1]
-            and (current_approved.source_file_size, current_approved.source_mtime_ns,
-                 current_approved.source_device, current_approved.source_inode)
-                == (source_identity[2].size, source_identity[2].mtime_ns,
-                    source_identity[2].device, source_identity[2].inode)
-        ):
-            raise HTTPException(status_code=400, detail="Video is already approved with no draft changes")
+        if body is not None and (body.expected_submission_id is not None
+                                 or body.expected_decision_revision is not None):
+            previous = (db.query(Submission).filter_by(video_id=video.id)
+                        .order_by(Submission.attempt_no.desc()).first())
+            if (previous is None or (body.expected_submission_id is not None
+                    and previous.id != body.expected_submission_id)):
+                raise HTTPException(status_code=409, detail={"code": "stale_submission"})
+            if (body.expected_decision_revision is not None
+                    and previous.decision_revision != body.expected_decision_revision):
+                raise HTTPException(status_code=409, detail={"code": "stale_decision_revision",
+                    "expected": previous.decision_revision,
+                    "received": body.expected_decision_revision})
+        if current_final_approval(db, video.id) is not None:
+            raise HTTPException(status_code=409, detail={"code": "approved_submission_requires_reopen",
+                "message": "Reopen the final approval before submitting another attempt"})
         create_submission(db, request.app.state.settings, video, imp, membership.user_id,
                           source_identity=source_identity)
         db.commit()
@@ -190,12 +338,27 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
             raise HTTPException(status_code=400, detail="Only submitted videos can be reviewed")
         if submission.review is not None:
             raise HTTPException(status_code=409, detail="Submission already has a review")
+        if body.expected_submission_id != submission.id:
+            raise HTTPException(status_code=409, detail={"code": "stale_submission",
+                "expected": submission.id, "received": body.expected_submission_id})
+        if body.expected_decision_revision != submission.decision_revision:
+            raise HTTPException(status_code=409, detail={"code": "stale_decision_revision",
+                "expected": submission.decision_revision,
+                "received": body.expected_decision_revision})
         imp = validate_snapshot_integrity(db, submission.detection_snapshot)
         if imp.video_id != video_id:
             raise HTTPException(status_code=409, detail="Submission snapshot belongs to another video")
         copies = db.query(SubmissionAnnotation).filter_by(submission_id=submission.id).all()
         if not copies:
             raise HTTPException(status_code=409, detail="Submission annotation snapshot is empty")
+        copy_decisions = latest_decisions(db, [copy.id for copy in copies])
+        if body.result == "approved" and any(
+                copy.id not in copy_decisions or copy_decisions[copy.id].status != "approved"
+                for copy in copies):
+            raise HTTPException(status_code=409, detail={
+                "code": "behavior_decisions_incomplete",
+                "message": "Every behavior snapshot must be approved before final video approval",
+            })
         now = _now()
         if body.result == "approved":
             db.query(Submission).filter(
@@ -219,11 +382,14 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
         state.video.workflow_status = body.result
         state.video.approved_at = now if body.result == "approved" else None
         state.video.approved_by = membership.user_id if body.result == "approved" else None
-        # Compatibility projection only; decision authority remains immutable copies.
-        source_ids = [copy.source_annotation_id for copy in copies if copy.source_annotation_id is not None]
-        db.query(Annotation).filter(Annotation.id.in_(source_ids), Annotation.video_id == video_id).update(
-            {"review_status": body.result, "reviewer_id": membership.user_id}, synchronize_session=False
-        )
+        # Compatibility projection only; per-snapshot decisions remain authoritative. A video-level
+        # rejection never invents individual rejections for pending historical rows.
+        for copy in copies:
+            decision = copy_decisions.get(copy.id)
+            live = db.get(Annotation, copy.source_annotation_id) if copy.source_annotation_id is not None else None
+            if live is not None and live.video_id == video_id and decision is not None:
+                live.review_status = decision.status
+                live.reviewer_id = decision.reviewer_id if decision.status != "pending" else None
         if body.result == "approved":
             db.query(DraftIdentityEdit).filter_by(detection_import_id=imp.id).delete(synchronize_session=False)
             db.flush()

@@ -214,6 +214,8 @@ class SubmissionAnnotationSnapshotOut(BaseModel):
     end_time: float
     start_frame: int
     end_frame: int
+    confidence: str
+    crop_region: Optional[dict[str, Any]] = None
 
 
 class VideoCreate(BaseModel):
@@ -393,6 +395,78 @@ class AnnotationOut(BaseModel):
 class ReviewCreate(BaseModel):
     result: Literal["approved", "rejected"]
     comment: Optional[str] = None
+    expected_submission_id: int = Field(gt=0)
+    expected_decision_revision: int = Field(ge=0)
+
+
+class BehaviorDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["pending", "approved", "rejected"]
+    feedback: Optional[str] = None
+    expected_decision_revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def rejected_requires_feedback(self):
+        if self.status == "rejected" and not (self.feedback or "").strip():
+            raise ValueError("rejected decision requires feedback")
+        return self
+
+
+class BehaviorReopenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: Optional[str] = None
+
+
+class ReviewSubmissionContextIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_submission_id: Optional[int] = None
+    expected_decision_revision: Optional[int] = Field(default=None, ge=0)
+
+
+class BehaviorReviewDecisionOut(BaseModel):
+    status: Literal["pending", "approved", "rejected"]
+    feedback: Optional[str] = None
+    decision_id: Optional[int] = None
+    sequence: Optional[int] = None
+    reviewer_id: Optional[int] = None
+    reviewer: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    origin: Optional[str] = None
+    carried_from_decision_id: Optional[int] = None
+
+
+class BehaviorReviewAnnotationOut(SubmissionAnnotationSnapshotOut):
+    decision: BehaviorReviewDecisionOut
+
+
+class BehaviorReviewCountsOut(BaseModel):
+    pending: int
+    approved: int
+    rejected: int
+
+
+class BehaviorReviewFeedbackItemOut(BaseModel):
+    submission_annotation_id: int
+    source_annotation_id: Optional[int] = None
+    comparison: Literal["unchanged", "modified", "deleted", "reverted"]
+    feedback: Optional[str] = None
+    baseline: SubmissionAnnotationSnapshotOut
+    current: Optional[AnnotationOut] = None
+    reviewer: Optional[str] = None
+    decided_at: Optional[datetime] = None
+
+
+class BehaviorReviewStateOut(BaseModel):
+    submission_id: Optional[int] = None
+    attempt_no: Optional[int] = None
+    submission_status: Optional[str] = None
+    decision_revision: int = 0
+    counts: BehaviorReviewCountsOut
+    can_finalize_approval: bool
+    annotations: list[BehaviorReviewAnnotationOut]
+    feedback_items: list[BehaviorReviewFeedbackItemOut]
+    locked_annotation_ids: list[int]
+    can_reopen: bool
 
 
 class ReviewOut(BaseModel):

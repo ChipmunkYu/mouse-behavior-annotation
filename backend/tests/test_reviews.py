@@ -157,9 +157,25 @@ def _submit(ctx, headers, project, video):
 
 
 def _review(ctx, headers, project, video, result, comment="ok"):
+    state_url = f"/api/projects/{project['id']}/videos/{video['id']}/review-state"
+    state = ctx.client.get(state_url, headers=headers)
+    payload = state.json() if state.status_code == 200 else {}
+    if result == "approved":
+        if state.status_code == 200 and state.json()["submission_status"] == "submitted":
+            payload = state.json()
+            for row in payload["annotations"]:
+                decision = ctx.client.put(
+                    f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{payload['submission_id']}/annotations/{row['id']}/decision",
+                    json={"status": "approved", "feedback": None,
+                          "expected_decision_revision": payload["decision_revision"]}, headers=headers)
+                if decision.status_code != 200:
+                    break
+                payload = decision.json()
     return ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/review",
-        json={"result": result, "comment": comment},
+        json={"result": result, "comment": comment,
+              "expected_submission_id": payload.get("submission_id") or 1,
+              "expected_decision_revision": payload.get("decision_revision", 0)},
         headers=headers,
     )
 
@@ -401,7 +417,9 @@ def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, lo
 
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "approved"
-    assert _submit(ctx, headers, project, video).status_code == 400
+    response = _submit(ctx, headers, project, video)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approved_submission_requires_reopen"
 
 
 def test_submit_resubmit_resets_annotation_review_fields(ctx, login_headers):
@@ -415,8 +433,9 @@ def test_submit_resubmit_resets_annotation_review_fields(ctx, login_headers):
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     with ctx.session_factory() as db:
         a = db.get(Annotation, ann["id"])
-        assert a.review_status == "rejected"
-        assert a.reviewer_id is not None
+        # Video-level rejection does not fabricate per-item legacy decisions.
+        assert a.review_status == "pending"
+        assert a.reviewer_id is None
 
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
@@ -680,8 +699,8 @@ def test_review_reject_syncs_video_and_annotations(ctx, login_headers):
 
     with ctx.session_factory() as db:
         a = db.get(Annotation, ann["id"])
-        assert a.review_status == "rejected"
-        assert a.reviewer_id == reviewer_id
+        assert a.review_status == "pending"
+        assert a.reviewer_id is None
 
 
 def test_review_roles_and_state_gate(ctx, login_headers):

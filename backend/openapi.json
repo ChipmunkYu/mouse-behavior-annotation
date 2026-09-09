@@ -706,6 +706,479 @@
         "title": "BatchStatusOut",
         "type": "object"
       },
+      "BehaviorDecisionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_decision_revision": {
+            "minimum": 0.0,
+            "title": "Expected Decision Revision",
+            "type": "integer"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "expected_decision_revision"
+        ],
+        "title": "BehaviorDecisionIn",
+        "type": "object"
+      },
+      "BehaviorReopenIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "BehaviorReopenIn",
+        "type": "object"
+      },
+      "BehaviorReviewAnnotationOut": {
+        "properties": {
+          "category_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Group"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "category_participant_mode": {
+            "default": "unordered",
+            "enum": [
+              "unordered",
+              "role_based"
+            ],
+            "title": "Category Participant Mode",
+            "type": "string"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "crop_region": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crop Region"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/BehaviorReviewDecisionOut"
+          },
+          "end_frame": {
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mouse_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Mouse Ids",
+            "type": "array"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Participant Roles",
+            "type": "object"
+          },
+          "role_definitions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RoleDefinitionOut"
+            },
+            "title": "Role Definitions",
+            "type": "array"
+          },
+          "source_annotation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Annotation Id"
+          },
+          "start_frame": {
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "category_id",
+          "category_name",
+          "start_time",
+          "end_time",
+          "start_frame",
+          "end_frame",
+          "confidence",
+          "decision"
+        ],
+        "title": "BehaviorReviewAnnotationOut",
+        "type": "object"
+      },
+      "BehaviorReviewCountsOut": {
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "approved",
+          "rejected"
+        ],
+        "title": "BehaviorReviewCountsOut",
+        "type": "object"
+      },
+      "BehaviorReviewDecisionOut": {
+        "properties": {
+          "carried_from_decision_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Carried From Decision Id"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin"
+          },
+          "reviewer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer"
+          },
+          "reviewer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer Id"
+          },
+          "sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequence"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "BehaviorReviewDecisionOut",
+        "type": "object"
+      },
+      "BehaviorReviewFeedbackItemOut": {
+        "properties": {
+          "baseline": {
+            "$ref": "#/components/schemas/SubmissionAnnotationSnapshotOut"
+          },
+          "comparison": {
+            "enum": [
+              "unchanged",
+              "modified",
+              "deleted",
+              "reverted"
+            ],
+            "title": "Comparison",
+            "type": "string"
+          },
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnnotationOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "reviewer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer"
+          },
+          "source_annotation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Annotation Id"
+          },
+          "submission_annotation_id": {
+            "title": "Submission Annotation Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "submission_annotation_id",
+          "comparison",
+          "baseline"
+        ],
+        "title": "BehaviorReviewFeedbackItemOut",
+        "type": "object"
+      },
+      "BehaviorReviewStateOut": {
+        "properties": {
+          "annotations": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorReviewAnnotationOut"
+            },
+            "title": "Annotations",
+            "type": "array"
+          },
+          "attempt_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt No"
+          },
+          "can_finalize_approval": {
+            "title": "Can Finalize Approval",
+            "type": "boolean"
+          },
+          "can_reopen": {
+            "title": "Can Reopen",
+            "type": "boolean"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/BehaviorReviewCountsOut"
+          },
+          "decision_revision": {
+            "default": 0,
+            "title": "Decision Revision",
+            "type": "integer"
+          },
+          "feedback_items": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorReviewFeedbackItemOut"
+            },
+            "title": "Feedback Items",
+            "type": "array"
+          },
+          "locked_annotation_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Locked Annotation Ids",
+            "type": "array"
+          },
+          "submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submission Id"
+          },
+          "submission_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submission Status"
+          }
+        },
+        "required": [
+          "counts",
+          "can_finalize_approval",
+          "annotations",
+          "feedback_items",
+          "locked_annotation_ids",
+          "can_reopen"
+        ],
+        "title": "BehaviorReviewStateOut",
+        "type": "object"
+      },
       "Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post": {
         "properties": {
           "metadata_file": {
@@ -2200,6 +2673,16 @@
             ],
             "title": "Comment"
           },
+          "expected_decision_revision": {
+            "minimum": 0.0,
+            "title": "Expected Decision Revision",
+            "type": "integer"
+          },
+          "expected_submission_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Expected Submission Id",
+            "type": "integer"
+          },
           "result": {
             "enum": [
               "approved",
@@ -2210,7 +2693,9 @@
           }
         },
         "required": [
-          "result"
+          "result",
+          "expected_submission_id",
+          "expected_decision_revision"
         ],
         "title": "ReviewCreate",
         "type": "object"
@@ -2318,6 +2803,36 @@
           "created_at"
         ],
         "title": "ReviewOut",
+        "type": "object"
+      },
+      "ReviewSubmissionContextIn": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_decision_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Decision Revision"
+          },
+          "expected_submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Submission Id"
+          }
+        },
+        "title": "ReviewSubmissionContextIn",
         "type": "object"
       },
       "RoleDefinitionIn": {
@@ -2453,6 +2968,22 @@
             "title": "Category Participant Mode",
             "type": "string"
           },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "crop_region": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crop Region"
+          },
           "end_frame": {
             "title": "End Frame",
             "type": "integer"
@@ -2519,7 +3050,8 @@
           "start_time",
           "end_time",
           "start_frame",
-          "end_frame"
+          "end_frame",
+          "confidence"
         ],
         "title": "SubmissionAnnotationSnapshotOut",
         "type": "object"
@@ -6678,6 +7210,62 @@
         ]
       }
     },
+    "/api/projects/{project_id}/videos/{video_id}/review-state": {
+      "get": {
+        "operationId": "behavior_review_state_api_projects__project_id__videos__video_id__review_state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorReviewStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Behavior Review State",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
     "/api/projects/{project_id}/videos/{video_id}/reviews": {
       "get": {
         "operationId": "review_history_api_projects__project_id__videos__video_id__reviews_get",
@@ -6738,6 +7326,165 @@
         ]
       }
     },
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/decision": {
+      "put": {
+        "operationId": "put_behavior_decision_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__decision_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "submission_id",
+            "required": true,
+            "schema": {
+              "title": "Submission Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BehaviorDecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorReviewStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Behavior Decision",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen": {
+      "post": {
+        "operationId": "reopen_behavior_review_api_projects__project_id__videos__video_id__submissions__submission_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "submission_id",
+            "required": true,
+            "schema": {
+              "title": "Submission Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BehaviorReopenIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorReviewStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reopen Behavior Review",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
     "/api/projects/{project_id}/videos/{video_id}/submit": {
       "post": {
         "operationId": "submit_video_api_projects__project_id__videos__video_id__submit_post",
@@ -6761,6 +7508,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReviewSubmissionContextIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

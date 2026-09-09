@@ -17,8 +17,8 @@ describe("annotation and project export entry points", () => {
   });
 
   it("keeps rejection feedback inside the left workspace column and merges time context into the draft summary", () => {
-    expect(annotateSource).toMatch(/<div className="annotate-body">\s*<section className="annotate-main">\s*\{visibleRejection \? \(/);
-    expect(annotateSource.indexOf('className="annotation-rejection"')).toBeLessThan(annotateSource.indexOf('className="card player-card"'));
+    expect(annotateSource).toMatch(/<div className="annotate-body">\s*<section className="annotate-main">\s*\{behaviorReviewState\?\.feedback_items\.length \? \(/);
+    expect(annotateSource.indexOf('className="behavior-feedback-panel"')).toBeLessThan(annotateSource.indexOf('className="card player-card"'));
     expect(annotateSource).toContain('className="draft-time-context"');
     expect(annotateSource).not.toContain('className="statusbar"');
     expect(annotateSource).not.toContain('className="time-display"');

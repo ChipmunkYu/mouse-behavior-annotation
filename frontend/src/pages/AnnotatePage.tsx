@@ -15,10 +15,11 @@ import {
   commitIdentityEdit,
   createSuppression,
   getCorrectedTracks,
+  getBehaviorReviewState,
   revertIdentityEdit,
   revertSuppression,
 } from "../api";
-import { ApiError } from "../api/client";
+import { ApiError, apiErrorDetail } from "../api/client";
 import type {
   Annotation,
   AnnotationPatchInput,
@@ -30,6 +31,7 @@ import type {
   DetectionSuppression,
   IdentityEditResult,
   Review,
+  BehaviorReviewState,
 } from "../api/types";
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
@@ -62,6 +64,30 @@ type DraftSnapshot = {
 };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+
+export const REVIEW_COMPARISON_LABELS: Record<string, string> = {
+  unchanged: "未修改",
+  modified: "已修改",
+  deleted: "已删除",
+  reverted: "改后又还原",
+};
+
+export function rejectedSubmitBlockerMessage(error: unknown): string | null {
+  const raw = apiErrorDetail(error);
+  if (!raw || typeof raw !== "object") return null;
+  const detail = raw as { code?: unknown; items?: unknown };
+  if (detail.code !== "rejected_annotations_not_addressed" || !Array.isArray(detail.items)) return null;
+  const rows = detail.items.map((item) => {
+    const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    const id = row.source_annotation_id ?? row.submission_annotation_id ?? "?";
+    return `标注 #${id}（${REVIEW_COMPARISON_LABELS[String(row.comparison)] ?? "未处理"}）`;
+  });
+  return `以下退回行为尚未处理，不能重新提交：${rows.join("、")}`;
+}
+
+function behaviorSnapshotText(item: { category_name?: string | null; category_id: number; start_frame: number; end_frame: number; mouse_ids: number[] }): string {
+  return `${item.category_name ?? `类别 #${item.category_id}`} · 帧 ${item.start_frame}–${item.end_frame} · ${item.mouse_ids.length ? item.mouse_ids.map((id) => `Track ${id}`).join("、") : "无参与对象"}`;
+}
 
 export function buildIdentityEditFeedback(
   operation: "split" | "merge",
@@ -181,9 +207,7 @@ export function resolveAnnotateEscapeAction(state: {
 function draftApiErrorMessages(error: unknown): string[] {
   if (!(error instanceof ApiError)) return [error instanceof Error ? error.message : "保存行为标注失败"];
   const messages: string[] = [];
-  const raw = error.detail && typeof error.detail === "object" && "detail" in error.detail
-    ? (error.detail as { detail?: unknown }).detail
-    : error.detail;
+  const raw = apiErrorDetail(error);
   const visit = (value: unknown) => {
     if (typeof value === "string") {
       if (value.trim()) messages.push(value.trim());
@@ -300,6 +324,8 @@ function AnnotationRow({
   selected,
   busy,
   readOnly,
+  locked,
+  decisionStatus,
   onEdit,
   onDelete,
   onSelect,
@@ -311,6 +337,8 @@ function AnnotationRow({
   selected: boolean;
   busy: boolean;
   readOnly: boolean;
+  locked: boolean;
+  decisionStatus: string | null;
   onEdit: () => void;
   onDelete: () => void;
   onSelect: () => void;
@@ -328,10 +356,11 @@ function AnnotationRow({
           <b>{formatTimeShort(ann.start_time)}</b> – <b>{formatTimeShort(ann.end_time)}</b>
         </span>
         <span className="anno-row-actions">
-          <button type="button" className="btn-link" disabled={busy || readOnly} onClick={onEdit}>
+          {locked ? <span className="behavior-lock" title="此行为已通过；撤销通过后才能修改">🔒 已通过</span> : decisionStatus === "rejected" ? <span className="behavior-rejected">需修改</span> : null}
+          <button type="button" className="btn-link" disabled={busy || readOnly || locked} onClick={onEdit}>
             编辑
           </button>
-          <button type="button" className="btn-link" disabled={busy || readOnly} onClick={onDelete} style={{ color: "var(--danger)" }}>
+          <button type="button" className="btn-link" disabled={busy || readOnly || locked} onClick={onDelete} style={{ color: "var(--danger)" }}>
             删除 [Delete]
           </button>
         </span>
@@ -508,6 +537,8 @@ function AnnotationList({
   frameCount,
   currentTime,
   readOnly,
+  lockedIds,
+  decisionBySourceId,
   selectedId,
   editingId,
   onSelect,
@@ -523,6 +554,8 @@ function AnnotationList({
   frameCount: number | null | undefined;
   currentTime: number;
   readOnly: boolean;
+  lockedIds: ReadonlySet<number>;
+  decisionBySourceId: ReadonlyMap<number, string>;
   selectedId: number | null;
   editingId: number | null;
   onSelect: (id: number) => void;
@@ -586,7 +619,9 @@ function AnnotationList({
                 selected={selectedId === a.id}
                 busy={busyId === a.id}
                 readOnly={readOnly}
-                onEdit={() => { if (!readOnly) { onSelect(a.id); onEditingChange(a.id); } }}
+                locked={lockedIds.has(a.id)}
+                decisionStatus={decisionBySourceId.get(a.id) ?? null}
+                onEdit={() => { if (!readOnly && !lockedIds.has(a.id)) { onSelect(a.id); onEditingChange(a.id); } }}
                 onDelete={() => void handleDelete(a)}
                 onSelect={() => onSelect(a.id)}
                 rowRef={activeId === a.id ? activeRowRef : undefined}
@@ -675,7 +710,7 @@ function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive,
   }, [focusIndex, navigationActive]);
   return <Card title="参与对象" className={`mouse-ids-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
     {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
-    {selected.length ? <div className="selected-mice">{selected.map((id) => <button key={id} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>)}</div> : null}
+    {selected.length ? <div className="selected-mice">{selected.map((id) => <button key={id} disabled={disabled} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>)}</div> : null}
     <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
     {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
   </Card>;
@@ -688,9 +723,9 @@ function RoleSlotsPanel({ category, assignments, pendingIds, activeKey, unlocked
   const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
   const trackRole = new Map<number, string>(); roles.forEach((r) => (assignments[r.key] ?? []).forEach((id) => trackRole.set(id, r.name)));
   return <Card title="参与对象角色" className="role-slots-panel" extra={<span className="role-slot-legend">按角色分配 · 不会自动切换</span>}>
-    {pendingIds.length ? <div className="pending-role-tracks" role="status"><b>待分配：</b>先选择角色槽位，再点击 Track。{pendingIds.map((id) => <button type="button" key={id} className="role-track-chip" onClick={() => onRemovePending(id)}>Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">从待分配中移除</span></button>)}</div> : null}
-    <div className="role-slots" role="list" aria-label="参与对象角色槽位">{roles.map((role) => { const ids = assignments[role.key] ?? []; const complete = ids.length >= role.min_count && (role.max_count == null || ids.length <= role.max_count); const accessible = isRoleAccessible(roles, assignments, unlocked, role.key); return <button type="button" role="listitem" key={role.key} disabled={!accessible} title={accessible ? `切换到“${role.name}”` : "请先完成所有前序角色的最少数量"} className={`role-slot${activeKey === role.key ? " active" : ""}${complete ? " complete" : " incomplete"}${!accessible ? " locked" : ""}`} onClick={() => onActivate(role.key)} aria-pressed={activeKey === role.key} aria-label={`${role.name}，${complete ? "已完成" : "未完成"}，已选 ${ids.length}`}><span className="role-slot-index">{accessible ? (complete ? "✓" : "!") : "🔒"}</span><span className="role-slot-main"><b>{role.name}</b><small>{ids.length} / {role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`} · {complete ? "已完成" : accessible ? "可点击切换" : "前序完成后可进入"}</small></span>{activeKey === role.key ? <span className="role-active-label">当前</span> : null}</button>; })}</div>
-    <div className="role-slot-chips">{roles.map((role) => (assignments[role.key] ?? []).map((id) => <button type="button" key={`${role.key}-${id}`} className="role-track-chip" onClick={() => onRemove(role.key, id)}><b>{role.name}</b> · Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">移除</span></button>))}{Object.values(assignments).every((ids) => ids.length === 0) ? <span className="muted">先选择角色槽位，再点击视频框或下方 Track。</span> : null}</div>
+    {pendingIds.length ? <div className="pending-role-tracks" role="status"><b>待分配：</b>先选择角色槽位，再点击 Track。{pendingIds.map((id) => <button type="button" key={id} disabled={disabled} className="role-track-chip" onClick={() => onRemovePending(id)}>Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">从待分配中移除</span></button>)}</div> : null}
+    <div className="role-slots" role="list" aria-label="参与对象角色槽位">{roles.map((role) => { const ids = assignments[role.key] ?? []; const complete = ids.length >= role.min_count && (role.max_count == null || ids.length <= role.max_count); const accessible = isRoleAccessible(roles, assignments, unlocked, role.key); return <button type="button" role="listitem" key={role.key} disabled={disabled || !accessible} title={accessible ? `切换到“${role.name}”` : "请先完成所有前序角色的最少数量"} className={`role-slot${activeKey === role.key ? " active" : ""}${complete ? " complete" : " incomplete"}${!accessible ? " locked" : ""}`} onClick={() => onActivate(role.key)} aria-pressed={activeKey === role.key} aria-label={`${role.name}，${complete ? "已完成" : "未完成"}，已选 ${ids.length}`}><span className="role-slot-index">{accessible ? (complete ? "✓" : "!") : "🔒"}</span><span className="role-slot-main"><b>{role.name}</b><small>{ids.length} / {role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`} · {complete ? "已完成" : accessible ? "可点击切换" : "前序完成后可进入"}</small></span>{activeKey === role.key ? <span className="role-active-label">当前</span> : null}</button>; })}</div>
+    <div className="role-slot-chips">{roles.map((role) => (assignments[role.key] ?? []).map((id) => <button type="button" key={`${role.key}-${id}`} disabled={disabled} className="role-track-chip" onClick={() => onRemove(role.key, id)}><b>{role.name}</b> · Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">移除</span></button>))}{Object.values(assignments).every((ids) => ids.length === 0) ? <span className="muted">先选择角色槽位，再点击视频框或下方 Track。</span> : null}</div>
     <div className="mouse-id-list">{tracks.map((track) => { const assigned = trackRole.get(track.display_track_id); const pending = pendingIds.includes(track.display_track_id); return <button type="button" key={track.display_track_id} disabled={disabled || !activeKey} className={`mouse-id-item${assigned || pending ? " selected" : ""}`} onClick={() => onTrack(track.display_track_id)}><b>Track {track.display_track_id}</b><span>{assigned ? `已分配：${assigned}` : pending ? "待分配 · 点击加入当前角色" : track.visible_in_current_frame ? "当前可见 · 点击加入" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>; })}</div>
     {message ? <div className="mouse-rule-warning" role="status">{message}</div> : null}
   </Card>;
@@ -828,6 +863,7 @@ export default function AnnotatePage() {
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reviewHistory, setReviewHistory] = useState<Review[]>([]);
+  const [behaviorReviewState, setBehaviorReviewState] = useState<BehaviorReviewState | null>(null);
   const reviewRequestRef = useRef(0);
   const [hint, setHint] = useState("");
 
@@ -909,6 +945,7 @@ export default function AnnotatePage() {
     setNavigationPending(false);
     setErrorMsg(null);
     setReviewHistory([]);
+    setBehaviorReviewState(null);
     setHint("");
   }, [pid, vid]);
 
@@ -932,6 +969,8 @@ export default function AnnotatePage() {
     () => new Map(categories.map((c) => [c.id, c] as const)),
     [categories]
   );
+  const lockedAnnotationIds = useMemo(() => new Set(behaviorReviewState?.locked_annotation_ids ?? []), [behaviorReviewState]);
+  const decisionBySourceId = useMemo(() => new Map((behaviorReviewState?.annotations ?? []).flatMap((item) => item.source_annotation_id == null ? [] : [[item.source_annotation_id, item.decision.status] as const])), [behaviorReviewState]);
   const invalidTrackCounts = useMemo(() => annotations.reduce((counts, annotation) => {
     if (annotation.mouse_id_status !== "needs_mouse_ids") return counts;
     if (categoryById.get(annotation.category_id)?.participant_mode === "role_based") counts.roleBased += 1;
@@ -1004,6 +1043,7 @@ export default function AnnotatePage() {
   }, [activeRoleKey, confirm, participantRoles, roleDefinitions]);
 
   const selectCategory = useCallback(async (category: Category) => {
+    if (video?.workflow_status === "approved") { setHint("视频已最终通过；请先由审核人重新打开审核"); return; }
     // 鼠标点击与数字键复用本函数，全局导航不依赖旧按钮焦点。
     blurActiveButton();
     if (activeCategory?.id === category.id) {
@@ -1048,7 +1088,7 @@ export default function AnnotatePage() {
     setParticipantNavigationActive(false);
     setParticipantFocusIndex(0);
     setHint(`已选择类别“${category.name}”；按 T 进入参与对象键盘选择，用 ↑/↓ 移动、Enter 选择、T 退出`);
-  }, [activeCategory, detectionImport, participantRoles, roleSelectedIds, selectedMouseIds, tracks]);
+  }, [activeCategory, detectionImport, participantRoles, roleSelectedIds, selectedMouseIds, tracks, video?.workflow_status]);
 
   useEffect(() => {
     if (!participantNavigationActive) return;
@@ -1175,6 +1215,10 @@ export default function AnnotatePage() {
 
   function changeEditingAnnotation(id: number | null) {
     if (id != null) {
+      if (lockedAnnotationIds.has(id)) {
+        setHint("此行为已通过并锁定；请先由审核人撤销通过");
+        return;
+      }
       if (editingAnnotationId == null) {
         draftBeforeEditRef.current = {
           activeCategory,
@@ -1231,6 +1275,10 @@ export default function AnnotatePage() {
   }, [annotations, editingAnnotationId, selectedAnnotationId]);
 
   useEffect(() => {
+    if (editingAnnotationId != null && lockedAnnotationIds.has(editingAnnotationId)) changeEditingAnnotation(null);
+  }, [editingAnnotationId, lockedAnnotationIds]);
+
+  useEffect(() => {
     if (editingAnnotationId == null) return;
     const annotation = annotations.find((a) => a.id === editingAnnotationId);
     const category = annotation ? categoryById.get(annotation.category_id) : null;
@@ -1262,12 +1310,16 @@ export default function AnnotatePage() {
     const routeKey = `${pid}:${vid}`;
     setLoading(true);
     try {
-      const [projs, vids, cats, anns, suppressions] = await Promise.all([
+      const [projs, vids, cats, anns, suppressions, loadedReviewState] = await Promise.all([
         listProjects(),
         listVideos(pid),
         listCategories(pid),
         listAnnotations(pid, vid),
         listDetectionSuppressions(pid, vid),
+        getBehaviorReviewState(pid, vid).catch((error) => {
+          if (error instanceof ApiError && error.status === 404) return null;
+          throw error;
+        }),
       ]);
       if (loadAllRequestRef.current !== requestId || routeKeyRef.current !== routeKey) return;
       const loadedVideo = vids.find((v) => v.id === vid) ?? null;
@@ -1277,6 +1329,7 @@ export default function AnnotatePage() {
       setIdentityRevision(loadedVideo?.identity_revision ?? 0);
       setCategories(cats);
       setAnnotations(anns);
+      setBehaviorReviewState(loadedReviewState);
       setActiveSuppressions(suppressions);
       setLastSuppressionId(suppressions[0]?.id ?? null);
       setLastIdentityEditId(null);
@@ -1315,6 +1368,17 @@ export default function AnnotatePage() {
     }
   }, [pid, vid]);
 
+  const refreshBehaviorReviewState = useCallback(async () => {
+    const routeKey = `${pid}:${vid}`;
+    try {
+      const state = await getBehaviorReviewState(pid, vid);
+      if (routeKeyRef.current === routeKey) setBehaviorReviewState(state);
+    } catch {
+      // 标注保存结果仍以后端为准；审核状态同步失败时保持现有锁定，避免误开放编辑。
+    }
+  }, [pid, vid]);
+
+
   /* ---------- 工作流守卫 ----------
    * 对已提交 / 已通过 / 已退回的视频执行创建 / 编辑 / 删除标注前，
    * 明确告知后果（退回草稿、审核失效、已有片段删除）；取消则不发请求。
@@ -1323,13 +1387,17 @@ export default function AnnotatePage() {
     async (action: string): Promise<boolean> => {
       const status = video?.workflow_status ?? "draft";
       if (status === "draft" || !status) return true;
+      if (status === "approved") {
+        setErrorMsg("视频已最终通过；请先由审核人重新打开审核");
+        return false;
+      }
       const label = WORKFLOW_LABELS[status] ?? status;
       return confirm({
         title: `确认${action}？`,
         message: (
           <>
             该视频当前为「<b>{label}</b>」（行为标注版本 v{video?.annotation_revision ?? 1}）。
-            修改行为标注将使其退回<b>草稿</b>，已有审核结果将<b>失效</b>，已有视频片段（如有）将被删除，需要重新提交审核。
+            修改未通过的行为后，视频将回到<b>草稿</b>并需要重新提交。已通过行为仍保持锁定。
           </>
         ),
         confirmLabel: `仍要${action}`,
@@ -1372,15 +1440,22 @@ export default function AnnotatePage() {
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      const updated = await submitVideoForReview(pid, vid);
+      const updated = await submitVideoForReview(pid, vid, behaviorReviewState?.submission_id == null ? undefined : {
+        expected_submission_id: behaviorReviewState.submission_id,
+        expected_decision_revision: behaviorReviewState.decision_revision,
+      });
       setVideo(updated);
+      await refreshBehaviorReviewState();
       setHint("已提交审核，等待审核人处理");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "提交审核失败");
+      setErrorMsg(rejectedSubmitBlockerMessage(err) ?? (err instanceof Error ? err.message : "提交审核失败"));
+      if (err instanceof ApiError && err.status === 409) {
+        await Promise.all([refreshBehaviorReviewState(), refreshVideo()]);
+      }
     } finally {
       setSubmitting(false);
     }
-  }, [video, annotations, pid, vid, confirm, detectionImport, invalidTrackCounts]);
+  }, [video, annotations, pid, vid, confirm, detectionImport, invalidTrackCounts, behaviorReviewState, refreshBehaviorReviewState, refreshVideo]);
 
   /* ---------- 从片段库带参跳转：定位到目标时间 ---------- */
   useEffect(() => {
@@ -1420,6 +1495,7 @@ export default function AnnotatePage() {
 
   /* ---------- 标注操作 ---------- */
   function markStart() {
+    if (video?.workflow_status === "approved") { setHint("视频已最终通过；请先由审核人重新打开审核"); return; }
     if (!videoRef.current) return;
     const frame = clampFrame(currentFrame, authoritativeFrameCount);
     setStartPoint({ frame });
@@ -1428,6 +1504,7 @@ export default function AnnotatePage() {
   }
 
   function markEnd() {
+    if (video?.workflow_status === "approved") { setHint("视频已最终通过；请先由审核人重新打开审核"); return; }
     if (!videoRef.current) return;
     const frame = clampFrame(currentFrame, authoritativeFrameCount);
     setEndPoint({ frame });
@@ -1558,6 +1635,7 @@ export default function AnnotatePage() {
           : `行为已保存：${cat.name}，帧 ${sp.frame}→${ep.frame}`
       );
       await loadAnnotations();
+      await refreshBehaviorReviewState();
       if (wasLocked) await refreshVideo();
     } catch (err) {
       setSaveState("error");
@@ -1607,8 +1685,8 @@ export default function AnnotatePage() {
         setIdentityEditFeedback({ text: feedbackText, key: Date.now(), routeKey: operationRouteKey });
       }
       setOverlayRefresh((x) => x + 1);
-      await loadAnnotations();
-      if (result.edit_id) setHint("track 修正已提交；受影响行为标注和审核状态已刷新");
+      await Promise.all([loadAnnotations(), refreshBehaviorReviewState()]);
+      if (result.edit_id) setHint("track 修正已提交；行为审核结果保持不变");
     } catch (err) { setErrorMsg(err instanceof Error ? err.message : "track 修正失败"); }
     finally { setIdentityBusy(false); }
   }
@@ -1621,7 +1699,7 @@ export default function AnnotatePage() {
     setIdentityBusy(true);
     try {
       const result = await createSuppression(pid, vid, { scope: "corrected_track", track_id: selectedId, base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
-      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastSuppressionId(result.suppression_id ?? null); setIdentitySelectedMouseIds([]); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setLastSuppressionId(result.suppression_id ?? null); setIdentitySelectedMouseIds([]); setOverlayRefresh((x) => x + 1); await Promise.all([loadAnnotations(), refreshBehaviorReviewState()]);
       if (result.suppression_id != null) {
         setUndoHistory((history) => [...history, { kind: "suppression", id: result.suppression_id!, createdAt: Date.now() }]);
       } else {
@@ -1637,7 +1715,7 @@ export default function AnnotatePage() {
     setIdentityBusy(true);
     try {
       const result = await revertSuppression(pid, vid, suppressionId, { base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
-      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); setOverlayRefresh((x) => x + 1); await Promise.all([loadAnnotations(), refreshBehaviorReviewState()]);
       setActiveSuppressions((current) => current.filter((s) => s.id !== suppressionId));
       if (lastSuppressionId === suppressionId) setLastSuppressionId(null);
       await syncSuppressions();
@@ -1652,7 +1730,7 @@ export default function AnnotatePage() {
     setIdentityBusy(true);
     try {
       const result = await revertIdentityEdit(pid, vid, editId, { base_identity_revision: identityRevision, base_detection_import_revision: detectionImport.revision });
-      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); if (lastIdentityEditId === editId) setLastIdentityEditId(null); setOverlayRefresh((x) => x + 1); await loadAnnotations();
+      setIdentityRevision(result.identity_revision); setVideo((v) => v ? { ...v, identity_revision: result.identity_revision } : v); if (lastIdentityEditId === editId) setLastIdentityEditId(null); setOverlayRefresh((x) => x + 1); await Promise.all([loadAnnotations(), refreshBehaviorReviewState()]);
       setUndoHistory((history) => history.filter((entry) => !(entry.kind === "identity" && entry.id === editId)));
       return true;
     } catch (err) { setErrorMsg(err instanceof Error ? err.message : "撤销 Split / Merge 失败"); return false; }
@@ -1674,6 +1752,10 @@ export default function AnnotatePage() {
 
   /* ---------- 列表编辑 / 删除 / 导出 ---------- */
   async function handleEditSave(id: number, patch: AnnotationPatchInput) {
+    if (lockedAnnotationIds.has(id)) {
+      setErrorMsg("此行为已通过并锁定；请先由审核人撤销通过");
+      throw new Error("此行为已锁定");
+    }
     if (!(await guardMutation("编辑行为标注"))) return;
     setSaveState("saving");
     setAnnotationMutationBusy(true);
@@ -1689,6 +1771,7 @@ export default function AnnotatePage() {
       const wasLocked = (video?.workflow_status ?? "draft") !== "draft";
       setHint(wasLocked ? "行为标注已更新，视频已退回草稿，请重新提交审核" : "行为标注已更新");
       await loadAnnotations();
+      await refreshBehaviorReviewState();
       if (wasLocked) await refreshVideo();
     } catch (err) {
       setSaveState("error");
@@ -1709,6 +1792,10 @@ export default function AnnotatePage() {
   }
 
   async function handleDelete(ann: Annotation) {
+    if (lockedAnnotationIds.has(ann.id)) {
+      setHint("此行为已通过并锁定；不能编辑或删除");
+      return;
+    }
     const item = `${ann.category_name ?? `#${ann.category_id}`}（${formatTimeShort(ann.start_time)}–${formatTimeShort(ann.end_time)}）`;
     const status = video?.workflow_status ?? "draft";
     const locked = status !== "draft" && status !== "";
@@ -1733,6 +1820,7 @@ export default function AnnotatePage() {
       setSaveState("saved");
       setHint(locked ? "行为标注已删除，视频已退回草稿，请重新提交审核" : "行为标注已删除");
       await loadAnnotations();
+      await refreshBehaviorReviewState();
       if (locked) await refreshVideo();
     } catch (err) {
       setSaveState("error");
@@ -2170,7 +2258,21 @@ export default function AnnotatePage() {
 
       <div className="annotate-body">
         <section className="annotate-main">
-          {visibleRejection ? (
+          {behaviorReviewState?.feedback_items.length ? (
+            <section className="behavior-feedback-panel" aria-labelledby="behavior-feedback-title">
+              <div className="annotation-rejection-heading"><strong id="behavior-feedback-title">退回行为</strong><span>意见始终对应退回时的版本</span></div>
+              <div className="behavior-feedback-list">
+                {behaviorReviewState.feedback_items.map((item) => (
+                  <article key={item.submission_annotation_id} className={`behavior-feedback-item ${item.comparison}`}>
+                    <div className="behavior-feedback-head"><b>{item.baseline.category_name ?? `类别 #${item.baseline.category_id}`}</b><span>{REVIEW_COMPARISON_LABELS[item.comparison] ?? item.comparison}</span></div>
+                    <p>{item.feedback?.trim() || "审核人未填写具体意见"}</p>
+                    <div className="behavior-comparison"><span><small>退回时</small>{behaviorSnapshotText(item.baseline)}</span><span><small>当前</small>{item.current ? behaviorSnapshotText(item.current) : "此行为已删除"}</span></div>
+                    {item.decided_at ? <div className="annotation-rejection-meta">审核人 {item.reviewer ?? "—"} · {formatDate(item.decided_at)}</div> : null}
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : visibleRejection ? (
             <section className="annotation-rejection" aria-labelledby="annotation-rejection-title">
               <div className="annotation-rejection-heading">
                 <strong id="annotation-rejection-title">退回意见</strong>
@@ -2206,6 +2308,7 @@ export default function AnnotatePage() {
                     interactive
                     onToggleTrack={(id) => {
                       if (workspaceMode === "identity") toggleIdentityMouseId(id);
+                      else if (video?.workflow_status === "approved") setHint("视频已最终通过；行为编辑已锁定");
                       else if (activeCategory?.participant_mode === "role_based") void toggleRoleTrack(id);
                       else toggleMouseId(id);
                     }}
@@ -2258,7 +2361,7 @@ export default function AnnotatePage() {
                     ref={startButtonRef}
                     type="button"
                     className={`${startPoint ? "btn btn-sm btn-point armed" : "btn btn-sm btn-point"}${draftErrorFields.has("start") ? " draft-field-error" : ""}`}
-                    disabled={workspaceMode === "identity"}
+                    disabled={workspaceMode === "identity" || video?.workflow_status === "approved"}
                     aria-invalid={draftErrorFields.has("start") || undefined}
                     aria-describedby={draftErrorFields.has("start") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
@@ -2273,7 +2376,7 @@ export default function AnnotatePage() {
                     ref={endButtonRef}
                     type="button"
                     className={`btn btn-sm btn-point${draftErrorFields.has("end") ? " draft-field-error" : ""}`}
-                    disabled={workspaceMode === "identity"}
+                    disabled={workspaceMode === "identity" || video?.workflow_status === "approved"}
                     aria-invalid={draftErrorFields.has("end") || undefined}
                     aria-describedby={draftErrorFields.has("end") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
@@ -2284,7 +2387,7 @@ export default function AnnotatePage() {
                   >
                     设结束 [D]
                   </button>
-                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || video?.workflow_status === "approved" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveDraft()}>
                     {saveState === "saving" ? "保存中…" : "保存此行为 [Ctrl+Enter]"}
                   </button>
                   <button type="button" className="btn btn-sm" disabled={workspaceMode === "identity" || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
@@ -2353,10 +2456,10 @@ export default function AnnotatePage() {
           ) : null}
           {workspaceMode === "behavior" ? <div id="behavior-panel" className="workspace-panel" role="tabpanel" aria-labelledby="behavior-tab">
             <div ref={categorySectionRef} tabIndex={-1} className={draftErrorFields.has("category") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("category") || undefined} aria-describedby={draftErrorFields.has("category") ? "draft-error-summary" : undefined}>
-              <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady} />
+              <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady || video?.workflow_status === "approved"} />
             </div>
             <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
-              {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
+              {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport || video?.workflow_status === "approved"} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport || video?.workflow_status === "approved"} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
           </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
           <AnnotationList
@@ -2367,6 +2470,8 @@ export default function AnnotatePage() {
             frameCount={authoritativeFrameCount}
             currentTime={currentTime}
             readOnly={workspaceMode === "identity"}
+            lockedIds={lockedAnnotationIds}
+            decisionBySourceId={decisionBySourceId}
             selectedId={selectedAnnotationId}
             editingId={editingAnnotationId}
             onSelect={setSelectedAnnotationId}

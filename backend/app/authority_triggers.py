@@ -9,7 +9,7 @@ TRIGGERS = {
 "trg_state_delete": "BEFORE DELETE ON detection_snapshot_states BEGIN SELECT RAISE(ABORT,'referenced state immutable') WHERE EXISTS(SELECT 1 FROM submissions WHERE detection_snapshot_id=OLD.snapshot_id); END",
 "trg_submission_frozen": "BEFORE UPDATE ON submissions WHEN NEW.video_id IS NOT OLD.video_id OR NEW.detection_snapshot_id IS NOT OLD.detection_snapshot_id OR NEW.attempt_no IS NOT OLD.attempt_no OR NEW.source_annotation_version IS NOT OLD.source_annotation_version OR NEW.source_media_revision IS NOT OLD.source_media_revision OR NEW.source_video_filename IS NOT OLD.source_video_filename OR NEW.source_storage_key IS NOT OLD.source_storage_key OR NEW.source_video_sha256 IS NOT OLD.source_video_sha256 OR NEW.source_file_size IS NOT OLD.source_file_size OR NEW.source_mtime_ns IS NOT OLD.source_mtime_ns OR NEW.source_device IS NOT OLD.source_device OR NEW.source_inode IS NOT OLD.source_inode OR (NEW.submitted_by IS NOT OLD.submitted_by AND NOT (OLD.submitted_by IS NOT NULL AND NEW.submitted_by IS NULL)) OR NEW.submitted_at IS NOT OLD.submitted_at OR NEW.legacy_backfill IS NOT OLD.legacy_backfill BEGIN SELECT RAISE(ABORT,'submission immutable'); END",
 "trg_submission_lifecycle": "BEFORE UPDATE OF status,decided_at ON submissions WHEN NOT ((NEW.status=OLD.status AND NEW.decided_at IS OLD.decided_at) OR (OLD.status='submitted' AND NEW.status='withdrawn' AND NEW.decided_at IS OLD.decided_at) OR (OLD.status='submitted' AND NEW.status IN ('approved','rejected') AND NEW.decided_at IS NOT NULL) OR (OLD.status='approved' AND NEW.status='superseded' AND NEW.decided_at IS OLD.decided_at)) BEGIN SELECT RAISE(ABORT,'invalid submission lifecycle'); END",
-"trg_annotation_update": "BEFORE UPDATE ON submission_annotations WHEN NEW.submission_id IS NOT OLD.submission_id OR (NEW.source_annotation_id IS NOT OLD.source_annotation_id AND NOT (OLD.source_annotation_id IS NOT NULL AND NEW.source_annotation_id IS NULL)) OR NEW.category_id IS NOT OLD.category_id OR NEW.category_name IS NOT OLD.category_name OR NEW.category_group IS NOT OLD.category_group OR NEW.category_participant_mode IS NOT OLD.category_participant_mode OR NEW.role_definitions_snapshot IS NOT OLD.role_definitions_snapshot OR NEW.participant_roles_snapshot IS NOT OLD.participant_roles_snapshot OR NEW.start_time IS NOT OLD.start_time OR NEW.end_time IS NOT OLD.end_time OR NEW.start_frame IS NOT OLD.start_frame OR NEW.end_frame IS NOT OLD.end_frame OR NEW.confidence IS NOT OLD.confidence OR NEW.crop_region IS NOT OLD.crop_region OR NEW.mouse_ids IS NOT OLD.mouse_ids BEGIN SELECT RAISE(ABORT,'submission annotation immutable'); END",
+"trg_annotation_update": "BEFORE UPDATE ON submission_annotations WHEN NEW.submission_id IS NOT OLD.submission_id OR (NEW.source_annotation_id IS NOT OLD.source_annotation_id AND NOT (OLD.source_annotation_id IS NOT NULL AND NEW.source_annotation_id IS NULL)) OR NEW.source_annotation_key IS NOT OLD.source_annotation_key OR NEW.source_material_revision IS NOT OLD.source_material_revision OR NEW.material_digest IS NOT OLD.material_digest OR NEW.category_id IS NOT OLD.category_id OR NEW.category_name IS NOT OLD.category_name OR NEW.category_group IS NOT OLD.category_group OR NEW.category_participant_mode IS NOT OLD.category_participant_mode OR NEW.role_definitions_snapshot IS NOT OLD.role_definitions_snapshot OR NEW.participant_roles_snapshot IS NOT OLD.participant_roles_snapshot OR NEW.start_time IS NOT OLD.start_time OR NEW.end_time IS NOT OLD.end_time OR NEW.start_frame IS NOT OLD.start_frame OR NEW.end_frame IS NOT OLD.end_frame OR NEW.confidence IS NOT OLD.confidence OR NEW.crop_region IS NOT OLD.crop_region OR NEW.mouse_ids IS NOT OLD.mouse_ids BEGIN SELECT RAISE(ABORT,'submission annotation immutable'); END",
 "trg_annotation_delete": "BEFORE DELETE ON submission_annotations BEGIN SELECT RAISE(ABORT,'submission annotation immutable'); END",
 "trg_raw_delete": "BEFORE DELETE ON raw_detections BEGIN SELECT RAISE(ABORT,'snapshot raw immutable') WHERE EXISTS(SELECT 1 FROM detection_snapshots WHERE detection_import_id=OLD.detection_import_id); END",
 "trg_raw_update": "BEFORE UPDATE OF detection_import_id,frame_index,frame_detection_index,raw_track_id,box,keypoints,detection_confidence,class_id ON raw_detections BEGIN SELECT RAISE(ABORT,'snapshot raw immutable') WHERE EXISTS(SELECT 1 FROM detection_snapshots WHERE detection_import_id=OLD.detection_import_id) OR EXISTS(SELECT 1 FROM detection_snapshots WHERE detection_import_id=NEW.detection_import_id); END",
@@ -23,6 +23,10 @@ TRIGGERS = {
 "trg_live_annotation_delete": "BEFORE DELETE ON annotations BEGIN SELECT RAISE(ABORT,'category scheme must be locked') WHERE NOT EXISTS(SELECT 1 FROM videos v JOIN projects p ON p.id=v.project_id WHERE v.id=OLD.video_id AND p.category_scheme_locked_at IS NOT NULL); END",
 "trg_scheme_audit_update": "BEFORE UPDATE ON category_scheme_audits BEGIN SELECT RAISE(ABORT,'category scheme audit is append-only'); END",
 "trg_scheme_audit_delete": "BEFORE DELETE ON category_scheme_audits BEGIN SELECT RAISE(ABORT,'category scheme audit is append-only'); END",
+"trg_behavior_decision_update": "BEFORE UPDATE ON behavior_review_decisions WHEN NEW.submission_annotation_id IS NOT OLD.submission_annotation_id OR NEW.status IS NOT OLD.status OR NEW.feedback IS NOT OLD.feedback OR NEW.sequence IS NOT OLD.sequence OR (NEW.reviewer_id IS NOT OLD.reviewer_id AND NOT (OLD.reviewer_id IS NOT NULL AND NEW.reviewer_id IS NULL)) OR NEW.decided_at IS NOT OLD.decided_at OR NEW.origin IS NOT OLD.origin OR (NEW.carried_from_decision_id IS NOT OLD.carried_from_decision_id AND NOT (OLD.carried_from_decision_id IS NOT NULL AND NEW.carried_from_decision_id IS NULL)) BEGIN SELECT RAISE(ABORT,'behavior decision audit is append-only'); END",
+"trg_behavior_decision_delete": "BEFORE DELETE ON behavior_review_decisions BEGIN SELECT RAISE(ABORT,'behavior decision audit is append-only'); END",
+"trg_behavior_reopen_update": "BEFORE UPDATE ON behavior_review_reopens WHEN NEW.submission_id IS NOT OLD.submission_id OR (NEW.actor_id IS NOT OLD.actor_id AND NOT (OLD.actor_id IS NOT NULL AND NEW.actor_id IS NULL)) OR NEW.reason IS NOT OLD.reason OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'behavior reopen audit is append-only'); END",
+"trg_behavior_reopen_delete": "BEFORE DELETE ON behavior_review_reopens BEGIN SELECT RAISE(ABORT,'behavior reopen audit is append-only'); END",
 }
 def install_sqlite_authority_triggers(connection):
     # Older Alembic revisions import this current module while walking to head.
@@ -54,6 +58,8 @@ def install_sqlite_authority_triggers(connection):
         "trg_live_annotation_delete",
     }
     audit_triggers = {"trg_scheme_audit_update", "trg_scheme_audit_delete"}
+    behavior_decision_triggers = {"trg_behavior_decision_update", "trg_behavior_decision_delete"}
+    behavior_reopen_triggers = {"trg_behavior_reopen_update", "trg_behavior_reopen_delete"}
     for name, body in TRIGGERS.items():
         if name in new_project_triggers and "category_scheme_locked_at" not in project_columns:
             continue
@@ -61,8 +67,14 @@ def install_sqlite_authority_triggers(connection):
             continue
         if name in audit_triggers and "category_scheme_audits" not in tables:
             continue
+        if name in behavior_decision_triggers and "behavior_review_decisions" not in tables:
+            continue
+        if name in behavior_reopen_triggers and "behavior_review_reopens" not in tables:
+            continue
         if name == "trg_annotation_update" and "category_group" not in submission_annotation_columns:
             body = LEGACY_SUBMISSION_ANNOTATION_UPDATE
+        elif name == "trg_annotation_update" and "source_annotation_key" not in submission_annotation_columns:
+            body = body.replace(" OR NEW.source_annotation_key IS NOT OLD.source_annotation_key OR NEW.source_material_revision IS NOT OLD.source_material_revision OR NEW.material_digest IS NOT OLD.material_digest", "")
         try:
             connection.exec_driver_sql(f"CREATE TRIGGER IF NOT EXISTS {name} {body}")
         except OperationalError as exc:

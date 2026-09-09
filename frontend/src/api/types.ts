@@ -42,6 +42,15 @@ export type AnnotationCreateInput = Schemas["AnnotationCreate"];
 export type AnnotationPatchInput = Schemas["AnnotationUpdate"];
 export type Review = Schemas["ReviewOut"];
 export type ReviewCreateInput = Schemas["ReviewCreate"];
+export type BehaviorReviewStatus = Schemas["BehaviorDecisionIn"]["status"];
+export type BehaviorReviewDecision = Schemas["BehaviorReviewDecisionOut"];
+export type BehaviorReviewAnnotation = Schemas["BehaviorReviewAnnotationOut"];
+export type BehaviorReviewCounts = Schemas["BehaviorReviewCountsOut"];
+export type BehaviorReviewFeedbackItem = Schemas["BehaviorReviewFeedbackItemOut"];
+export type BehaviorReviewState = Schemas["BehaviorReviewStateOut"];
+export type BehaviorDecisionInput = Schemas["BehaviorDecisionIn"];
+export type ReviewReopenInput = Schemas["BehaviorReopenIn"];
+export type ReviewSubmissionContext = Schemas["ReviewSubmissionContextIn"];
 
 export const WORKFLOW_LABELS: Record<string, string> = {
   draft: "草稿", submitted: "待审核", approved: "已通过", rejected: "已退回",

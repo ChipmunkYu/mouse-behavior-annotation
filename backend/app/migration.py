@@ -15,11 +15,15 @@
 """
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from pathlib import Path
+from typing import Callable
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -33,7 +37,7 @@ VERSION_TABLE = "alembic_version"
 
 # 已知迁移版本（迁移脚本 migrations/versions/ 中的 revision 字面量）
 KNOWN_REVISIONS = frozenset(
-    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016"}
+    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"}
 )
 
 # 0001 baseline 建立的 6 张 P1 核心表
@@ -68,6 +72,7 @@ P4_TABLES = frozenset(
     }
 )
 P5_TABLES = frozenset({"category_scheme_audits"})
+P6_TABLES = frozenset({"behavior_review_decisions", "behavior_review_reopens"})
 
 
 class MigrationStateError(RuntimeError):
@@ -90,6 +95,61 @@ def _ensure_sqlite_parent(database_url: str) -> None:
     if path == ":memory:":
         return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def _sqlite_path(database_url: str) -> Path | None:
+    url = make_url(database_url)
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
+        return None
+    return Path(url.database).resolve()
+
+
+def _migration_backup_path(path: Path) -> Path:
+    return path.with_name(path.name + ".pre-migration")
+
+
+def _restore_sqlite_backup(path: Path, backup: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
+    with closing(sqlite3.connect(backup)) as source, closing(sqlite3.connect(path)) as target:
+        source.backup(target)
+
+
+def _recover_interrupted_sqlite_migration(database_url: str) -> None:
+    """Restore the durable pre-migration image left by a killed prior invocation."""
+    path = _sqlite_path(database_url)
+    if path is None:
+        return
+    backup = _migration_backup_path(path)
+    if backup.exists():
+        _restore_sqlite_backup(path, backup)
+        backup.unlink()
+
+
+def _run_migration_safely(database_url: str, operation: Callable[[], None]) -> None:
+    """Run Alembic with crash-recovery for SQLite's non-transactional batch DDL."""
+    path = _sqlite_path(database_url)
+    if path is None:
+        operation()
+        return
+    backup = _migration_backup_path(path)
+    if backup.exists():
+        _restore_sqlite_backup(path, backup)
+        backup.unlink()
+    if path.exists():
+        with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(backup)) as target:
+            source.backup(target)
+    else:
+        # A valid empty image also makes interrupted first-time creation retryable.
+        with closing(sqlite3.connect(backup)):
+            pass
+    try:
+        operation()
+    except BaseException:
+        _restore_sqlite_backup(path, backup)
+        backup.unlink()
+        raise
+    backup.unlink()
 
 
 def _inspect(database_url: str) -> tuple[frozenset[str], str | None]:
@@ -145,17 +205,17 @@ def inspect_state(database_url: str) -> str:
         return "versioned"
 
     # ---- 无有效版本行（无版本表或空版本表）----
-    unexpected = tables - P1_TABLES - P2_TABLES - P3_TABLES - P4_TABLES - P5_TABLES - {VERSION_TABLE}
+    unexpected = tables - P1_TABLES - P2_TABLES - P3_TABLES - P4_TABLES - P5_TABLES - P6_TABLES - {VERSION_TABLE}
     if unexpected:
         raise MigrationStateError(
             f"数据库存在非预期表 {sorted(unexpected)}，无法安全判定迁移状态，"
             "拒绝 stamp / 升级（请人工检查后再处理）"
         )
-    has_post_baseline = bool((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES) & tables)
+    has_post_baseline = bool((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES | P6_TABLES) & tables)
     if has_post_baseline:
         # 有增量表却无有效版本行：状态不一致（如 head 库版本行被清空），不可盲 stamp
         raise MigrationStateError(
-            f"数据库含增量表 {sorted((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES) & tables)} 却无有效版本行，"
+            f"数据库含增量表 {sorted((P2_TABLES | P3_TABLES | P4_TABLES | P5_TABLES | P6_TABLES) & tables)} 却无有效版本行，"
             "迁移状态不一致，拒绝自动 stamp"
         )
     if P1_TABLES & tables:
@@ -182,13 +242,17 @@ def version_status(database_url: str) -> str:
 def upgrade_to(database_url: str, revision: str) -> None:
     """原始 Alembic 升级到指定版本（测试构造 P1 旧库等场景使用）。"""
     _ensure_sqlite_parent(database_url)
-    command.upgrade(alembic_config(database_url), revision)
+    _recover_interrupted_sqlite_migration(database_url)
+    cfg = alembic_config(database_url)
+    _run_migration_safely(database_url, lambda: command.upgrade(cfg, revision))
 
 
 def downgrade_to(database_url: str, revision: str) -> None:
     """原始 Alembic 降级到指定版本（测试验证 downgrade 场景使用）。"""
     _ensure_sqlite_parent(database_url)
-    command.downgrade(alembic_config(database_url), revision)
+    _recover_interrupted_sqlite_migration(database_url)
+    cfg = alembic_config(database_url)
+    _run_migration_safely(database_url, lambda: command.downgrade(cfg, revision))
 
 
 def run_migrations(database_url: str) -> str:
@@ -201,10 +265,13 @@ def run_migrations(database_url: str) -> str:
     非预期表 / 未知版本 / 版本表损坏等不安全状态抛 MigrationStateError，不做任何修改。
     """
     _ensure_sqlite_parent(database_url)
+    _recover_interrupted_sqlite_migration(database_url)
     state = inspect_state(database_url)
     cfg = alembic_config(database_url)
-    if state == "unversioned_p1":
-        # 标记 baseline：声明该库当前 schema 等价于 0001，随后应用后续增量（0002/0003）
-        command.stamp(cfg, BASELINE_REVISION)
-    command.upgrade(cfg, "head")
+    def upgrade() -> None:
+        if state == "unversioned_p1":
+            # 标记 baseline：声明该库当前 schema 等价于 0001，随后应用后续增量。
+            command.stamp(cfg, BASELINE_REVISION)
+        command.upgrade(cfg, "head")
+    _run_migration_safely(database_url, upgrade)
     return state

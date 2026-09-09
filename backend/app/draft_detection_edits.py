@@ -184,16 +184,9 @@ def revalidate_annotations(
 def invalidate_compatibility_review(
     db: Session, video: Video, affected_annotation_ids: set[int]
 ) -> None:
-    for annotation_id in affected_annotation_ids:
-        annotation = db.get(Annotation, annotation_id)
-        if annotation is not None and annotation.review_status in ("approved", "rejected"):
-            annotation.review_status = "pending"
-            annotation.reviewer_id = None
-    if video.workflow_status in ("approved", "rejected"):
-        video.workflow_status = "draft"
-        video.submitted_at = None
-        video.approved_at = None
-        video.approved_by = None
+    # Track split/merge/suppression only reprojects identity fields; it is not an
+    # ordinary behavior edit and must not revoke behavior or final video approval.
+    return None
 
 
 def split_preview(

@@ -23,6 +23,15 @@ export class ApiError extends Error {
   }
 }
 
+/** FastAPI errors may expose the useful payload directly or under { detail }. */
+export function apiErrorDetail(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return null;
+  const value = error.detail;
+  return value && typeof value === "object" && "detail" in value
+    ? (value as { detail?: unknown }).detail
+    : value;
+}
+
 function extractDetail(data: unknown): string | null {
   if (!data || typeof data !== "object") return null;
   const detail = (data as { detail?: unknown }).detail;

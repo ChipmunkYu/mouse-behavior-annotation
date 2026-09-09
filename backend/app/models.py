@@ -348,6 +348,10 @@ class Annotation(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    # Only ordinary annotation edits advance this evidence. Track projection changes do not.
+    material_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    material_digest: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    material_state: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     video: Mapped["Video"] = relationship(back_populates="annotations")
     annotator: Mapped["User"] = relationship(
@@ -1158,6 +1162,7 @@ class Submission(Base):
     legacy_backfill: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", nullable=False
     )
+    decision_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
     video: Mapped["Video"] = relationship(foreign_keys=[video_id])
     detection_snapshot: Mapped["DetectionSnapshot"] = relationship(
@@ -1215,6 +1220,10 @@ class SubmissionAnnotation(Base):
     source_annotation_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("annotations.id", ondelete="SET NULL"), nullable=True
     )
+    # Non-FK evidence survives annotations.source_annotation_id ON DELETE SET NULL.
+    source_annotation_key: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_material_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    material_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     category_id: Mapped[int] = mapped_column(
         ForeignKey("behavior_categories.id", ondelete="RESTRICT"), nullable=False
     )
@@ -1247,6 +1256,52 @@ class SubmissionAnnotation(Base):
         uselist=False,
         foreign_keys="Clip.submission_annotation_id",
     )
+
+
+class BehaviorReviewDecision(Base):
+    """Append-only per-snapshot decision audit; greatest sequence is authoritative."""
+
+    __tablename__ = "behavior_review_decisions"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="ck_behavior_decisions_status"),
+        CheckConstraint("status <> 'rejected' OR (feedback IS NOT NULL AND length(trim(feedback)) > 0)", name="ck_behavior_decisions_rejected_feedback"),
+        UniqueConstraint("submission_annotation_id", "sequence", name="uq_behavior_decisions_snapshot_sequence"),
+        Index("ix_behavior_decisions_snapshot_sequence", "submission_annotation_id", "sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    submission_annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("submission_annotations.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    reviewer_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    carried_from_decision_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("behavior_review_decisions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    snapshot: Mapped["SubmissionAnnotation"] = relationship(foreign_keys=[submission_annotation_id])
+    reviewer: Mapped[Optional["User"]] = relationship(foreign_keys=[reviewer_id])
+
+
+class BehaviorReviewReopen(Base):
+    """Append-only explicit reopening audit."""
+
+    __tablename__ = "behavior_review_reopens"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    submission_id: Mapped[int] = mapped_column(
+        ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class CategorySchemeAudit(Base):

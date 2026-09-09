@@ -8,16 +8,21 @@
  * - 仅后端返回 can_review=true 的成员可访问
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   createVideoReview,
+  getBehaviorReviewState,
   listCategories,
   listProjects,
   listReviewQueue,
+  listVideos,
   listVideoReviews,
+  putBehaviorDecision,
+  reopenBehaviorReview,
 } from "../api";
-import type { Category, Project, Review, SubmissionAnnotationSnapshot, Video } from "../api/types";
-import { ROLE_LABELS } from "../api/types";
+import { ApiError, apiErrorDetail } from "../api/client";
+import type { BehaviorReviewAnnotation, BehaviorReviewState, BehaviorReviewStatus, Category, Project, Review, SubmissionAnnotationSnapshot, Video } from "../api/types";
+import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
 import { Card, EmptyState, Loading, StatusBadge, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaLoadProgress } from "../components/MediaLoadProgress";
@@ -36,13 +41,29 @@ function ReadOnlyAnnotationList({
   focusedAnnotationId,
   filtered,
   onActivate,
+  feedbackDrafts,
+  failedFeedbackId,
+  busyId,
+  decisionOpen,
+  revokeOpen,
+  submissionStatus,
+  onFeedbackChange,
+  onDecision,
 }: {
-  annotations: SubmissionAnnotationSnapshot[];
+  annotations: BehaviorReviewAnnotation[];
   categoryById: Map<number, Category>;
   activeAnnotationIds: ReadonlySet<number>;
   focusedAnnotationId: number | null;
   filtered: boolean;
   onActivate: (annotation: SubmissionAnnotationSnapshot) => void;
+  feedbackDrafts: Record<number, string>;
+  failedFeedbackId: number | null;
+  busyId: number | null;
+  decisionOpen: boolean;
+  revokeOpen: boolean;
+  submissionStatus: string | null | undefined;
+  onFeedbackChange: (id: number, value: string) => void;
+  onDecision: (annotation: BehaviorReviewAnnotation, status: BehaviorReviewStatus) => void;
 }) {
   if (annotations.length === 0) {
     return (
@@ -55,16 +76,18 @@ function ReadOnlyAnnotationList({
         const cat = categoryById.get(a.category_id);
         const focused = focusedAnnotationId === a.id;
         const current = activeAnnotationIds.has(a.id);
+        const feedback = feedbackDrafts[a.id] ?? "";
+        const rejectionReady = feedback.trim().length > 0;
+        const restriction = behaviorDecisionRestriction(submissionStatus);
         return (
-          <button
+          <div
             key={a.id}
-            type="button"
+            data-review-annotation-id={a.id}
             className={`anno-row review-anno-button${current ? " is-current" : ""}${focused ? " active" : ""}`}
-            aria-current={focused ? "true" : undefined}
-            aria-label={`${a.category_name ?? `类别 ${a.category_id}`}，${formatTimeShort(a.start_time)} 至 ${formatTimeShort(a.end_time)}，参与对象 ${a.mouse_ids.join("、") || "无"}`}
-            onClick={() => onActivate(a)}
+            onClick={(event) => { if (event.target === event.currentTarget) onActivate(a); }}
           >
-            <div className="anno-row-top">
+            <button type="button" className="review-annotation-focus" aria-current={focused ? "true" : undefined} aria-expanded={focused} aria-controls={focused ? `behavior-editor-${a.id}` : undefined} aria-label={`${a.category_name ?? `类别 ${a.category_id}`}，${formatTimeShort(a.start_time)} 至 ${formatTimeShort(a.end_time)}，参与对象 ${a.mouse_ids.join("、") || "无"}`} onClick={() => onActivate(a)}>
+              <div className="anno-row-top">
               <span className="anno-cat" title={cat?.group ?? ""}>
                 <span className="swatch" style={{ background: cat?.color ?? "var(--text-3)" }} />
                 <span className="name">{a.category_name ?? `类别 #${a.category_id}`}</span>
@@ -74,16 +97,31 @@ function ReadOnlyAnnotationList({
               </span>
               <span className="anno-row-actions">
                 {focused ? <span className="review-focus-badge">聚焦中</span> : null}
-                <StatusBadge value="pending" />
+                <StatusBadge value={a.decision.status} tone={a.decision.status === "approved" ? "ok" : a.decision.status === "rejected" ? "danger" : undefined} />
               </span>
-            </div>
-            <div className="anno-row-meta">
+              </div>
+              <div className="anno-row-meta">
               <span>帧 {a.start_frame} → {a.end_frame}</span>
               <span>·</span>
               {a.category_group ? <span>{a.category_group}</span> : null}
               <ParticipantSummary mode={a.category_participant_mode} roles={a.role_definitions} assignments={a.participant_roles} mouseIds={a.mouse_ids} />
-            </div>
-          </button>
+              </div>
+            </button>
+            {focused ? <div id={`behavior-editor-${a.id}`} className="behavior-decision-editor">
+              <label htmlFor={`behavior-feedback-${a.id}`}>退回意见 <span className="behavior-required">退回时必填</span>{failedFeedbackId === a.id ? "（保存失败）" : a.decision.status === "rejected" ? "（已保存）" : ""}</label>
+              <textarea id={`behavior-feedback-${a.id}`} className="textarea" rows={2} value={feedback} disabled={!decisionOpen} placeholder="说明此行为需要修改的内容" onChange={(event) => onFeedbackChange(a.id, event.target.value)} />
+              {failedFeedbackId === a.id ? <div className="behavior-feedback-error" role="alert">保存失败 · 此意见尚未保存</div> : null}
+              <div className="behavior-decision-actions">
+                <div className="behavior-decision-primary" role="group" aria-label="此行为审核操作">
+                  <button type="button" className="btn btn-sm btn-danger" disabled={!decisionOpen || !rejectionReady} title={rejectionReady ? "保存退回意见并退回此行为" : "请先填写退回意见"} onClick={() => onDecision(a, "rejected")}>{busyId === a.id ? "保存中…" : "退回此行为"}</button>
+                  <button type="button" className="btn btn-sm btn-primary" disabled={!decisionOpen} onClick={() => onDecision(a, "approved")}>{busyId === a.id ? "保存中…" : "通过此行为"}</button>
+                </div>
+                <button type="button" className="btn btn-sm btn-ghost behavior-decision-revoke" disabled={(!decisionOpen && !revokeOpen) || a.decision.status === "pending"} onClick={() => onDecision(a, "pending")}>{busyId === a.id ? "保存中…" : "撤销裁决"}</button>
+              </div>
+              {restriction ? <div className="behavior-decision-restriction" role="note">{restriction}</div> : null}
+              {a.decision.decided_at ? <div className="behavior-decision-meta">{a.decision.reviewer ?? "审核人"} · {formatDate(a.decision.decided_at)}{a.decision.origin === "carried" ? " · 沿用上次结果" : ""}</div> : null}
+            </div> : null}
+          </div>
         );
       })}
     </div>
@@ -118,76 +156,83 @@ function ReviewHistory({ reviews }: { reviews: Review[] }) {
 }
 
 type QueueAction = "toggle" | "select" | "escape" | "close";
-type BehaviorSummaryMode = "none" | "single" | "overlap" | "focused";
+type RailTab = "queue" | "history";
+
+export function reviewSubmitBlockers(error: unknown): number[] {
+  const raw = apiErrorDetail(error);
+  const detail = raw && typeof raw === "object" ? raw as { code?: unknown; items?: unknown } : null;
+  if (detail?.code !== "rejected_annotations_not_addressed" || !Array.isArray(detail.items)) return [];
+  return detail.items.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const row = item as { source_annotation_id?: unknown; submission_annotation_id?: unknown };
+    const id = typeof row.source_annotation_id === "number" ? row.source_annotation_id : row.submission_annotation_id;
+    return typeof id === "number" ? [id] : [];
+  });
+}
 
 export function nextReviewQueueOpen(open: boolean, action: QueueAction): boolean {
   return action === "toggle" ? !open : false;
 }
 
-export function deriveReviewBehaviorSummary(
-  annotations: SubmissionAnnotationSnapshot[],
-  activeAnnotationIds: number[],
-  focusedAnnotationId: number | null,
-): { mode: BehaviorSummaryMode; items: SubmissionAnnotationSnapshot[]; categories: string[]; mouseIds: number[] } {
-  const activeIds = new Set(activeAnnotationIds);
-  const active = annotations.filter((annotation) => activeIds.has(annotation.id));
-  const focused = focusedAnnotationId == null ? undefined : active.find((annotation) => annotation.id === focusedAnnotationId);
-  const items = focused ? [focused] : active;
+export function behaviorDecisionAccess(submissionStatus: string | null | undefined, busy: boolean) {
   return {
-    mode: focused ? "focused" : active.length === 0 ? "none" : active.length === 1 ? "single" : "overlap",
-    items,
-    categories: [...new Set(items.map((annotation) => annotation.category_name ?? `类别 #${annotation.category_id}`))],
-    mouseIds: [...new Set(items.flatMap((annotation) => annotation.mouse_ids))].sort((a, b) => a - b),
+    decisionOpen: !busy && submissionStatus === "submitted",
+    revokeOpen: !busy && (submissionStatus === "rejected" || submissionStatus === "withdrawn"),
   };
 }
 
-function CurrentBehaviorSummary({
-  summary,
-  onExitFocus,
-}: {
-  summary: ReturnType<typeof deriveReviewBehaviorSummary>;
-  onExitFocus: () => void;
-}) {
-  if (summary.mode === "none") {
-    return <div className="review-current-empty">当前时刻无行为</div>;
-  }
-  return (
-    <section className="review-current-behavior" aria-label="当前行为摘要">
-      <div className="review-current-behavior-head">
-        <strong>{summary.mode === "focused" ? "聚焦中" : summary.mode === "overlap" ? `当前 ${summary.items.length} 条重叠行为` : "当前行为"}</strong>
-        {summary.mode === "focused" ? <button type="button" className="btn btn-sm btn-ghost" onClick={onExitFocus}>退出聚焦</button> : null}
-      </div>
-      <div className="review-current-facts">
-        <span>类别：{summary.categories.join("、")}</span>
-        <span>参与对象：{summary.mouseIds.length ? summary.mouseIds.map((id) => `Track ${id}`).join("、") : "无"}</span>
-      </div>
-      <div className="review-current-events">
-        {summary.items.map((annotation) => (
-          <div key={annotation.id} className="review-current-event">
-            <div><b>{annotation.category_name ?? `类别 #${annotation.category_id}`}</b><span>{formatTimeShort(annotation.start_time)}–{formatTimeShort(annotation.end_time)}</span></div>
-            <ParticipantSummary mode={annotation.category_participant_mode} roles={annotation.role_definitions} assignments={annotation.participant_roles} mouseIds={annotation.mouse_ids} compact />
-          </div>
-        ))}
-      </div>
-    </section>
-  );
+export function behaviorDecisionRestriction(submissionStatus: string | null | undefined): string | null {
+  if (submissionStatus === "submitted") return null;
+  if (submissionStatus === "rejected") return "视频已退回；当前只能撤销已有裁决为待审核。";
+  if (submissionStatus === "withdrawn") return "提交已撤回；当前只能撤销已有裁决为待审核。";
+  if (submissionStatus === "approved") return "视频已最终通过；如需调整，请先在左侧重新打开审核。";
+  return "当前没有可裁决的提交。";
+}
+
+export function shouldClearBehaviorFocus(status: BehaviorReviewStatus): boolean {
+  return status === "approved" || status === "rejected";
+}
+
+export function scheduleBehaviorNoticeDismiss(message: string, onDismiss: (message: string) => void): () => void {
+  const timer = window.setTimeout(() => onDismiss(message), 2000);
+  return () => window.clearTimeout(timer);
+}
+
+export function isReviewRelevantVideo(video: Video): boolean {
+  return video.workflow_status !== "draft" || video.submitted_at != null || video.submission_annotations.length > 0;
+}
+
+export function sortReviewAnnotations<T extends { decision: { status: string } }>(annotations: T[]): T[] {
+  return ["pending", "rejected", "approved"].flatMap((status) => annotations.filter((annotation) => annotation.decision.status === status));
+}
+
+export function resolveReviewSelection<T extends { id: number }>(annotations: T[], selectedId: number | null): number | null {
+  return selectedId != null && annotations.some((annotation) => annotation.id === selectedId) ? selectedId : null;
 }
 
 /* ================= 审核工作台主页面 ================= */
 export default function ReviewPage() {
   const { projectId } = useParams<{ projectId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const pid = Number(projectId);
 
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const [project, setProject] = useState<Project | null>(null);
   const [queue, setQueue] = useState<Video[] | null>(null);
+  const [reviewVideos, setReviewVideos] = useState<Video[]>([]);
   const [queueOpen, setQueueOpen] = useState(true);
+  const [railTab, setRailTab] = useState<RailTab>("queue");
+  const [videoQuery, setVideoQuery] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
 
   const [categories, setCategories] = useState<Category[]>([]);
-  const [annotations, setAnnotations] = useState<SubmissionAnnotationSnapshot[]>([]);
+  const [annotations, setAnnotations] = useState<BehaviorReviewAnnotation[]>([]);
+  const [reviewState, setReviewState] = useState<BehaviorReviewState | null>(null);
+  const [feedbackDrafts, setFeedbackDrafts] = useState<Record<number, string>>({});
+  const [decisionBusyId, setDecisionBusyId] = useState<number | null>(null);
+  const [failedFeedbackId, setFailedFeedbackId] = useState<number | null>(null);
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<number>>(new Set());
   const [focusedAnnotationId, setFocusedAnnotationId] = useState<number | null>(null);
   const [seekAnnouncement, setSeekAnnouncement] = useState("");
@@ -199,6 +244,8 @@ export default function ReviewPage() {
 
   const [comment, setComment] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
+  const reviewActionBusyRef = useRef(false);
+  const behaviorNoticeCleanupRef = useRef<(() => void) | null>(null);
   const [reviewDisabled, setReviewDisabled] = useState(true);
   const selectGenRef = useRef(0);
   const selectedVideoRef = useRef<Video | null>(null);
@@ -217,11 +264,20 @@ export default function ReviewPage() {
   const media = useMediaSource({ videoId: selectedId, surface: "review", videoRef, onReady: handleMediaReady });
   selectedVideoRef.current = selectedVideo;
 
+  const clearBehaviorNoticeTimer = useCallback(() => {
+    behaviorNoticeCleanupRef.current?.();
+    behaviorNoticeCleanupRef.current = null;
+  }, []);
+
+  useEffect(() => clearBehaviorNoticeTimer, [clearBehaviorNoticeTimer]);
+
   const annotationView = useMemo(
     () => deriveReviewAnnotationView(annotations, categories, selectedCategoryIds),
     [annotations, categories, selectedCategoryIds]
   );
   const filteredAnnotations = annotationView.annotations;
+  const sortedFilteredAnnotations = useMemo(() => sortReviewAnnotations(filteredAnnotations), [filteredAnnotations]);
+  const selectedBehaviorId = useMemo(() => resolveReviewSelection(filteredAnnotations, focusedAnnotationId), [filteredAnnotations, focusedAnnotationId]);
   const categorySummaries = annotationView.categories;
   const categoryById = useMemo(
     () => new Map(categorySummaries.map((category) => [category.id, category] as const)),
@@ -240,13 +296,13 @@ export default function ReviewPage() {
     ? undefined
     : filteredAnnotations.find((annotation) => annotation.id === overlayState.focusedAnnotationId);
   const activeAnnotationIds = useMemo(() => new Set(overlayState.activeAnnotationIds), [overlayState.activeAnnotationIds]);
-  const behaviorSummary = useMemo(
-    () => deriveReviewBehaviorSummary(filteredAnnotations, overlayState.activeAnnotationIds, overlayState.focusedAnnotationId),
-    [filteredAnnotations, overlayState.activeAnnotationIds, overlayState.focusedAnnotationId]
-  );
+  const visibleReviewVideos = useMemo(() => {
+    const query = videoQuery.trim().toLowerCase();
+    return query ? reviewVideos.filter((video) => video.filename.toLowerCase().includes(query)) : reviewVideos;
+  }, [reviewVideos, videoQuery]);
 
   useEffect(() => {
-    if (!queueOpen) return;
+    if (!queueOpen || !window.matchMedia("(max-width: 700px)").matches) return;
     const frame = window.requestAnimationFrame(() => {
       const panel = queuePanelRef.current;
       const target = panel?.querySelector<HTMLButtonElement>("[data-queue-current='true']")
@@ -262,13 +318,6 @@ export default function ReviewPage() {
     focusMainAfterSelectionRef.current = false;
     mainHeadingRef.current?.focus();
   }, [queueOpen, selectedId]);
-
-  useEffect(() => {
-    if (focusedAnnotationId != null && overlayState.focusedAnnotationId == null) {
-      setFocusedAnnotationId(null);
-      setSeekAnnouncement("已退出聚焦，显示当前重叠行为参与对象并集");
-    }
-  }, [focusedAnnotationId, overlayState.focusedAnnotationId]);
 
   /* ---------- 数据加载 ---------- */
   const loadQueue = useCallback(async () => {
@@ -288,6 +337,15 @@ export default function ReviewPage() {
         return ta - tb;
       });
       setQueue(sorted);
+      try {
+        // `view=all` also preserves withdrawn submissions that currently project as draft.
+        const videos = (await listVideos(pid, { view: "all" })).filter(isReviewRelevantVideo);
+        const byId = new Map(videos.map((video) => [video.id, video]));
+        sorted.forEach((video) => byId.set(video.id, video));
+        setReviewVideos([...byId.values()]);
+      } catch {
+        setReviewVideos(sorted);
+      }
       setErrorMsg(null);
     } catch (err) {
       setQueue([]);
@@ -303,11 +361,23 @@ export default function ReviewPage() {
    * selectedVideo 由 selectVideo 显式设置：审核通过后队列刷新不再覆盖已选视频，
    * 便于继续核对本次裁决。 */
   const selectVideo = useCallback((v: Video) => {
+    clearBehaviorNoticeTimer();
+    setNotice(null);
     setSelectedId(v.id);
     setSelectedVideo(v);
     focusMainAfterSelectionRef.current = true;
     setQueueOpen((open) => nextReviewQueueOpen(open, "select"));
-  }, []);
+    setSearchParams({ video: String(v.id) }, { replace: true });
+  }, [clearBehaviorNoticeTimer, setSearchParams]);
+
+  useEffect(() => {
+    const requested = searchParams.get("video");
+    if (requested == null) return;
+    const requestedId = Number(requested);
+    if (!Number.isInteger(requestedId) || requestedId === selectedId) return;
+    const requestedVideo = reviewVideos.find((video) => video.id === requestedId);
+    if (requestedVideo) selectVideo(requestedVideo);
+  }, [reviewVideos, searchParams, selectVideo, selectedId]);
 
   function closeQueue(returnFocus = true) {
     setQueueOpen((open) => nextReviewQueueOpen(open, "close"));
@@ -315,8 +385,8 @@ export default function ReviewPage() {
   }
 
   function handleQueueKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
-    if (e.key !== "Tab" || !window.matchMedia("(max-width: 960px)").matches) return;
-    const focusable = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), [href], textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")];
+    if (e.key !== "Tab" || !window.matchMedia("(max-width: 700px)").matches) return;
+    const focusable = [...(e.currentTarget.querySelector(".review-nav-panel") ?? e.currentTarget).querySelectorAll<HTMLElement>("button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex='-1'])")];
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -334,6 +404,10 @@ export default function ReviewPage() {
       setQueueOpen(true);
       setSelectedVideo(null);
       setAnnotations([]);
+      setReviewState(null);
+      setFeedbackDrafts({});
+      setDecisionBusyId(null);
+      setFailedFeedbackId(null);
       setCategories([]);
       setSelectedCategoryIds(new Set());
       setFocusedAnnotationId(null);
@@ -357,18 +431,27 @@ export default function ReviewPage() {
     setCurrentTime(0);
     setPlaying(false);
     setReviewDisabled(true);
-    const snapshots = selectedVideoRef.current?.submission_annotations ?? [];
-    setAnnotations(snapshots);
+    setAnnotations([]);
+    setReviewState(null);
+    setFeedbackDrafts({});
+    setDecisionBusyId(null);
+    setFailedFeedbackId(null);
     setCategories([]);
     setSelectedCategoryIds(new Set());
     setFocusedAnnotationId(null);
     setSeekAnnouncement("");
     setReviews([]);
 
-    listVideoReviews(pid, vid)
-      .then((revs) => {
+    Promise.all([listVideoReviews(pid, vid), getBehaviorReviewState(pid, vid).catch((error) => {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    })])
+      .then(([revs, state]) => {
         if (cancelled || gen !== selectGenRef.current) return;
         setReviews(revs);
+        setReviewState(state);
+        setAnnotations(state?.annotations ?? []);
+        setFeedbackDrafts(Object.fromEntries((state?.annotations ?? []).map((annotation) => [annotation.id, annotation.decision.feedback ?? ""])));
         setReviewDisabled(false);
       })
       .catch((err: unknown) => {
@@ -391,6 +474,62 @@ export default function ReviewPage() {
       cancelled = true;
     };
   }, [selectedId, pid]);
+
+  async function saveBehaviorDecision(annotation: BehaviorReviewAnnotation, status: BehaviorReviewStatus) {
+    if (!reviewState?.submission_id || reviewActionBusyRef.current || selectedId == null) return;
+    const operationVideoId = selectedId;
+    const feedback = (feedbackDrafts[annotation.id] ?? "").trim();
+    if (status === "rejected" && !feedback) {
+      setErrorMsg("退回此行为时请填写意见");
+      return;
+    }
+    reviewActionBusyRef.current = true;
+    clearBehaviorNoticeTimer();
+    setNotice(null);
+    setDecisionBusyId(annotation.id);
+    setFailedFeedbackId(null);
+    setErrorMsg(null);
+    try {
+      const refreshed = await putBehaviorDecision(pid, operationVideoId, reviewState.submission_id, annotation.id, {
+        status,
+        feedback: status === "rejected" ? feedback : null,
+        expected_decision_revision: reviewState.decision_revision,
+      });
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      setReviewState(refreshed);
+      setAnnotations(refreshed.annotations);
+      setFeedbackDrafts((drafts) => ({ ...Object.fromEntries(refreshed.annotations.map((item) => [item.id, item.decision.feedback ?? ""])), ...drafts, [annotation.id]: refreshed.annotations.find((item) => item.id === annotation.id)?.decision.feedback ?? "" }));
+      const decisionNotice = status === "approved" ? "此行为已通过" : status === "rejected" ? "此行为已退回，意见已保存" : "已撤销此行为裁决";
+      setNotice(decisionNotice);
+      behaviorNoticeCleanupRef.current = scheduleBehaviorNoticeDismiss(decisionNotice, (dismissed) => setNotice((current) => current === dismissed ? null : current));
+      if (shouldClearBehaviorFocus(status)) {
+        setFocusedAnnotationId(null);
+        setSeekAnnouncement(status === "approved" ? "行为已通过，已关闭操作区" : "行为已退回，已关闭操作区");
+        window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-review-annotation-id="${annotation.id}"] .review-annotation-focus`)?.focus());
+      }
+    } catch (err) {
+      const draft = feedbackDrafts[annotation.id] ?? "";
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      if (err instanceof ApiError && err.status === 409) {
+        try {
+          const refreshed = await getBehaviorReviewState(pid, operationVideoId);
+          if (operationVideoId !== selectedVideoRef.current?.id) return;
+          setReviewState(refreshed);
+          setAnnotations(refreshed.annotations);
+          setFeedbackDrafts((drafts) => ({ ...Object.fromEntries(refreshed.annotations.map((item) => [item.id, item.decision.feedback ?? ""])), ...drafts, [annotation.id]: draft }));
+          setErrorMsg("审核状态已变化，已刷新；未保存的意见仍在，请重试");
+        } catch {
+          setErrorMsg("审核状态已变化，刷新失败；未保存的意见仍在");
+        }
+      } else {
+        setErrorMsg(err instanceof Error ? `${err.message}；此意见尚未保存` : "保存裁决失败；此意见尚未保存");
+      }
+      setFailedFeedbackId(annotation.id);
+    } finally {
+      reviewActionBusyRef.current = false;
+      setDecisionBusyId(null);
+    }
+  }
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
     const v = videoRef.current;
@@ -441,7 +580,7 @@ export default function ReviewPage() {
     }
     // 确认对话框打开时不响应页面快捷键（对话框内部处理 Esc / Enter）。
     if (document.querySelector(".modal-overlay")) return;
-    if (e.code === "Escape" && queueOpen) {
+    if (e.code === "Escape" && queueOpen && window.matchMedia("(max-width: 700px)").matches) {
       e.preventDefault();
       setQueueOpen((open) => nextReviewQueueOpen(open, "escape"));
       window.requestAnimationFrame(() => queueTabRef.current?.focus());
@@ -483,10 +622,10 @@ export default function ReviewPage() {
 
   /* ---------- 通过 / 退回 ---------- */
   async function handleReview(result: "approved" | "rejected") {
-    if (!selectedVideo) return;
-    if (reviewBusy) return;
-    if (result === "rejected" && comment.trim() === "") {
-      setErrorMsg("退回时请填写意见，说明需要修改的内容");
+    if (!selectedVideo || !reviewState?.submission_id || reviewActionBusyRef.current) return;
+    const operationVideoId = selectedVideo.id;
+    if (result === "approved" && !reviewState.can_finalize_approval) {
+      setErrorMsg("仅当现有行为全部通过后，才能通过视频");
       return;
     }
     const ok = await confirm({
@@ -494,47 +633,102 @@ export default function ReviewPage() {
       message:
         result === "approved" ? (
           <>
-            通过后该视频审核完成、行为标注将被锁定，系统将在后台自动开始<b>生成视频片段</b>。
+            这是视频最终通过。通过后现有行为保持锁定；如需再改，须先明确重新打开审核。
           </>
         ) : (
-          <>退回后该视频将返回标注者修改，本次审核意见将保留在历史记录中。修改行为标注将使其回到草稿并需要重新提交。</>
+          <>可在未完成全部行为裁决时退回视频。已通过行为继续锁定，退回意见与对应行为一并保留。</>
         ),
       confirmLabel: result === "approved" ? "确认通过" : "确认退回",
       danger: result === "rejected",
     });
     if (!ok) return;
 
+    reviewActionBusyRef.current = true;
     setReviewBusy(true);
     setErrorMsg(null);
     try {
-      await createVideoReview(pid, selectedVideo.id, {
+      await createVideoReview(pid, operationVideoId, {
         result,
         comment: comment.trim() || null,
+        expected_submission_id: reviewState.submission_id,
+        expected_decision_revision: reviewState.decision_revision,
       });
-      if (result === "approved") {
-        // 通过后保留当前视频详情，便于核对本次裁决结果。
-        setSelectedVideo((prev) =>
-          prev
-            ? { ...prev, workflow_status: "approved", approved_at: new Date().toISOString() }
-            : prev
-        );
-      }
+      const [refreshed, refreshedReviews] = await Promise.all([
+        getBehaviorReviewState(pid, operationVideoId),
+        listVideoReviews(pid, operationVideoId),
+      ]);
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      setReviewState(refreshed);
+      setAnnotations(refreshed.annotations);
+      setReviews(refreshedReviews);
+      // 裁决后保留当前视频详情，并立即投影服务端已确认的工作流状态。
+      setSelectedVideo((prev) => prev ? {
+        ...prev,
+        workflow_status: result,
+        approved_at: result === "approved" ? new Date().toISOString() : null,
+      } : prev);
       setNotice(
         result === "approved"
-          ? `已通过：${selectedVideo.filename}。视频片段将在后台生成。`
-          : `已退回：${selectedVideo.filename}，标注者将收到意见并修改。`
+          ? `已最终通过：${selectedVideo.filename}。`
+          : `已退回：${selectedVideo.filename}。已通过行为仍保持锁定。`
       );
       setComment("");
       await loadQueue();
-      if (result === "rejected") setSelectedId(null);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "提交审核失败");
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      const blockers = reviewSubmitBlockers(err);
+      if (err instanceof ApiError && err.status === 409) {
+        try {
+          const refreshed = await getBehaviorReviewState(pid, operationVideoId);
+          if (operationVideoId !== selectedVideoRef.current?.id) return;
+          setReviewState(refreshed);
+          setAnnotations(refreshed.annotations);
+          setErrorMsg(blockers.length ? `仍有退回行为未处理：标注 #${blockers.join("、#")}` : "审核状态已变化，已刷新；视频说明仍在，请重试");
+        } catch {
+          setErrorMsg("审核状态已变化，刷新失败；视频说明仍在");
+        }
+      } else setErrorMsg(blockers.length ? `仍有退回行为未处理：标注 #${blockers.join("、#")}` : err instanceof Error ? err.message : "提交审核失败");
     } finally {
+      reviewActionBusyRef.current = false;
+      setReviewBusy(false);
+    }
+  }
+
+  async function handleReopen() {
+    if (!selectedVideo || !reviewState?.submission_id || !reviewState.can_reopen || reviewActionBusyRef.current) return;
+    const operationVideoId = selectedVideo.id;
+    const ok = await confirm({ title: "重新打开审核？", message: "重新打开后可撤销单条通过。已通过行为在撤销前仍保持锁定。", confirmLabel: "重新打开" });
+    if (!ok) return;
+    reviewActionBusyRef.current = true;
+    setReviewBusy(true);
+    try {
+      const refreshed = await reopenBehaviorReview(pid, operationVideoId, reviewState.submission_id, { reason: comment.trim() || null });
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      setReviewState(refreshed);
+      setAnnotations(refreshed.annotations);
+      setFeedbackDrafts(Object.fromEntries(refreshed.annotations.map((item) => [item.id, item.decision.feedback ?? ""])));
+      setNotice("审核已重新打开");
+      setSelectedVideo((video) => video ? { ...video, workflow_status: "draft", approved_at: null } : video);
+      await loadQueue();
+    } catch (err) {
+      if (operationVideoId !== selectedVideoRef.current?.id) return;
+      if (err instanceof ApiError && err.status === 409) {
+        try {
+          const refreshed = await getBehaviorReviewState(pid, operationVideoId);
+          if (operationVideoId !== selectedVideoRef.current?.id) return;
+          setReviewState(refreshed);
+          setAnnotations(refreshed.annotations);
+          setErrorMsg("审核状态已变化，已刷新；重新打开原因仍在，请重试");
+        } catch { setErrorMsg("审核状态已变化，刷新失败；重新打开原因仍在"); }
+      } else setErrorMsg(err instanceof Error ? err.message : "重新打开失败");
+    } finally {
+      reviewActionBusyRef.current = false;
       setReviewBusy(false);
     }
   }
 
   const videoReady = media.status === "ready";
+  const decisionAccess = behaviorDecisionAccess(reviewState?.submission_status, reviewBusy || decisionBusyId != null || reviewDisabled);
 
   return (
     <div className="review-page">
@@ -555,8 +749,9 @@ export default function ReviewPage() {
           </div>
         ) : null}
         <div className="actions">
+          <button ref={queueTabRef} type="button" className="btn btn-sm review-rail-trigger" aria-controls="review-queue-panel" onClick={() => setQueueOpen((open) => nextReviewQueueOpen(open, "toggle"))}>视频列表</button>
           <button type="button" className="btn btn-sm" onClick={() => void loadQueue()}>
-            刷新队列
+            刷新
           </button>
         </div>
       </div>
@@ -585,80 +780,49 @@ export default function ReviewPage() {
             className={`review-rail${queueOpen ? " queue-open" : ""}`}
             onKeyDown={handleQueueKeyDown}
           >
-            <div className="review-rail-tabs" role="tablist" aria-label="审核视图">
-              <button
-                ref={queueTabRef}
-                type="button"
-                role="tab"
-                aria-selected={queueOpen}
-                aria-controls="review-queue-panel"
-                className={queueOpen ? "active" : ""}
-                onClick={() => setQueueOpen(true)}
-              >
-                审核队列 {queue?.length ?? 0}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={!queueOpen}
-                className={!queueOpen ? "active" : ""}
-                onClick={() => setQueueOpen(false)}
-              >
-                审核裁决
-              </button>
-            </div>
-            {queueOpen ? (
-              <Card
-                title={`审核队列（${queue?.length ?? 0}）`}
-                extra={<button type="button" className="btn btn-sm btn-ghost" data-queue-close onClick={() => closeQueue()}>关闭</button>}
-              >
-                {queue === null ? (
-                  <Loading text="加载队列…" />
-                ) : queue.length === 0 ? (
-                  <EmptyState compact title="队列为空" hint="暂无待审核视频。标注者提交审核后会出现在这里。" />
+            <div className="review-nav-panel">
+              <div className="review-rail-tabs" role="tablist" aria-label="选择审核视频">
+                <button type="button" role="tab" aria-selected={railTab === "queue"} className={railTab === "queue" ? "active" : ""} onClick={() => setRailTab("queue")}>待审核队列 <b>{queue?.length ?? 0}</b></button>
+                <button type="button" role="tab" aria-selected={railTab === "history"} className={railTab === "history" ? "active" : ""} onClick={() => setRailTab("history")}>查找历史/复核视频</button>
+              </div>
+              <Card title={railTab === "queue" ? `待审核队列（${queue?.length ?? 0}）` : `全部相关视频（${reviewVideos.length}）`} extra={<button type="button" className="btn btn-sm btn-ghost review-drawer-close" data-queue-close onClick={() => closeQueue()}>关闭</button>}>
+                {railTab === "history" ? <input className="input review-video-search" type="search" value={videoQuery} onChange={(event) => setVideoQuery(event.target.value)} placeholder="按文件名查找…" aria-label="查找历史或复核视频" /> : null}
+                {queue === null ? <Loading text="加载视频…" /> : (railTab === "queue" ? queue : visibleReviewVideos).length === 0 ? (
+                  <EmptyState compact title={railTab === "queue" ? "队列为空" : "未找到视频"} hint={railTab === "queue" ? "暂无待审核视频。可切换到历史/复核视频。" : "清除搜索词后重试。"} />
                 ) : (
-                  <div className="review-queue" aria-label="审核队列">
-                    {queue.map((v) => (
-                      <button
-                        key={v.id}
-                        type="button"
-                        data-queue-item
-                        data-queue-current={selectedId === v.id ? "true" : undefined}
-                        className={selectedId === v.id ? "queue-item active" : "queue-item"}
-                        aria-current={selectedId === v.id ? "true" : undefined}
-                        onClick={() => selectVideo(v)}
-                        title={v.filename}
-                      >
+                  <div className="review-queue" aria-label={railTab === "queue" ? "待审核队列" : "历史与复核视频"}>
+                    {(railTab === "queue" ? queue : visibleReviewVideos).map((v) => (
+                      <button key={v.id} type="button" data-queue-item data-queue-current={selectedId === v.id ? "true" : undefined} className={selectedId === v.id ? "queue-item active" : "queue-item"} aria-current={selectedId === v.id ? "true" : undefined} onClick={() => selectVideo(v)} title={v.filename}>
                         <span className="queue-name" title={v.filename}>{v.filename}</span>
-                        <span className="queue-meta">
-                          <WorkflowBadge value={v.workflow_status} revision={v.annotation_revision} />
-                          <span className="queue-date">{v.submitted_at ? formatDate(v.submitted_at) : "—"}</span>
-                        </span>
+                        <span className="queue-meta"><WorkflowBadge value={v.workflow_status} revision={v.annotation_revision} /><span className="queue-date">{selectedId === v.id && reviewState?.submission_status === "withdrawn" ? "提交已撤回" : v.submitted_at ? formatDate(v.submitted_at) : WORKFLOW_LABELS[v.workflow_status] ?? v.workflow_status}</span></span>
                       </button>
                     ))}
                   </div>
                 )}
               </Card>
-            ) : selectedId == null ? (
+            </div>
+            {selectedId == null ? (
               <Card title="审核意见"><EmptyState compact title="尚未选择视频" hint="打开审核队列选择待审核视频" /></Card>
             ) : (
               <Card title="审核裁决" className="review-decision-panel">
-                <CurrentBehaviorSummary summary={behaviorSummary} onExitFocus={exitAnnotationFocus} />
                 <div className="field review-comment-field">
-                  <label htmlFor="review-comment">审核意见（退回时必填，通过时可选）</label>
+                  <label htmlFor="review-comment">{reviewState?.can_reopen ? "重新打开原因（可选）" : "视频说明（可选）"}</label>
                   <textarea
                     id="review-comment"
                     className="textarea"
                     rows={5}
                     value={comment}
-                    placeholder="例如：第 2 条行为标注起点偏晚，请重新校准后再提交"
+                    placeholder={reviewState?.can_reopen ? "说明为什么需要重新打开本次最终通过" : "这里只填写视频整体说明；单条意见请写在对应行为下"}
                     onChange={(e) => setComment(e.target.value)}
                   />
                 </div>
                 <div className="review-actions">
-                  <button type="button" className="btn btn-danger" disabled={reviewBusy || reviewDisabled} onClick={() => void handleReview("rejected")}>{reviewBusy ? "提交中…" : "退回"}</button>
-                  <button type="button" className="btn btn-primary" disabled={reviewBusy || reviewDisabled || annotations.length === 0} title={annotations.length === 0 ? "该视频暂无行为标注，无法通过" : reviewDisabled ? "审核数据加载中" : "通过该视频"} onClick={() => void handleReview("approved")}>{reviewBusy ? "提交中…" : "通过"}</button>
+                  {reviewState?.can_reopen ? <button type="button" className="btn" disabled={reviewBusy || decisionBusyId != null} onClick={() => void handleReopen()}>{reviewBusy ? "处理中…" : "重新打开审核"}</button> : <>
+                    <button type="button" className="btn btn-danger" disabled={!decisionAccess.decisionOpen} onClick={() => void handleReview("rejected")}>{reviewBusy ? "提交中…" : "退回视频"}</button>
+                    <button type="button" className="btn btn-primary" disabled={!decisionAccess.decisionOpen || !reviewState?.can_finalize_approval} title={!reviewState?.can_finalize_approval ? "现有行为全部通过后才能最终通过视频" : "最终通过视频"} onClick={() => void handleReview("approved")}>{reviewBusy ? "提交中…" : "最终通过视频"}</button>
+                  </>}
                 </div>
+                {!reviewDisabled && !reviewState?.submission_id ? <div className="frame-preview">暂无可审核的提交。</div> : null}
                 {annotations.length === 0 ? <div className="frame-preview">该视频暂无行为标注，不能通过；可退回或等待标注者补充。</div> : null}
                 <details className="review-history-details">
                   <summary>审核历史（{reviews.length}）</summary>
@@ -765,7 +929,14 @@ export default function ReviewPage() {
                   ) : null}
                 </div>
 
-                <section className="review-category-overview" aria-label="按行为类别筛选">
+              </>
+            )}
+          </section>
+
+          <aside className="review-behaviors" aria-label="行为审核列表">
+            {selectedId == null ? <Card><EmptyState compact title="行为列表" hint="选择视频后在这里逐条审核行为。" /></Card> : <>
+              {reviewState ? <div className="behavior-review-counts" aria-label="行为审核进度"><span><b>{reviewState.counts.pending}</b> 待审核</span><span className="approved"><b>{reviewState.counts.approved}</b> 已通过</span><span className="rejected"><b>{reviewState.counts.rejected}</b> 已退回</span></div> : null}
+              <section className="review-category-overview" aria-label="按行为类别筛选">
                   <div className="review-overview-heading">
                     <strong>行为概览</strong>
                     <span>共 {annotations.length} 条 · {categorySummaries.length} 类</span>
@@ -795,21 +966,28 @@ export default function ReviewPage() {
                       </button>
                     ))}
                   </div>
-                </section>
+              </section>
 
-                <Card title={`行为标注（${filteredAnnotations.length} / ${annotations.length}）· 只读`} className="review-anns">
-                  <ReadOnlyAnnotationList
-                    annotations={filteredAnnotations}
+              <Card title={`行为标注（${filteredAnnotations.length} / ${annotations.length}）· 只读`} className="review-anns">
+                <ReadOnlyAnnotationList
+                    annotations={sortedFilteredAnnotations}
                     categoryById={categoryById}
                     activeAnnotationIds={activeAnnotationIds}
-                    focusedAnnotationId={overlayState.focusedAnnotationId}
+                    focusedAnnotationId={selectedBehaviorId}
                     filtered={selectedCategoryIds.size > 0}
                     onActivate={activateAnnotation}
-                  />
-                </Card>
-              </>
-            )}
-          </section>
+                    feedbackDrafts={feedbackDrafts}
+                    failedFeedbackId={failedFeedbackId}
+                    busyId={decisionBusyId}
+                    decisionOpen={decisionAccess.decisionOpen}
+                    revokeOpen={decisionAccess.revokeOpen}
+                    submissionStatus={reviewState?.submission_status}
+                    onFeedbackChange={(id, value) => { setFeedbackDrafts((drafts) => ({ ...drafts, [id]: value })); if (failedFeedbackId === id) setFailedFeedbackId(null); }}
+                    onDecision={(annotation, status) => void saveBehaviorDecision(annotation, status)}
+                />
+              </Card>
+            </>}
+          </aside>
         </div>
       )}
     </div>

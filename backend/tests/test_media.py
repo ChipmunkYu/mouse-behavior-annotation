@@ -101,11 +101,8 @@ def _reviewer_headers(ctx, project_id, name=None):
 
 
 def _review(ctx, project, video, result, headers):
-    return ctx.client.post(
-        f"/api/projects/{project['id']}/videos/{video['id']}/review",
-        json={"result": result, "comment": "c"},
-        headers=headers,
-    )
+    from tests.test_reviews import _review as review_with_context
+    return review_with_context(ctx, headers, project, video, result, comment="c")
 
 
 def _add_detection_import(ctx, video_id, project_id):
@@ -1055,10 +1052,10 @@ def test_stale_job_cancelled_on_invalidation_without_resurrecting_clips(media_ct
     ctx = media_ctx
     headers = auth_headers(ctx.client)
     project, _categories, video, anns = _setup(ctx, headers, annotations=1)
-    # 构造 approved rev1 + pending Clip + queued 任务（尚未被处理）
+    # 构造 rejected 视频遗留的 pending Clip + queued 任务；普通编辑仍可失效。
     with ctx.session_factory() as db:
         v = db.get(Video, video["id"])
-        v.workflow_status = "approved"
+        v.workflow_status = "rejected"
         revision = v.media_revision
         db.commit()
         db.add(

@@ -4,11 +4,13 @@
 
 > 当前技术文档术语遵循[项目术语表](../项目术语表.md)；现行架构见[检测状态、提交审核与独立行为视频片段导出设计](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md)。代码/API 标识符保持不变。
 
+> 行为级审核、锁定/撤销、跨轮次沿用、退回处理和 legacy/purge 的现行合同见[行为级审核 API 契约](../docs/behavior-review-api.md)。本分支 schema head 为 `0017`，不代表生产已升级。
+
 - 技术栈：Python 3.10+、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口
 - 批次 3：提交与审核闭环（submit / review queue / review 裁决 / 审核历史），
-  标注写入与审核工作流联动（非 draft 修改回 draft + Clip 行与实体文件清理）
+  标注写入与审核工作流联动（最终通过必须先显式 reopen；允许修改的非 draft 状态回 draft + Clip 行与实体文件清理）
 - 批次 4：仅审核通过（approved）的视频，后台精确重编码每条标注为 H.264 MP4 片段并生成
   JPG 缩略图——单进程单任务执行、可恢复/重试、修订隔离；媒体执行器可替换（测试无需本机 ffmpeg）
 - 批次 5：生产跨视频片段库——跨视频聚合审核通过标注与对应 ready Clip 的分页只读接口，
@@ -42,7 +44,8 @@ backend/
 │ ├── 0013_category_role_schema.py # 类别方案永久锁定、参与对象角色 JSON、快照与审计
 │ ├── 0014_import_batch_ownership_activity.py # 三文件导入批次创建者与活动时间
 │ ├── 0015_frame_authority.py # 多帧闭区间帧权威约束
-│ └── 0016_display_proxy.py # 低码率展示代理状态与持久任务 ownership
+│ ├── 0016_display_proxy.py # 低码率展示代理状态与持久任务 ownership
+│ └── 0017_behavior_level_review.py # 行为裁决审计、普通材料证据与旧审核安全迁移
 ├── app/
 │ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -126,7 +129,7 @@ stream 不进入公共 `video_operation_gate`。本地候选边界是：新请�
 
 **启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
 已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0016），**不删除任何已有数据**；重复启动无副作用。
+baseline（0001）再升级到 head（0017），**不删除任何已有数据**；重复启动无副作用。
 因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
 
 > **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
@@ -155,11 +158,17 @@ baseline（0001）再升级到 head（0016），**不删除任何已有数据**�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership；0017 增加行为级审核证据与审计）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0015 已版本化库 → 按迁移链增量 `upgrade head` 到 0016；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
+- 0002～0016 已版本化库 → 按迁移链增量 `upgrade head` 到 0017；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
+
+SQLite 批处理 DDL 不宣称单 SQL 事务回滚。项目迁移入口会在数据库旁建立一致的
+`*.pre-migration` 恢复镜像：异常时立即恢复；进程中断遗留镜像时，下次调用先恢复再重试，
+因此 schema、authority triggers 与 `alembic_version` 一起回到迁移前状态。部署 L3 仍必须停掉
+唯一写进程并另做经 `PRAGMA quick_check` 验证的停服备份；旁路恢复镜像不能替代发布备份，
+迁移或专项验证失败时必须保持停服并恢复该发布备份，不得依赖 SQLite DDL rollback。
 
 0010 在任何 digest 列 DDL 前验证既有 0009 snapshot 的 raw/state count、same-import
 关系、header 与 pose metadata；关键点名称必须是非空、唯一、去除首尾空白的字符串数组，
@@ -375,7 +384,7 @@ shadow 差异或任何异常都会整体 rollback。成功后再启动当前代�
 
 批次删除与生命周期回收均以安全清理为目标：只接受 `uploading/failed`，校验路径位于受控目录、文件未被其他批次或正式数据引用，并仅删除仍保持初始状态且无用户工作的批次创建视频。并发状态变化、已消费数据或不安全路径返回/记录冲突而不强删。该机制不提供断点续传，也不宣称单视频或整个上传流程严格 exactly-once。
 
-Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。当前 `Submission` authority 处于 `submitted` 时锁定编辑并要求先 withdraw；`approved/rejected` 的 `Video` 兼容投影在新编辑后回到 draft，但不会修改已冻结的 Submission/DetectionSnapshot。撤销严格限栈顶，cursor 不回退、display ID 不复用。
+Split、Merge、整轨 suppression 与 LIFO undo 以 `DetectionImport.edit_version` 为 authority，并同步投影到 `Video/Annotation.identity_revision`；每次操作都会按 SQL effective detection 重校验 Annotation。当前 `Submission` authority 处于 `submitted` 时锁定编辑并要求先 withdraw；track-only 修正保留 `approved/rejected` 工作流及行为裁决，不算处理退回意见，也不修改已冻结的 Submission/DetectionSnapshot。撤销严格限栈顶，cursor 不回退、display ID 不复用。
 
 Detection edit、Annotation create/update/delete、submit 和 detection replacement 统一先执行 Video no-op UPDATE 获取 SQLite 写门禁，再在锁内重读 active import、detection/edit/annotation revision 与 submitted 状态；锁竞争的 busy/locked 统一返回可重试 409。submitted 对 Annotation 与 replacement 同样是硬锁，不再隐式退回 draft。当前 corrected export 只接受 active import 的当前 `edit_version`，历史 import/revision 明确返回 409；legacy JSONL 按 frame/detection/raw ID 稳定排序并以 `yield_per(500)` + `StringIO` 有界读取构造，正式项目 ZIP 内每个 `SubmissionAnnotation` 的 `tracks.json` 已实现按帧直接流式写入 staging 文件。
 
@@ -399,7 +408,7 @@ Detection edit、Annotation create/update/delete、submit 和 detection replacem
 
 审核工作流状态机：`draft → submitted → approved / rejected`（`rejected` 可重新提交）。
 
-这是视频 `workflow_status` 的工作流，对应界面“草稿/待审核/已通过/已退回”。单条行为标注的 `Annotation.review_status` 是独立的 `pending/approved/rejected`，不含 `draft/submitted`；提交视频时标注置为 `pending`，裁决后再置为 `approved` 或 `rejected`。
+这是视频 `workflow_status` 的工作流，对应界面“草稿/待审核/已通过/已退回”。单条行为状态为 `pending/approved/rejected`，权威是不可变快照上最新的行为裁决审计；`Annotation.review_status` 仅为兼容投影。新快照默认 pending，检测基线和普通材料不变的上一轮通过可沿用。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -409,21 +418,10 @@ Detection edit、Annotation create/update/delete、submit 和 detection replacem
 | `GET` | `/api/projects/{project_id}/videos/{video_id}/reviews` | 审核历史 → `ReviewOut[]`（含所有修订） |
 | `POST` | `/api/projects/{project_id}/videos/{video_id}/review` | 审核裁决 → `ReviewOut` |
 
-- **submit**：仅 active 项目成员；至少 1 条标注；仅 `draft/rejected` 可提交
-  （`submitted/approved` 拒绝 400）。`_revalidate_annotations` 只校验并返回问题与待同步修订，不写
-  Annotation；任一语义无效项返回 400，数据库不变。全部语义校验通过后，才在同一成功事务内
-  将已验证 Annotation 置为 `mouse_id_status=valid`、推进 `detection_import_revision`/
-  `identity_revision`，再把视频置为 `workflow_status=submitted`、更新 `submitted_at`，并将本修订
-  全部标注置为 `review_status=pending`、`reviewer_id=null`。因此修订 stale 但语义仍有效的标注可在
-  成功提交时推进，而不会仅因已存修订过期被拒绝。
+- **submit**：仅 active 项目成员，至少 1 条有效标注；`submitted` 返回 409，已有最终通过必须先显式 reopen。退回条目 `unchanged/reverted` 返回结构化 409；修改或删除后可提交，track-only 不解决意见。成功事务冻结新快照、推进有效标注修订并按合同沿用通过。
 - **queue**：仅 owner/admin 或 `can_review=true` 的 member；只返回 `submitted` 视频（跨项目隔离，按 `submitted_at` 倒序）。
 - **reviews（历史）**：项目成员均可读该视频完整审核历史，跨修订累积，不因失效删除。
-- **review**：仅 owner/admin 或 `can_review=true` 的 member，允许自审；仅 `submitted` 可裁决（其余状态 400，重复裁决 400）；
-  approval 前再次调用纯校验 `_revalidate_annotations`，无效时返回 409 且数据库不变；通过时在
-  同一成功事务内将已验证 Annotation 置为 `valid` 并同步 detection import/track 修正修订；
-  追加一条 `Review`（`annotation_revision` = 裁决时视频修订号）并同步：
-  `approved` → 视频 `approved/approved_at/approved_by`、标注 `approved/reviewer_id`；
-  `rejected` → 视频 `rejected`、清空 approved 字段、标注 `rejected/reviewer_id`。
+- **review**：仅 owner/admin 或 `can_review=true` 的 member，允许自审；仅 submitted 可最终裁决，复核冻结快照完整性。全部行为通过才允许最终通过；视频退回可保留 pending，不伪造逐条拒绝。提交 ID 与裁决修订过期返回 409；最终通过同事务生成 Review、媒体任务和独立快照 Clip。
 
 Phase 3 authority：`Submission + DetectionSnapshot + SubmissionAnnotation` 是新提交与裁决的唯一
 权威数据；`Video.workflow_status`、`Annotation.review_status` 仅作 UI 兼容投影。submit 由服务端计算
@@ -443,11 +441,7 @@ clip 与 thumbnail 使用同一整数 crop。已入队的 approved Submission �
 仍可恢复完成，默认片段库只展示 current approved；有 new authority 历史的视频不回退 legacy。
 0009 仅把 Clip legacy authority 列改为 nullable；旧行和旧表均保留。
 
-**标注写入与工作流联动**：标注新增/删除/修改（PATCH 实际字段）在视频处于
-`submitted/approved/rejected` 时，先在同一事务内把视频失效回 `draft`：
-`annotation_revision +1`、清空 `submitted_at/approved_at/approved_by`、删除该视频所有 Clip
-记录与实体 clip/thumbnail 文件（`clips_dir` / `thumbnails_dir` 内）；Review 历史与 Annotation
-保留。已处于 `draft` 时连续修改不再递增修订号。
+**标注写入与工作流联动**：submitted 必须先 withdraw；最新轮次已通过行为的普通 PATCH/DELETE 对任何角色均 409，必须先由审核人撤销，最终通过须先 reopen。允许的普通修改推进 annotation_revision，帧/裁剪等媒体变化另推进 media_revision；非 draft 回到 draft。只清理旧版实时 Annotation 绑定的 Clip，保留不可变 Submission 快照、审核审计及其媒体；draft 中的实际修改仍推进修订。
 
 - 标注写入仅限 active 项目成员；负责人和审核能力均不构成编辑隔离。
 - 创建标注固定 `review_status=pending`；直接写 `review_status`（创建非 `pending` 值 / 任意 PATCH）

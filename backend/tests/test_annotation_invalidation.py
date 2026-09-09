@@ -102,11 +102,8 @@ def _submit(ctx, headers, project, video):
 
 
 def _review(ctx, headers, project, video, result):
-    return ctx.client.post(
-        f"/api/projects/{project['id']}/videos/{video['id']}/review",
-        json={"result": result, "comment": "c"},
-        headers=headers,
-    )
+    from tests.test_reviews import _review as review_with_context
+    return review_with_context(ctx, headers, project, video, result, comment="c")
 
 
 def _video_state(ctx, video_id) -> dict:
@@ -207,7 +204,7 @@ def _reach_state(ctx, headers, project, video, reviewer_headers, state):
         db.commit()
 
 
-def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
+def test_create_returns_to_draft_without_final_submission_authority(ctx, login_headers):
     for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
@@ -221,7 +218,6 @@ def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         _reach_state(ctx, headers, project, video, reviewer_headers, state)
         assert _video_state(ctx, video["id"])["workflow_status"] == state
 
-        # 新增标注 → 回 draft、revision +1、审核字段清空
         resp = ctx.client.post(
             f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
             json={
@@ -242,7 +238,7 @@ def test_create_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         assert st["approved_by"] is None, state
 
 
-def test_patch_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
+def test_patch_returns_to_draft_without_final_submission_authority(ctx, login_headers):
     for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
@@ -266,7 +262,7 @@ def test_patch_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         assert st["approved_at"] is None, state
 
 
-def test_delete_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
+def test_delete_returns_to_draft_without_final_submission_authority(ctx, login_headers):
     for state in ("approved", "rejected"):
         setup = ctx.make_project_with_video()
         headers, project, categories, video = (
@@ -280,7 +276,8 @@ def test_delete_returns_to_draft_in_all_non_draft_states(ctx, login_headers):
         reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"], f"d_{state}")
         _reach_state(ctx, headers, project, video, reviewer_headers, state)
 
-        assert _delete(ctx, headers, project, video, ann1["id"]).status_code == 204
+        response = _delete(ctx, headers, project, video, ann1["id"])
+        assert response.status_code == 204
         st = _video_state(ctx, video["id"])
         assert st["workflow_status"] == "draft", state
         assert st["annotation_revision"] == 4, state

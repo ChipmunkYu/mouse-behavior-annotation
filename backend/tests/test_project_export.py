@@ -699,9 +699,8 @@ def test_formal_zip_role_participants_are_snapshot_ordered_and_tracks_are_role_f
     assert ctx.client.post(
         f"/api/projects/{project_id}/videos/{video_id}/submit", headers=headers
     ).status_code == 200
-    approved = ctx.client.post(
-        f"/api/projects/{project_id}/videos/{video_id}/review",
-        json={"result": "approved", "comment": "ok"}, headers=headers)
+    from tests.test_reviews import _review as review_with_context
+    approved = review_with_context(ctx, headers, {"id": project_id}, {"id": video_id}, "approved")
     assert approved.status_code == 200, approved.text
     job = _export(ctx, {"id": project_id}, headers)
     assert job["status"] == "succeeded"

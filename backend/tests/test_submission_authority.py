@@ -66,9 +66,17 @@ def test_withdraw_vs_review_real_thread_race_has_one_clean_winner(ctx, login_hea
     assert _submit(ctx, headers, project, video).status_code == 200
     withdraw_url = f"/api/projects/{project['id']}/videos/{video['id']}/withdraw"
     review_url = f"/api/projects/{project['id']}/videos/{video['id']}/review"
+    state = ctx.client.get(review_url + "-state", headers=reviewer_headers).json()
+    approved = ctx.client.put(
+        f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{state['submission_id']}/annotations/{state['annotations'][0]['id']}/decision",
+        json={"status": "approved", "expected_decision_revision": state["decision_revision"]},
+        headers=reviewer_headers)
+    assert approved.status_code == 200, approved.text
     with TestClient(ctx.client.app) as left, TestClient(ctx.client.app) as right:
         responses = _race(monkeypatch, lambda: left.post(withdraw_url, headers=headers),
-                          lambda: right.post(review_url, json={"result": "approved"},
+                          lambda: right.post(review_url, json={"result": "approved",
+                                             "expected_submission_id": approved.json()["submission_id"],
+                                             "expected_decision_revision": approved.json()["decision_revision"]},
                                              headers=reviewer_headers))
     assert sorted(response.status_code for response in responses) == [200, 409]
     with ctx.session_factory() as db:
@@ -85,10 +93,18 @@ def test_review_vs_review_real_thread_race_has_one_clean_winner(ctx, login_heade
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
     assert _submit(ctx, headers, project, video).status_code == 200
     url = f"/api/projects/{project['id']}/videos/{video['id']}/review"
+    state = ctx.client.get(url + "-state", headers=reviewer_headers).json()
+    approved = ctx.client.put(
+        f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{state['submission_id']}/annotations/{state['annotations'][0]['id']}/decision",
+        json={"status": "approved", "expected_decision_revision": state["decision_revision"]},
+        headers=reviewer_headers)
+    assert approved.status_code == 200, approved.text
+    context = {"expected_submission_id": approved.json()["submission_id"],
+               "expected_decision_revision": approved.json()["decision_revision"]}
     with TestClient(ctx.client.app) as left, TestClient(ctx.client.app) as right:
         responses = _race(monkeypatch,
-                          lambda: left.post(url, json={"result": "approved"}, headers=reviewer_headers),
-                          lambda: right.post(url, json={"result": "rejected"}, headers=reviewer_headers))
+                          lambda: left.post(url, json={"result": "approved", **context}, headers=reviewer_headers),
+                          lambda: right.post(url, json={"result": "rejected", **context}, headers=reviewer_headers))
     assert sorted(response.status_code for response in responses) == [200, 409]
     with ctx.session_factory() as db:
         submission = db.query(Submission).one()
