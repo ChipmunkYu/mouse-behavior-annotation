@@ -20,9 +20,11 @@ DISPLAY_PROXY_DELETE_PROFILE_VERSIONS = frozenset({
 OUTPUT_FPS_TOLERANCE = 0.01
 OUTPUT_DURATION_TOLERANCE_FRAMES = 1.0
 FRAME_INTERVAL_TOLERANCE_SECONDS = 0.001
-MIN_FRAME_INTERVAL_RATIO = 0.5
-# Source-VFR compatibility only; proxies still rewrite PTS to ordinal CFR. Because
-# nominal input may be 29–31fps, this ratio is not a global absolute 250ms limit.
+# Source-VFR compatibility only; proxies still rewrite PTS to ordinal CFR, so bounded
+# source jitter cannot corrupt the output. The lower bound rejects duplicate/near-duplicate
+# timestamps, not sub-frame jitter (a real 30fps source showed a 14.5ms interval, ~0.44x).
+MIN_FRAME_INTERVAL_RATIO = 0.4
+# Upper bound: nominal input may be 29–31fps, so this ratio is not a global absolute 250ms limit.
 MAX_FRAME_INTERVAL_RATIO = 7.5
 
 

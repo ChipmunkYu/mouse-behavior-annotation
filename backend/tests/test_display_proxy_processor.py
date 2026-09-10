@@ -142,7 +142,15 @@ def test_source_timestamp_validation_accepts_long_vfr_intervals(interval):
     )
 
 
-@pytest.mark.parametrize("interval", [0.251, 0.016])
+@pytest.mark.parametrize("interval", [0.0145, 0.02])
+def test_source_timestamp_validation_accepts_short_vfr_intervals(interval):
+    DisplayProxyProcessor._validate_timestamps(
+        _timestamps_with_interval(interval), (30.0, 10.0, 300),
+        time_base=1 / 15360, output=False, nominal_fps=30.0,
+    )
+
+
+@pytest.mark.parametrize("interval", [0.251, 0.013])
 def test_source_timestamp_validation_rejects_interval_outside_vfr_bounds(interval):
     with pytest.raises(UnsupportedDisplaySource, match="VFR bounds"):
         DisplayProxyProcessor._validate_timestamps(
