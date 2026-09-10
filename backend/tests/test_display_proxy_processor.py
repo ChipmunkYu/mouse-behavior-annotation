@@ -115,6 +115,16 @@ def _timestamps(count=300, period=1 / 30):
     return tuple(index * period for index in range(count))
 
 
+def _timestamps_with_interval(interval, count=300, period=1 / 30):
+    """Keep the original span/summary FPS while varying only one interval."""
+    other_interval = (period * (count - 1) - interval) / (count - 2)
+    intervals = [interval, *([other_interval] * (count - 2))]
+    values = [0.0]
+    for value in intervals:
+        values.append(values[-1] + value)
+    return tuple(values)
+
+
 def test_timestamp_validation_accepts_bounded_vfr_with_matching_summary_fps():
     values = list(_timestamps())
     values[100] = values[99] + 0.0294
@@ -124,12 +134,30 @@ def test_timestamp_validation_accepts_bounded_vfr_with_matching_summary_fps():
                                                nominal_fps=30.0)
 
 
-def test_timestamp_validation_rejects_interval_outside_vfr_bounds():
-    values = list(_timestamps())
-    values[151] += 0.02
+@pytest.mark.parametrize("interval", [0.239734, 0.250])
+def test_source_timestamp_validation_accepts_long_vfr_intervals(interval):
+    DisplayProxyProcessor._validate_timestamps(
+        _timestamps_with_interval(interval), (30.0, 10.0, 300),
+        time_base=1 / 15360, output=False, nominal_fps=30.0,
+    )
+
+
+@pytest.mark.parametrize("interval", [0.251, 0.016])
+def test_source_timestamp_validation_rejects_interval_outside_vfr_bounds(interval):
     with pytest.raises(UnsupportedDisplaySource, match="VFR bounds"):
-        DisplayProxyProcessor._validate_timestamps(tuple(values), (30.0, 10.0, 300),
-                                                   time_base=1 / 15360, output=False)
+        DisplayProxyProcessor._validate_timestamps(
+            _timestamps_with_interval(interval), (30.0, 10.0, 300),
+            time_base=1 / 15360, output=False, nominal_fps=30.0,
+        )
+
+
+@pytest.mark.parametrize("interval", [0.0, -0.001])
+def test_source_timestamp_validation_rejects_duplicate_or_backward_values(interval):
+    with pytest.raises(UnsupportedDisplaySource, match="strictly monotonic"):
+        DisplayProxyProcessor._validate_timestamps(
+            _timestamps_with_interval(interval), (30.0, 10.0, 300),
+            time_base=1 / 15360, output=False, nominal_fps=30.0,
+        )
 
 
 def test_timestamp_validation_accepts_normal_30fps():

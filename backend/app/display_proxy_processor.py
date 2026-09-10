@@ -21,7 +21,9 @@ OUTPUT_FPS_TOLERANCE = 0.01
 OUTPUT_DURATION_TOLERANCE_FRAMES = 1.0
 FRAME_INTERVAL_TOLERANCE_SECONDS = 0.001
 MIN_FRAME_INTERVAL_RATIO = 0.5
-MAX_FRAME_INTERVAL_RATIO = 1.5
+# Source-VFR compatibility only; proxies still rewrite PTS to ordinal CFR. Because
+# nominal input may be 29–31fps, this ratio is not a global absolute 250ms limit.
+MAX_FRAME_INTERVAL_RATIO = 7.5
 
 
 @dataclass(frozen=True, slots=True)
