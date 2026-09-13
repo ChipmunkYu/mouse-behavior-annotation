@@ -1583,9 +1583,6 @@ a:focus-visible,
 .behavior-review-counts b { color: var(--warn); font-size: 17px; line-height: 1.1; }
 .behavior-review-counts .approved b { color: var(--ok); }
 .behavior-review-counts .rejected b { color: var(--danger); }
-.behavior-lock, .behavior-rejected { padding: 2px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
-.behavior-lock { color: var(--ok); background: var(--ok-weak); }
-.behavior-rejected { color: var(--danger); background: var(--danger-weak); }
 
 .behavior-feedback-panel { display: grid; gap: 9px; padding: 11px; border: 1px solid color-mix(in srgb, var(--danger) 48%, var(--border)); border-left: 3px solid var(--danger); border-radius: var(--radius); background: var(--bg-elev); }
 .behavior-feedback-list { display: grid; gap: 8px; }
@@ -1596,10 +1593,55 @@ a:focus-visible,
 .behavior-feedback-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .behavior-feedback-head span { padding: 2px 6px; border-radius: 999px; color: var(--danger); background: var(--danger-weak); font-size: 10px; font-weight: 700; }
 .behavior-feedback-item.modified .behavior-feedback-head span { color: var(--warn); background: var(--warn-weak); }
-.behavior-feedback-item p { margin: 0; white-space: pre-wrap; }
+.behavior-feedback-text { display: block; margin: 0; white-space: pre-wrap; }
 .behavior-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--border); color: var(--text-2); font-size: 11px; }
-.behavior-comparison > span { display: grid; gap: 2px; padding: 7px; background: var(--bg-elev); }
+.behavior-comparison > span { display: grid; gap: 2px; padding: 7px; background: var(--bg-elev); min-width: 0; overflow-wrap: anywhere; }
 .behavior-comparison small { color: var(--text-3); font-size: 10px; font-weight: 700; }
+
+/* 退回意见 / 退回行为：位于 annotate-main 播放器之前的固定尺寸面板，
+ * 面板体内部滚动，不覆盖视频 / 时间轴 / 主控件，也不产生横向溢出。 */
+.rejection-feedback-panel {
+  flex: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 168px;
+  max-height: 100%;
+  overflow: hidden;
+}
+.behavior-feedback-panel.rejection-feedback-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.annotation-rejection.rejection-feedback-panel {
+  height: 152px;
+}
+.rejection-feedback-panel .behavior-feedback-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+/* 条目只保留两个原生按钮：内容按钮定位行为，「标记已修改」按钮持久化并下沉。 */
+.behavior-feedback-item:hover { border-color: var(--border-strong); }
+.behavior-feedback-select {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.behavior-feedback-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.behavior-feedback-text { overflow-wrap: anywhere; }
+.behavior-feedback-item.is-marked-modified { opacity: .72; border-left-color: var(--ok); }
+.behavior-feedback-actions { display: flex; justify-content: flex-end; }
+.behavior-feedback-item.is-marked-modified .behavior-feedback-actions .btn { color: var(--ok); }
 
 .review-focus-badge {
   padding: 2px 6px;

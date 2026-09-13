@@ -16,9 +16,15 @@ describe("annotation and project export entry points", () => {
     expect(annotateSource).not.toContain("Tab 切换模式；T 进入 track 列表导航；Space 播放；Ctrl+Enter 保存");
   });
 
-  it("keeps rejection feedback inside the left workspace column and merges time context into the draft summary", () => {
-    expect(annotateSource).toMatch(/<div className="annotate-body">\s*<section className="annotate-main">\s*\{behaviorReviewState\?\.feedback_items\.length \? \(/);
-    expect(annotateSource.indexOf('className="behavior-feedback-panel"')).toBeLessThan(annotateSource.indexOf('className="card player-card"'));
+  it("keeps rejection feedback before the player in annotate-main, independently scrolling", () => {
+    const mainIndex = annotateSource.indexOf('className="annotate-main"');
+    const panelIndex = annotateSource.indexOf("<RejectionFeedbackPanel");
+    const playerIndex = annotateSource.indexOf('className="card player-card"');
+    expect(mainIndex).toBeGreaterThan(-1);
+    expect(panelIndex).toBeGreaterThan(mainIndex);
+    expect(playerIndex).toBeGreaterThan(panelIndex);
+    expect(annotateSource).toContain("focusedAnnotationId={selectedAnnotationId}");
+    expect(annotateSource).toContain("标记已修改");
     expect(annotateSource).toContain('className="draft-time-context"');
     expect(annotateSource).not.toContain('className="statusbar"');
     expect(annotateSource).not.toContain('className="time-display"');

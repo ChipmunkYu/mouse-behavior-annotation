@@ -61,7 +61,7 @@
 }
 ```
 
-`feedback_items` 仅列出最近一次视频退回中明确被逐条拒绝的行为，含不可变 `baseline`、当前实时 `current`（已删除时为 `null`）、审核人、时间和 `comparison`：`unchanged | modified | deleted | reverted`。
+`feedback_items` 仅列出最近一次视频退回中明确被逐条拒绝的行为，含不可变 `baseline`、当前实时 `current`（已删除时为 `null`）、审核人、时间、`comparison`：`unchanged | modified | deleted | reverted`，以及人工标记状态 `marked` / `marked_at`。返回顺序固定为未标记在前、已标记在后；已标记组内按 `marked_at` 升序，再按 `submission_annotation_id` 稳定排序。`marked` 缺失的旧数据默认为 `false`。
 
 ## 写入单条行为裁决
 
@@ -74,6 +74,32 @@
 ```
 
 成功直接持久化并返回完整 `BehaviorReviewStateOut`。仅有审核权限的成员可写；当前 `submitted` 尝试可写三种状态。最新尝试为 `rejected/withdrawn` 时仅允许写 `pending` 显式撤销，解除单条锁定或退回要求，旧审计仍保留；旧轮次和最终通过尝试禁止直接撤销，最终通过必须先 `reopen`。所有撤销仍须携带准确的 `expected_decision_revision`。
+
+## 标记退回行为已修改
+
+`PUT /projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/feedback-mark`
+
+幂等记录某条被逐条拒绝行为的「标记已修改」人工状态，无请求体，成功返回完整 `BehaviorReviewStateOut`。
+
+- 权限：任意对该视频有访问权的 active 项目成员均可标记，不要求审核权限；非项目成员返回 403。
+- 仅最新裁决为 `rejected` 的快照可标记，否则返回 409；快照不存在或不属于该提交返回 404。
+- 每快照至多一条记录，首次标记生效并写入 `marked_by` / `marked_at`；重复调用为 no-op 并保留原 `marked_at`。
+- 该标记是独立于 `comparison` 的人工确认状态：`comparison=modified` 由材料差异自动计算，`marked` 只由本接口写入，也不参与提交门禁——提交仍以 `comparison` 与材料实质差异判定。迁移 `0018` 仅新增 `feedback_marks` 表，缺失记录即未标记，无需回填。
+
+响应中 `feedback_items[]` 相应字段：
+
+```json
+{
+  "submission_annotation_id": 31,
+  "comparison": "modified",
+  "marked": true,
+  "marked_at": "2026-09-13T09:00:00",
+  "baseline": {},
+  "current": {},
+  "reviewer": "reviewer1",
+  "decided_at": "2026-09-09T10:00:00"
+}
+```
 
 ## 最终视频裁决
 
@@ -135,6 +161,9 @@ SQLite batch DDL 不视为可由单个 SQL 事务完整回滚。受支持的 `ap
 
 - `annotations[].id` 是快照 ID，供单条裁决 URL 使用；`source_annotation_id` 是历史实时 ID，可为 `null`；实时编辑锁只取 `locked_annotation_ids`，不要根据历史 ID 或旧 `Annotation.review_status` 猜锁。
 - `feedback_items[].comparison` 的 `unchanged/reverted` 均未处理；`deleted` 的 `current=null`，展示仍使用 `baseline`。历史反馈展示与当前提交门禁应区分，写接口的结构化 409 为最终判断。
+- `feedback_items[].marked/marked_at` 是逐条人工标记，与 `comparison=modified` 不是同一概念，界面文案须区分为「标记已修改」与对照标签「已修改」；标记不改变提交门禁。
+- 标注工作台把「退回意见 / 退回行为」面板放在 `annotate-main` 常规文档流中、播放器之前，具有固定可见高度且仅面板体内部纵向滚动，不覆盖视频、时间轴与主控件；无逐条 `feedback_items` 时回退展示最近一次视频退回意见。该面板不在 `annotate-side` 侧栏中。
+- 面板只有两个用户操作：点击退回行为条目（原生 `button`，`className="behavior-feedback-select"`）经 `resolveFeedbackTarget`（优先 `source_annotation_id`，缺失回退 `current.id`）用目标替换唯一选中（`resolveFeedbackSelection`），选中对应实时行为并把播放头跳到其起点，时间轴同步高亮，行为列表与时间轴至多一个选中行为，但不自动进入编辑；目标已删除时不改变当前选中，仅提示无法定位、不选中幽灵 ID。「标记已修改」经 feedback-mark 窄接口调用，成功后以服务端返回的完整状态为准并乐观地按未标记在前下沉到列表底部，失败回滚本地乐观标记。
 - `frontend/src/api/types.ts` 已直接使用 OpenAPI 生成的行为审核 DTO；快照包含 `confidence/crop_region`，实时来源 ID 按可空值处理。
 - 审核页仅在 `submitted` 开放新通过/退回，在最新 `rejected/withdrawn` 尝试中单独开放撤销裁决；写成功及 409 后刷新 review-state，并保留未提交文字。审核页的视频选择器可再次进入已通过视频执行重新打开。
 
@@ -173,3 +202,25 @@ npm test -- --run src/api/behaviorReviewApi.test.ts src/pages/behaviorReview.tes
 ```
 
 `git diff --check` 通过。本轮未执行全量后端、真实浏览器或服务器验证，未提交、未部署；既有其他改动保留。
+
+## 2026-09-13 回归证据
+
+本轮新增逐条「标记已修改」持久化（迁移 `0018`、`FeedbackMark`、`PUT .../feedback-mark`）及标注工作台退回意见 / 退回行为面板（`annotate-main` 内、播放器之前，固定可见尺寸、面板体内部滚动，非右侧侧栏）。后端新增 `backend/tests/test_feedback_marks.py`，覆盖成员权限、幂等与保留 `marked_at`、未标记在前排序、非 `rejected` 409、缺失快照 404、`0018` 迁移后旧反馈默认未标记。前端新增 `frontend/src/pages/rejectionFeedbackPanel.test.ts`、`annotateRowCondensed.test.ts`、`annotateEditInteraction.test.ts` 并扩展 `annotateReviewFeedback.test.ts`，覆盖定位、排序、窄接口、固定面板布局与精简行为行。
+
+后端在 `backend/` 执行聚焦测试与 OpenAPI 快照检查：`test_feedback_marks.py` **6 passed**、`test_public_api_contract.py` **12 passed**，`export_openapi.py --check` 退出码 0（快照与代码一致）；仅有既有 Starlette/httpx deprecation warning，无跳过项：
+
+```powershell
+python -m pytest tests/test_feedback_marks.py -q
+python -m pytest tests/test_public_api_contract.py -q
+python scripts/export_openapi.py --check
+```
+
+前端在 `frontend/` 执行聚焦 Vitest 通过（**5 files / 49 tests**），`npm run typecheck` 与 `npm run build` 均退出码 0：
+
+```powershell
+npx vitest run src/pages/annotateReviewFeedback.test.ts src/pages/rejectionFeedbackPanel.test.ts src/pages/annotateRowCondensed.test.ts src/pages/annotateEditInteraction.test.ts src/pages/annotationExportEntryPoints.test.ts
+npm run typecheck
+npm run build
+```
+
+未执行全量后端、真实浏览器或服务器验证。未提交、未部署。

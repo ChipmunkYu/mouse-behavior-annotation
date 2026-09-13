@@ -6,9 +6,18 @@ import json
 from datetime import datetime
 
 from fastapi import HTTPException
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from .models import Annotation, BehaviorReviewDecision, Submission, SubmissionAnnotation, User, Video
+from .models import (
+    Annotation,
+    BehaviorReviewDecision,
+    FeedbackMark,
+    Submission,
+    SubmissionAnnotation,
+    User,
+    Video,
+)
 
 
 def material_values(annotation: Annotation) -> dict:
@@ -42,6 +51,28 @@ def latest_decisions(db: Session, snapshot_ids: list[int]) -> dict[int, Behavior
             .filter(BehaviorReviewDecision.submission_annotation_id.in_(snapshot_ids))
             .order_by(BehaviorReviewDecision.sequence, BehaviorReviewDecision.id).all())
     return {row.submission_annotation_id: row for row in rows}
+
+
+def feedback_marks(db: Session, snapshot_ids: list[int]) -> dict[int, FeedbackMark]:
+    if not snapshot_ids:
+        return {}
+    rows = (db.query(FeedbackMark)
+            .filter(FeedbackMark.submission_annotation_id.in_(snapshot_ids)).all())
+    return {row.submission_annotation_id: row for row in rows}
+
+
+def record_feedback_mark(db: Session, snapshot_id: int, user_id: int) -> None:
+    """Atomically record the first '标记已修改' row; later marks are no-ops.
+
+    The unique snapshot index decides the winner, so a duplicate/concurrent mark
+    never raises IntegrityError and the first ``marked_by``/``marked_at`` survive.
+    """
+    db.execute(
+        sqlite_insert(FeedbackMark)
+        .values(submission_annotation_id=snapshot_id, marked_by=user_id,
+                marked_at=datetime.utcnow())
+        .on_conflict_do_nothing(index_elements=["submission_annotation_id"])
+    )
 
 
 def current_final_approval(db: Session, video_id: int) -> Submission | None:

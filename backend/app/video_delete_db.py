@@ -23,7 +23,7 @@ from .config import Settings
 from .models import (
     Annotation, BackgroundJob, BehaviorReviewDecision, BehaviorReviewReopen, Clip, CorrectedDetectionAssignment, CorrectedTrack,
     DetectionImport, DetectionSnapshot, DetectionSnapshotState, DetectionStateOverride,
-    DetectionSuppression, DraftDetectionChange, DraftIdentityEdit, IdentityEdit,
+    DetectionSuppression, DraftDetectionChange, DraftIdentityEdit, FeedbackMark, IdentityEdit,
     ProjectMembership, RawDetection, Review, Submission, SubmissionAnnotation,
     SuppressionDetection, Video, VideoImportBatch,
 )
@@ -77,14 +77,15 @@ class FrozenVideoDelete:
 
 
 _ID_MODELS = (
-    Annotation, Review, BehaviorReviewDecision, BehaviorReviewReopen, Clip, Submission, SubmissionAnnotation, DetectionImport,
+    Annotation, Review, BehaviorReviewDecision, BehaviorReviewReopen, FeedbackMark, Clip,
+    Submission, SubmissionAnnotation, DetectionImport,
     RawDetection, CorrectedTrack, CorrectedDetectionAssignment, IdentityEdit,
     DetectionSuppression, DraftIdentityEdit, DetectionSnapshot, VideoImportBatch,
 )
 _TABLES_WITH_ID = {model.__tablename__ for model in _ID_MODELS}
 _DELETE_ORDER = (
     "clips", "reviews", "behavior_review_decisions", "behavior_review_reopens",
-    "submission_annotations", "submissions",
+    "feedback_marks", "submission_annotations", "submissions",
     "detection_snapshot_states", "detection_snapshots", "draft_detection_changes",
     "detection_state_overrides", "suppression_detections",
     "corrected_detection_assignments", "identity_edits", "detection_suppressions",
@@ -172,6 +173,10 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     behavior_reopens = _rows(
         db, BehaviorReviewReopen, BehaviorReviewReopen.submission_id.in_(submission_ids)
     ) if submission_ids else []
+    feedback_marks = _rows(
+        db, FeedbackMark,
+        FeedbackMark.submission_annotation_id.in_(submission_annotation_ids)
+    ) if submission_annotation_ids else []
     decision_ids = _ids(behavior_decisions)
     if any(row.carried_from_decision_id is not None
            and row.carried_from_decision_id not in set(decision_ids)
@@ -318,6 +323,7 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
         "annotations": annotations, "reviews": reviews, "clips": clips,
         "behavior_review_decisions": behavior_decisions,
         "behavior_review_reopens": behavior_reopens,
+        "feedback_marks": feedback_marks,
         "submissions": submissions, "submission_annotations": submission_annotations,
         "detection_imports": imports, "raw_detections": raw,
         "corrected_tracks": tracks, "corrected_detection_assignments": assignments,

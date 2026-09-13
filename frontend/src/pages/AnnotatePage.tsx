@@ -32,9 +32,10 @@ import type {
   IdentityEditResult,
   Review,
   BehaviorReviewState,
+  BehaviorReviewFeedbackItem,
 } from "../api/types";
 import { ROLE_LABELS, WORKFLOW_LABELS } from "../api/types";
-import { Card, EmptyState, Loading, WorkflowBadge, statusLabel } from "../components/ui";
+import { Card, EmptyState, Loading, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import { MediaLoadProgress } from "../components/MediaLoadProgress";
@@ -45,7 +46,8 @@ import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, fr
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
 import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
 import { useMediaSource } from "../media";
-import { latestVisibleRejection, rejectionComment } from "./annotateReviewFeedback";
+import { isFeedbackMarked, latestVisibleRejection, rejectionComment, resolveFeedbackSelection, resolveFeedbackTarget, sortFeedbackItems } from "./annotateReviewFeedback";
+import { markFeedbackModified } from "./feedbackMarkApi";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type Point = { frame: number };
@@ -204,6 +206,82 @@ export function resolveAnnotateEscapeAction(state: {
   return null;
 }
 
+/**
+ * 编辑现有行为标注时，仍允许透传的正常标注快捷键。
+ * 编辑态不再是「一律抑制」：类别数字键、S/D、T/参与对象导航、视频传输、Ctrl+Enter 保存
+ * 都继续作用于共享编辑状态；Delete / Ctrl+Z / ? 等破坏性或无关快捷键仍被抑制。
+ */
+export function isEditingAnnotationShortcutAllowed(event: {
+  code: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}): boolean {
+  const plain = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+  // 视频导航：Shift+逗号 / Shift+句号
+  if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && (event.code === "Comma" || event.code === "Period")) return true;
+  // 视频传输：播放 / 暂停、逐帧（含 Shift 十帧）
+  if (event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight") return true;
+  // 保存编辑中的行为（与普通草稿共用同一快捷键）
+  if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.code === "Enter") return true;
+  // 设置开始 / 结束
+  if (plain && (event.code === "KeyS" || event.code === "KeyD")) return true;
+  // 进入 / 退出参与对象键盘选择
+  if (plain && event.code === "KeyT") return true;
+  // 参与对象导航：上下移动与选择
+  if (event.code === "ArrowUp" || event.code === "ArrowDown") return true;
+  if (plain && event.code === "Enter") return true;
+  // 类别数字键
+  if (plain && /^(Digit|Numpad)[0-9]$/.test(event.code)) return true;
+  return false;
+}
+
+/** 解析「参与对象」输入框中的逗号 / 空白分隔 track ID，去重并升序。 */
+export function parseMouseIdList(value: string): number[] {
+  return [...new Set(value.split(/[,，\s]+/).filter(Boolean).map(Number))]
+    .filter(Number.isInteger)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * 由共享编辑状态构造 PATCH。校验失败返回错误文案，成功返回可直接提交的补丁；
+ * 角色分配由 handleEditSave 从共享 participantRoles 补齐，这里不重复。
+ */
+export function buildAnnotationEditPatch(input: {
+  category: Category | null;
+  startFrame: number | null;
+  endFrame: number | null;
+  mouseIds: number[];
+  fps: number | null | undefined;
+  frameCount: number | null | undefined;
+  detectionImportRevision: number | null | undefined;
+  identityRevision: number | null | undefined;
+}): { patch: AnnotationPatchInput } | { error: string } {
+  const { category, startFrame: s, endFrame: en, mouseIds, fps, frameCount } = input;
+  if (!category) return { error: "请选择行为类别" };
+  if (s == null || en == null) return { error: "请设置开始帧和结束帧" };
+  if (!Number.isInteger(s) || !Number.isInteger(en)) return { error: "开始帧和结束帧必须是整数" };
+  if (s < 0 || en < 0) return { error: "帧索引不能为负" };
+  if (frameCount && s >= frameCount) return { error: `开始帧不能超过最后一帧 ${frameCount - 1}` };
+  if (frameCount && en >= frameCount) return { error: `结束帧不能超过最后一帧 ${frameCount - 1}` };
+  if (en <= s) return { error: "结束帧必须大于开始帧，单帧行为不能保存" };
+  const resolvedFps = fps && fps > 0 ? fps : null;
+  if (!resolvedFps) return { error: "视频 FPS 无效，无法由帧派生时间" };
+  return {
+    patch: {
+      category_id: category.id,
+      start_time: frameToStartTime(s, resolvedFps),
+      end_time: frameToEndTime(en, resolvedFps),
+      start_frame: s,
+      end_frame: en,
+      ...(category.participant_mode === "unordered" ? { mouse_ids: [...new Set(mouseIds)].sort((a, b) => a - b) } : {}),
+      detection_import_revision: input.detectionImportRevision ?? null,
+      identity_revision: input.identityRevision ?? null,
+    },
+  };
+}
+
 function draftApiErrorMessages(error: unknown): string[] {
   if (!(error instanceof ApiError)) return [error instanceof Error ? error.message : "保存行为标注失败"];
   const messages: string[] = [];
@@ -316,7 +394,9 @@ function CategoryPanel({
   );
 }
 
-/* ================= 标注区间列表 ================= */
+/* ================= 标注区间列表 =================
+ * 精简行：只保留行为身份（类别、时间、参与对象）与必要的待处理提示；
+ * 帧号、标注者、可信度、审核状态等元数据不再展示，状态不靠彩色底色强调。 */
 function AnnotationRow({
   ann,
   categoryById,
@@ -325,7 +405,6 @@ function AnnotationRow({
   busy,
   readOnly,
   locked,
-  decisionStatus,
   onEdit,
   onDelete,
   onSelect,
@@ -338,43 +417,38 @@ function AnnotationRow({
   busy: boolean;
   readOnly: boolean;
   locked: boolean;
-  decisionStatus: string | null;
   onEdit: () => void;
   onDelete: () => void;
   onSelect: () => void;
   rowRef?: Ref<HTMLDivElement>;
 }) {
   const cat = categoryById.get(ann.category_id);
+  const label = ann.category_name ?? cat?.name ?? `类别 #${ann.category_id}`;
   return (
-    <div ref={rowRef} className={`anno-row${active ? " active" : ""}${selected ? " selected" : ""}`} onClick={onSelect}>
+    <div
+      ref={rowRef}
+      className={`anno-row${active ? " active" : ""}${selected ? " selected" : ""}`}
+      onClick={onSelect}
+      title={locked ? "此行为已通过；撤销通过后才能修改" : undefined}
+    >
       <div className="anno-row-top">
         <span className="anno-cat" title={cat?.group ?? ""}>
           <span className="swatch" style={{ background: cat?.color ?? "var(--text-3)" }} />
-          <span className="name">{ann.category_name ?? cat?.name ?? `类别 #${ann.category_id}`}</span>
+          <span className="name">{label}</span>
         </span>
         <span className="anno-times">
           <b>{formatTimeShort(ann.start_time)}</b> – <b>{formatTimeShort(ann.end_time)}</b>
         </span>
         <span className="anno-row-actions">
-          {locked ? <span className="behavior-lock" title="此行为已通过；撤销通过后才能修改">🔒 已通过</span> : decisionStatus === "rejected" ? <span className="behavior-rejected">需修改</span> : null}
-          <button type="button" className="btn-link" disabled={busy || readOnly || locked} onClick={onEdit}>
+          <button type="button" className="btn btn-sm" disabled={busy || readOnly || locked} onClick={onEdit} aria-label={`编辑行为：${label}`}>
             编辑
           </button>
-          <button type="button" className="btn-link" disabled={busy || readOnly || locked} onClick={onDelete} style={{ color: "var(--danger)" }}>
+          <button type="button" className="btn btn-sm btn-danger" disabled={busy || readOnly || locked} onClick={onDelete} aria-label={`删除行为：${label}`}>
             删除 [Delete]
           </button>
         </span>
       </div>
       <div className="anno-row-meta">
-        <span>
-          帧 {ann.start_frame} → {ann.end_frame}
-        </span>
-        <span>·</span>
-        <span>标注者 {ann.annotator ?? `#${ann.annotator_id}`}</span>
-        <span>·</span>
-        <span>
-          可信度 {statusLabel(ann.confidence)} · 审核 {statusLabel(ann.review_status)}
-        </span>
         <ParticipantSummary mode={cat?.participant_mode ?? "unordered"} roles={cat?.role_definitions ?? []} assignments={ann.participant_roles} mouseIds={ann.mouse_ids} compact />
         {ann.participant_status === "needs_participants" ? <span className="mouse-status warning">角色待补全</span> : null}
         {ann.mouse_id_status === "needs_mouse_ids" ? <span className="mouse-status warning">{cat?.participant_mode === "role_based" ? "Track 已失效，需要重新分配" : "Track 已失效，需要重新选择"}</span> : null}
@@ -388,89 +462,86 @@ function AnnotationEditForm({
   categories,
   fps,
   frameCount,
+  activeCategory,
+  startPoint,
+  endPoint,
+  selectedMouseIds,
+  saving,
+  error,
   onCancel,
   onSave,
   onCategoryChange,
+  onStartFrameChange,
+  onEndFrameChange,
+  onMouseIdsChange,
 }: {
   ann: Annotation;
   categories: Category[];
   fps: number | null | undefined;
   frameCount: number | null | undefined;
+  activeCategory: Category | null;
+  startPoint: Point | null;
+  endPoint: Point | null;
+  selectedMouseIds: number[];
+  saving: boolean;
+  error: string | null;
   onCancel: () => void;
-  onSave: (patch: AnnotationPatchInput) => Promise<void>;
+  onSave: () => void;
   onCategoryChange: (category: Category) => Promise<boolean>;
+  onStartFrameChange: (frame: number | null) => void;
+  onEndFrameChange: (frame: number | null) => void;
+  onMouseIdsChange: (ids: number[]) => void;
 }) {
-  const [categoryId, setCategoryId] = useState(ann.category_id);
-  const [startFrame, setStartFrame] = useState(String(ann.start_frame));
-  const [endFrame, setEndFrame] = useState(String(ann.end_frame));
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [mouseIds, setMouseIds] = useState(ann.mouse_ids.join(", "));
-  const selectedCategory = categories.find((c) => c.id === categoryId);
-  const [saving, setSaving] = useState(false);
-
   const groups = useMemo(() => groupCategories(categories), [categories]);
+  // 参与对象输入是「文本 ↔ 共享选中状态」的双向同步：本地保留原始文本以便连续输入，
+  // 共享状态变化（S/D、T 导航、类别切换等）时再回写文本框。
+  const [mouseText, setMouseText] = useState(() => selectedMouseIds.join(", "));
+  const lastMouseIdsRef = useRef(selectedMouseIds);
+  useEffect(() => {
+    const same = lastMouseIdsRef.current.length === selectedMouseIds.length
+      && lastMouseIdsRef.current.every((id, index) => id === selectedMouseIds[index]);
+    if (same) return;
+    lastMouseIdsRef.current = selectedMouseIds;
+    setMouseText(selectedMouseIds.join(", "));
+  }, [selectedMouseIds]);
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    const s = Number(startFrame);
-    const en = Number(endFrame);
-    const resolvedFps = fps && fps > 0 ? fps : null;
-    if (!Number.isInteger(s) || !Number.isInteger(en)) {
-      setLocalError("开始帧和结束帧必须是整数");
-      return;
-    }
-    if (s < 0 || en < 0) {
-      setLocalError("帧索引不能为负");
-      return;
-    }
-    if (frameCount && s >= frameCount) {
-      setLocalError(`开始帧不能超过最后一帧 ${frameCount - 1}`);
-      return;
-    }
-    if (en <= s) {
-      setLocalError("结束帧必须大于开始帧，单帧行为不能保存");
-      return;
-    }
-    if (frameCount && en >= frameCount) {
-      setLocalError(`结束帧不能超过最后一帧 ${frameCount - 1}`);
-      return;
-    }
-    if (!resolvedFps) {
-      setLocalError("视频 FPS 无效，无法由帧派生时间");
-      return;
-    }
-    setSaving(true);
-    setLocalError(null);
-    try {
-      await onSave({
-        category_id: categoryId,
-        start_time: frameToStartTime(s, resolvedFps),
-        end_time: frameToEndTime(en, resolvedFps),
-        start_frame: s,
-        end_frame: en,
-        ...(selectedCategory?.participant_mode === "unordered" ? { mouse_ids: [...new Set(mouseIds.split(/[,，\s]+/).filter(Boolean).map(Number))].filter(Number.isInteger).sort((a, b) => a - b) } : { participant_roles: ann.participant_roles }),
-        detection_import_revision: ann.detection_import_revision,
-        identity_revision: ann.identity_revision,
-      });
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : "保存失败");
-      setSaving(false);
-    }
+  function handleMouseTextChange(value: string) {
+    setMouseText(value);
+    const parsed = parseMouseIdList(value);
+    lastMouseIdsRef.current = parsed;
+    onMouseIdsChange(parsed);
   }
 
-  const sNum = Number(startFrame);
-  const eNum = Number(endFrame);
+  const sNum = startPoint?.frame ?? null;
+  const eNum = endPoint?.frame ?? null;
   const resolvedFps = fps && fps > 0 ? fps : null;
 
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    onSave();
+  }
+
   return (
-    <form className="anno-edit" onSubmit={submit}>
+    <form
+      className="anno-edit"
+      onSubmit={submit}
+      onKeyDown={(event) => {
+        // 输入框内也能用 Ctrl+Enter 保存编辑，而不是被输入焦点保护吞掉。
+        // stopPropagation 避免同一次按键再触发 window 上的全局保存处理器造成重复 PATCH。
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          event.stopPropagation();
+          onSave();
+        }
+      }}
+    >
       <div className="field">
         <label htmlFor={`edit-cat-${ann.id}`}>类别</label>
         <select
           id={`edit-cat-${ann.id}`}
           className="select"
-          value={categoryId}
-          onChange={(e) => { const next = categories.find((c) => c.id === Number(e.target.value)); if (next) void onCategoryChange(next).then((ok) => { if (ok) setCategoryId(next.id); }); }}
+          value={activeCategory?.id ?? ""}
+          onChange={(e) => { const next = categories.find((c) => c.id === Number(e.target.value)); if (next) void onCategoryChange(next); }}
         >
           {groups.map(([group, list]) => (
             <optgroup key={group} label={group}>
@@ -493,8 +564,12 @@ function AnnotationEditForm({
             min="0"
             max={frameCount ? frameCount - 1 : undefined}
             step="1"
-            value={startFrame}
-            onChange={(e) => setStartFrame(e.target.value)}
+            value={sNum ?? ""}
+            onChange={(e) => {
+              const raw = e.currentTarget.value;
+              const parsed = e.currentTarget.valueAsNumber;
+              onStartFrameChange(raw === "" || !Number.isFinite(parsed) ? null : parsed);
+            }}
           />
         </div>
         <div className="field">
@@ -506,17 +581,21 @@ function AnnotationEditForm({
             min="0"
             max={frameCount ? frameCount - 1 : undefined}
             step="1"
-            value={endFrame}
-            onChange={(e) => setEndFrame(e.target.value)}
+            value={eNum ?? ""}
+            onChange={(e) => {
+              const raw = e.currentTarget.value;
+              const parsed = e.currentTarget.valueAsNumber;
+              onEndFrameChange(raw === "" || !Number.isFinite(parsed) ? null : parsed);
+            }}
           />
         </div>
       </div>
       <div className="frame-preview">
-        派生时间（只读）：{resolvedFps && Number.isInteger(sNum) ? formatTime(frameToStartTime(sNum, resolvedFps)) : "—"} →{" "}
-        {resolvedFps && Number.isInteger(eNum) ? formatTime(frameToEndTime(eNum, resolvedFps)) : "—"}
+        派生时间（只读）：{resolvedFps && sNum != null && Number.isInteger(sNum) ? formatTime(frameToStartTime(sNum, resolvedFps)) : "—"} →{" "}
+        {resolvedFps && eNum != null && Number.isInteger(eNum) ? formatTime(frameToEndTime(eNum, resolvedFps)) : "—"}
       </div>
-      {selectedCategory?.participant_mode === "unordered" ? <div className="field"><label htmlFor={`edit-mice-${ann.id}`}>参与对象（填写 track ID，以逗号分隔）</label><input id={`edit-mice-${ann.id}`} className="input mono" value={mouseIds} onChange={(e) => setMouseIds(e.target.value)} /></div> : <div className="field-hint">角色分配请使用上方参与对象角色槽位；保存时会提交完整角色分配。</div>}
-      <div className="form-error">{localError ?? ""}</div>
+      {activeCategory?.participant_mode === "unordered" ? <div className="field"><label htmlFor={`edit-mice-${ann.id}`}>参与对象（填写 track ID，以逗号分隔）</label><input id={`edit-mice-${ann.id}`} className="input mono" value={mouseText} onChange={(e) => handleMouseTextChange(e.currentTarget.value)} /></div> : <div className="field-hint">角色分配请使用上方参与对象角色槽位；保存时会提交完整角色分配。</div>}
+      <div className="form-error">{error ?? ""}</div>
       <div className="actions">
         <button type="button" className="btn btn-sm" onClick={onCancel} disabled={saving}>
           取消 [Esc]
@@ -538,14 +617,22 @@ function AnnotationList({
   currentTime,
   readOnly,
   lockedIds,
-  decisionBySourceId,
   selectedId,
   editingId,
+  activeCategory,
+  startPoint,
+  endPoint,
+  selectedMouseIds,
+  savingEdit,
+  editError,
   onSelect,
   onEditingChange,
   onEditSave,
   onDelete,
   onEditCategoryChange,
+  onEditStartFrameChange,
+  onEditEndFrameChange,
+  onEditMouseIdsChange,
 }: {
   annotations: Annotation[];
   categories: Category[];
@@ -555,14 +642,22 @@ function AnnotationList({
   currentTime: number;
   readOnly: boolean;
   lockedIds: ReadonlySet<number>;
-  decisionBySourceId: ReadonlyMap<number, string>;
   selectedId: number | null;
   editingId: number | null;
+  activeCategory: Category | null;
+  startPoint: Point | null;
+  endPoint: Point | null;
+  selectedMouseIds: number[];
+  savingEdit: boolean;
+  editError: string | null;
   onSelect: (id: number) => void;
   onEditingChange: (id: number | null) => void;
-  onEditSave: (id: number, patch: AnnotationPatchInput) => Promise<void>;
+  onEditSave: (id: number) => Promise<void>;
   onDelete: (ann: Annotation) => Promise<void>;
   onEditCategoryChange: (category: Category) => Promise<boolean>;
+  onEditStartFrameChange: (frame: number | null) => void;
+  onEditEndFrameChange: (frame: number | null) => void;
+  onEditMouseIdsChange: (ids: number[]) => void;
 }) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const activeId = annotations.find(
@@ -603,12 +698,18 @@ function AnnotationList({
                 categories={categories}
                 fps={fps}
                 frameCount={frameCount}
+                activeCategory={activeCategory}
+                startPoint={startPoint}
+                endPoint={endPoint}
+                selectedMouseIds={selectedMouseIds}
+                saving={savingEdit}
+                error={editError}
                 onCancel={() => onEditingChange(null)}
-                onSave={async (patch) => {
-                  await onEditSave(a.id, patch);
-                  onEditingChange(null);
-                }}
+                onSave={() => onEditSave(a.id)}
                 onCategoryChange={onEditCategoryChange}
+                onStartFrameChange={onEditStartFrameChange}
+                onEndFrameChange={onEditEndFrameChange}
+                onMouseIdsChange={onEditMouseIdsChange}
               />
             ) : (
               <AnnotationRow
@@ -620,7 +721,6 @@ function AnnotationList({
                 busy={busyId === a.id}
                 readOnly={readOnly}
                 locked={lockedIds.has(a.id)}
-                decisionStatus={decisionBySourceId.get(a.id) ?? null}
                 onEdit={() => { if (!readOnly && !lockedIds.has(a.id)) { onSelect(a.id); onEditingChange(a.id); } }}
                 onDelete={() => void handleDelete(a)}
                 onSelect={() => onSelect(a.id)}
@@ -631,6 +731,97 @@ function AnnotationList({
         </div>
       )}
     </Card>
+  );
+}
+
+/* ================= 退回意见 / 退回行为 面板 =================
+ * 位于 annotate-main 播放器之前，固定尺寸、面板体内部滚动，不覆盖视频 / 时间轴 / 主控件。
+ * 只有两个操作：点击条目定位当前行为；「标记已修改」持久化并下沉，不做自动编辑。
+ */
+function RejectionFeedbackPanel({
+  feedbackItems,
+  markedIds,
+  markingIds,
+  rejection,
+  onFocus,
+  onMarkModified,
+}: {
+  feedbackItems: BehaviorReviewFeedbackItem[];
+  markedIds: ReadonlySet<number>;
+  markingIds: ReadonlySet<number>;
+  rejection: Review | null;
+  onFocus: (item: BehaviorReviewFeedbackItem) => void;
+  onMarkModified: (item: BehaviorReviewFeedbackItem) => void;
+}) {
+  if (feedbackItems.length === 0 && rejection == null) return null;
+
+  if (feedbackItems.length === 0) {
+    return (
+      <section className="annotation-rejection rejection-feedback-panel" aria-labelledby="annotation-rejection-title">
+        <div className="annotation-rejection-heading">
+          <strong id="annotation-rejection-title">退回意见</strong>
+          <span>请按意见修改后重新提交</span>
+        </div>
+        <p>{rejectionComment(rejection!)}</p>
+        <div className="annotation-rejection-meta">
+          审核人 {rejection!.reviewer ?? `#${rejection!.reviewer_id}`} · {formatDate(rejection!.created_at)}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="behavior-feedback-panel rejection-feedback-panel" aria-labelledby="behavior-feedback-title">
+      <div className="annotation-rejection-heading">
+        <strong id="behavior-feedback-title">退回行为</strong>
+      </div>
+      <div className="behavior-feedback-list">
+        {feedbackItems.map((item) => {
+          const marked = isFeedbackMarked(item, markedIds);
+          const marking = markingIds.has(item.submission_annotation_id);
+          const label = item.baseline.category_name ?? `类别 #${item.baseline.category_id}`;
+          return (
+            <article
+              key={item.submission_annotation_id}
+              className={`behavior-feedback-item ${item.comparison}${marked ? " is-marked-modified" : ""}`}
+            >
+              {/* 只保留两个操作：整条内容按钮定位行为，「标记已修改」按钮持久化并下沉。 */}
+              <button
+                type="button"
+                className="behavior-feedback-select"
+                aria-label={`定位退回行为：${label}`}
+                onClick={() => onFocus(item)}
+              >
+                <span className="behavior-feedback-head">
+                  <b>{label}</b>
+                  <span>{REVIEW_COMPARISON_LABELS[item.comparison] ?? item.comparison}</span>
+                </span>
+                <span className="behavior-feedback-text">{item.feedback?.trim() || "审核人未填写具体意见"}</span>
+                <span className="behavior-comparison">
+                  <span><small>退回时</small>{behaviorSnapshotText(item.baseline)}</span>
+                  <span><small>当前</small>{item.current ? behaviorSnapshotText(item.current) : "此行为已删除"}</span>
+                </span>
+                {item.decided_at ? (
+                  <span className="annotation-rejection-meta">
+                    审核人 {item.reviewer ?? "—"} · {formatDate(item.decided_at)}
+                  </span>
+                ) : null}
+              </button>
+              <div className="behavior-feedback-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={marked || marking}
+                  onClick={() => onMarkModified(item)}
+                >
+                  {marked ? "已标记已修改" : marking ? "标记中…" : "标记已修改"}
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -844,6 +1035,7 @@ export default function AnnotatePage() {
   const [identityFocusIndex, setIdentityFocusIndex] = useState(0);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<number | null>(null);
   const [editingAnnotationId, setEditingAnnotationId] = useState<number | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [draftErrors, setDraftErrors] = useState<string[]>([]);
   const [draftErrorFields, setDraftErrorFields] = useState<Set<DraftField>>(new Set());
@@ -853,6 +1045,7 @@ export default function AnnotatePage() {
   const startButtonRef = useRef<HTMLButtonElement>(null);
   const endButtonRef = useRef<HTMLButtonElement>(null);
   const draftBeforeEditRef = useRef<DraftSnapshot | null>(null);
+  const editSaveInFlightRef = useRef(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [annotationMutationBusy, setAnnotationMutationBusy] = useState(false);
@@ -864,6 +1057,8 @@ export default function AnnotatePage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reviewHistory, setReviewHistory] = useState<Review[]>([]);
   const [behaviorReviewState, setBehaviorReviewState] = useState<BehaviorReviewState | null>(null);
+  const [markedFeedbackIds, setMarkedFeedbackIds] = useState<Set<number>>(new Set());
+  const [markingFeedbackIds, setMarkingFeedbackIds] = useState<Set<number>>(new Set());
   const reviewRequestRef = useRef(0);
   const [hint, setHint] = useState("");
 
@@ -936,6 +1131,7 @@ export default function AnnotatePage() {
     setIdentityFocusIndex(0);
     setSelectedAnnotationId(null);
     setEditingAnnotationId(null);
+    setEditError(null);
     setShortcutHelpOpen(false);
     setDraftErrors([]);
     setDraftErrorFields(new Set());
@@ -946,6 +1142,8 @@ export default function AnnotatePage() {
     setErrorMsg(null);
     setReviewHistory([]);
     setBehaviorReviewState(null);
+    setMarkedFeedbackIds(new Set());
+    setMarkingFeedbackIds(new Set());
     setHint("");
   }, [pid, vid]);
 
@@ -970,7 +1168,6 @@ export default function AnnotatePage() {
     [categories]
   );
   const lockedAnnotationIds = useMemo(() => new Set(behaviorReviewState?.locked_annotation_ids ?? []), [behaviorReviewState]);
-  const decisionBySourceId = useMemo(() => new Map((behaviorReviewState?.annotations ?? []).flatMap((item) => item.source_annotation_id == null ? [] : [[item.source_annotation_id, item.decision.status] as const])), [behaviorReviewState]);
   const invalidTrackCounts = useMemo(() => annotations.reduce((counts, annotation) => {
     if (annotation.mouse_id_status !== "needs_mouse_ids") return counts;
     if (categoryById.get(annotation.category_id)?.participant_mode === "role_based") counts.roleBased += 1;
@@ -1210,15 +1407,19 @@ export default function AnnotatePage() {
   useEffect(() => {
     setDraftErrors([]);
     setDraftErrorFields(new Set());
+    setEditError(null);
     setSaveState((state) => state === "error" ? "idle" : state);
   }, [activeCategory, endPoint, participantRoles, selectedMouseIds, startPoint]);
 
+  // 进入编辑时把该标注同步到共享编辑状态：表单、S/D、类别数字键、T 导航都读写同一份状态。
   function changeEditingAnnotation(id: number | null) {
     if (id != null) {
       if (lockedAnnotationIds.has(id)) {
         setHint("此行为已通过并锁定；请先由审核人撤销通过");
         return;
       }
+      const annotation = annotations.find((a) => a.id === id);
+      if (!annotation) return;
       if (editingAnnotationId == null) {
         draftBeforeEditRef.current = {
           activeCategory,
@@ -1231,14 +1432,34 @@ export default function AnnotatePage() {
           roleMessage,
         };
       }
-      setStartPoint(null);
-      setEndPoint(null);
+      const category = categoryById.get(annotation.category_id) ?? null;
+      setWorkspaceMode("behavior");
+      setActiveCategory(category);
+      setStartPoint({ frame: annotation.start_frame });
+      setEndPoint({ frame: annotation.end_frame });
+      if (category?.participant_mode === "role_based") {
+        const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
+        const complete = Object.fromEntries(roles.map((role) => [role.key, [...(annotation.participant_roles[role.key] ?? [])]]));
+        setParticipantRoles(complete);
+        setSelectedMouseIds([]);
+        setActiveRoleKey(roles[0]?.key ?? null);
+        setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, complete));
+        setRoleMessage("已恢复这条标注的角色分配，可在槽位中继续调整。");
+      } else {
+        setSelectedMouseIds(annotation.mouse_ids);
+        setParticipantRoles({});
+        setActiveRoleKey(null);
+        setUnlockedRoleKeys(new Set());
+        setRoleMessage(null);
+      }
       setDraftErrors([]);
       setDraftErrorFields(new Set());
+      setEditError(null);
       setEditingAnnotationId(id);
       return;
     }
     setEditingAnnotationId(null);
+    setEditError(null);
     const snapshot = draftBeforeEditRef.current;
     draftBeforeEditRef.current = null;
     if (!snapshot) return;
@@ -1277,21 +1498,6 @@ export default function AnnotatePage() {
   useEffect(() => {
     if (editingAnnotationId != null && lockedAnnotationIds.has(editingAnnotationId)) changeEditingAnnotation(null);
   }, [editingAnnotationId, lockedAnnotationIds]);
-
-  useEffect(() => {
-    if (editingAnnotationId == null) return;
-    const annotation = annotations.find((a) => a.id === editingAnnotationId);
-    const category = annotation ? categoryById.get(annotation.category_id) : null;
-    if (!annotation || !category) return;
-    setActiveCategory(category);
-    if (category.participant_mode === "role_based") {
-      const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
-      const complete = Object.fromEntries(roles.map((r) => [r.key, [...(annotation.participant_roles[r.key] ?? [])]]));
-      setParticipantRoles(complete); setSelectedMouseIds([]); setActiveRoleKey(roles[0]?.key ?? null);
-      setUnlockedRoleKeys(getInitiallyUnlockedRoleKeys(roles, complete));
-      setRoleMessage("已恢复这条标注的角色分配，可在槽位中继续调整。");
-    } else { setSelectedMouseIds(annotation.mouse_ids); setParticipantRoles({}); setActiveRoleKey(null); }
-  }, [annotations, categoryById, editingAnnotationId]);
 
   const syncSuppressions = useCallback(async () => {
     const routeKey = `${pid}:${vid}`;
@@ -1649,6 +1855,45 @@ export default function AnnotatePage() {
     }
   }
 
+  /* ---------- 编辑现有行为：与草稿共用共享状态，保存走 PATCH ---------- */
+  async function saveEditingAnnotation() {
+    if (editSaveInFlightRef.current || saveState === "saving" || annotationMutationBusy) return;
+    const id = editingAnnotationId;
+    if (id == null) return;
+    const annotation = annotations.find((a) => a.id === id) ?? null;
+    const result = buildAnnotationEditPatch({
+      category: activeCategory,
+      startFrame: startPoint?.frame ?? null,
+      endFrame: endPoint?.frame ?? null,
+      mouseIds: selectedMouseIds,
+      fps: effectiveFps,
+      frameCount: authoritativeFrameCount,
+      detectionImportRevision: annotation?.detection_import_revision,
+      identityRevision: annotation?.identity_revision,
+    });
+    if ("error" in result) {
+      setEditError(result.error);
+      setHint(result.error);
+      return;
+    }
+    setEditError(null);
+    editSaveInFlightRef.current = true;
+    try {
+      await handleEditSave(id, result.patch);
+      changeEditingAnnotation(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "保存行为标注失败");
+    } finally {
+      editSaveInFlightRef.current = false;
+    }
+  }
+
+  // Ctrl+Enter 与页面主保存按钮共用：编辑中保存编辑（PATCH），否则保存新草稿（POST）。
+  function saveCurrentBehavior() {
+    if (editingAnnotationId != null) void saveEditingAnnotation();
+    else void saveDraft();
+  }
+
   async function runIdentityEdit(operation: "split" | "merge") {
     if (!detectionImport) return;
     const operationRouteKey = `${pid}:${vid}`;
@@ -1830,6 +2075,49 @@ export default function AnnotatePage() {
     }
   }
 
+  /* ---------- 退回行为：定位与标记已修改 ---------- */
+  function focusFeedbackAnnotation(item: BehaviorReviewFeedbackItem) {
+    const target = resolveFeedbackTarget(item, annotations);
+    // 基于真实选中状态做替换：有目标时只选中目标（清掉旧选中），
+    // 目标已删除（null）时保持现有选中不变，仅提示，不进入编辑。
+    setSelectedAnnotationId(resolveFeedbackSelection(selectedAnnotationId, target.annotationId));
+    if (target.annotationId == null) {
+      setHint("该退回行为已删除，无法定位到当前行为");
+      return;
+    }
+    if (target.seekTime != null) seekTo(target.seekTime);
+  }
+
+  async function handleMarkFeedbackModified(item: BehaviorReviewFeedbackItem) {
+    const id = item.submission_annotation_id;
+    // 重新提交后 rejected_submission_id 才是该反馈的归属提交，submission_id 已是新提交。
+    const submissionId = behaviorReviewState?.rejected_submission_id ?? behaviorReviewState?.submission_id;
+    if (submissionId == null) {
+      setErrorMsg("缺少提交记录，无法标记退回行为");
+      return;
+    }
+    if (isFeedbackMarked(item, markedFeedbackIds) || markingFeedbackIds.has(id)) return;
+    // 立即更新 UI 并重排（未标记在前）；失败时回滚本地标记。
+    setMarkedFeedbackIds((prev) => new Set(prev).add(id));
+    setMarkingFeedbackIds((prev) => new Set(prev).add(id));
+    setErrorMsg(null);
+    const routeKey = `${pid}:${vid}`;
+    try {
+      const updated = await markFeedbackModified(pid, vid, submissionId, id);
+      if (routeKeyRef.current === routeKey) {
+        // 以服务端返回的完整状态为准，避免二次请求；本地乐观标记随之清除。
+        setBehaviorReviewState(updated);
+        setMarkedFeedbackIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+      }
+      setHint(`已标记退回行为为已修改：${item.baseline.category_name ?? `类别 #${item.baseline.category_id}`}`);
+    } catch (err) {
+      setMarkedFeedbackIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+      setErrorMsg(err instanceof Error ? err.message : "标记已修改失败");
+    } finally {
+      setMarkingFeedbackIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  }
+
   function clearDraft(keepCategory = false) {
     const retainedCategory = keepCategory ? activeCategory : null;
     setStartPoint(null);
@@ -1945,6 +2233,8 @@ export default function AnnotatePage() {
       e.preventDefault();
       if (e.repeat) return;
       if (e.shiftKey) return;
+      // 编辑行为标注期间不允许切换工作模式，避免隐藏正在编辑所需的类别 / 参与对象面板。
+      if (editingAnnotationId != null) return;
       if (workspaceMode === "behavior") {
         if (!detectionImport) {
           setHint("track 修正需要有效的检测导入，当前仍停留在行为标注模式");
@@ -1964,7 +2254,8 @@ export default function AnnotatePage() {
     }
     const isVideoNavigationShortcut = e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
       && (e.code === "Comma" || e.code === "Period");
-    if (editingAnnotationId != null && !isVideoNavigationShortcut) {
+    // 编辑态不再一律抑制：允许正常标注流程所需的快捷键，其余（Delete / Ctrl+Z / ? 等）仍被抑制。
+    if (editingAnnotationId != null && !isEditingAnnotationShortcutAllowed(e)) {
       return;
     }
     if (e.repeat) {
@@ -1987,15 +2278,15 @@ export default function AnnotatePage() {
       return;
     }
 
-    if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "Enter" && workspaceMode === "behavior") {
+    if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "Enter" && (workspaceMode === "behavior" || editingAnnotationId != null)) {
       e.preventDefault();
-      void saveDraft();
+      void saveCurrentBehavior();
       return;
     }
 
     if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === "KeyT") {
       e.preventDefault();
-      if (workspaceMode === "behavior") {
+      if (workspaceMode === "behavior" || editingAnnotationId != null) {
         if (participantNavigationActive) {
           setParticipantNavigationActive(false);
           setHint("已退出参与对象键盘选择；已选参与对象保持不变");
@@ -2045,7 +2336,7 @@ export default function AnnotatePage() {
       return;
     }
 
-    if (participantNavigationActive && workspaceMode === "behavior") {
+    if (participantNavigationActive && (workspaceMode === "behavior" || editingAnnotationId != null)) {
       if (e.code === "ArrowUp" || e.code === "ArrowDown") {
         e.preventDefault();
         if (tracks.length > 0) {
@@ -2090,7 +2381,7 @@ export default function AnnotatePage() {
     }
 
     const categoryKey = digitShortcutFromEvent(e);
-    if (categoryKey && workspaceMode === "behavior") {
+    if (categoryKey && (workspaceMode === "behavior" || editingAnnotationId != null)) {
       e.preventDefault();
       const shortcut = categoryShortcuts.find((item) => item.key === categoryKey);
       if (!videoReady) {
@@ -2134,12 +2425,12 @@ export default function AnnotatePage() {
         step(e.code === "ArrowLeft" ? -1 : 1, e.shiftKey ? 10 : 1);
         return;
       }
-      if (!e.shiftKey && workspaceMode === "behavior" && e.code === "KeyS") {
+      if (!e.shiftKey && (workspaceMode === "behavior" || editingAnnotationId != null) && e.code === "KeyS") {
         e.preventDefault();
         markStart();
         return;
       }
-      if (!e.shiftKey && workspaceMode === "behavior" && e.code === "KeyD") {
+      if (!e.shiftKey && (workspaceMode === "behavior" || editingAnnotationId != null) && e.code === "KeyD") {
         e.preventDefault();
         void markEnd();
         return;
@@ -2178,6 +2469,10 @@ export default function AnnotatePage() {
   }, [annotations, detectionImport, invalidTrackCounts]);
   const visibleIdentityEditFeedback = identityEditFeedbackForRoute(identityEditFeedback, `${pid}:${vid}`);
   const visibleRejection = latestVisibleRejection(reviewHistory, video?.workflow_status);
+  const orderedFeedbackItems = useMemo(
+    () => sortFeedbackItems(behaviorReviewState?.feedback_items ?? [], markedFeedbackIds),
+    [behaviorReviewState, markedFeedbackIds],
+  );
 
   return (
     <div className="annotate-page">
@@ -2258,32 +2553,14 @@ export default function AnnotatePage() {
 
       <div className="annotate-body">
         <section className="annotate-main">
-          {behaviorReviewState?.feedback_items.length ? (
-            <section className="behavior-feedback-panel" aria-labelledby="behavior-feedback-title">
-              <div className="annotation-rejection-heading"><strong id="behavior-feedback-title">退回行为</strong><span>意见始终对应退回时的版本</span></div>
-              <div className="behavior-feedback-list">
-                {behaviorReviewState.feedback_items.map((item) => (
-                  <article key={item.submission_annotation_id} className={`behavior-feedback-item ${item.comparison}`}>
-                    <div className="behavior-feedback-head"><b>{item.baseline.category_name ?? `类别 #${item.baseline.category_id}`}</b><span>{REVIEW_COMPARISON_LABELS[item.comparison] ?? item.comparison}</span></div>
-                    <p>{item.feedback?.trim() || "审核人未填写具体意见"}</p>
-                    <div className="behavior-comparison"><span><small>退回时</small>{behaviorSnapshotText(item.baseline)}</span><span><small>当前</small>{item.current ? behaviorSnapshotText(item.current) : "此行为已删除"}</span></div>
-                    {item.decided_at ? <div className="annotation-rejection-meta">审核人 {item.reviewer ?? "—"} · {formatDate(item.decided_at)}</div> : null}
-                  </article>
-                ))}
-              </div>
-            </section>
-          ) : visibleRejection ? (
-            <section className="annotation-rejection" aria-labelledby="annotation-rejection-title">
-              <div className="annotation-rejection-heading">
-                <strong id="annotation-rejection-title">退回意见</strong>
-                <span>请按意见修改后重新提交</span>
-              </div>
-              <p>{rejectionComment(visibleRejection)}</p>
-              <div className="annotation-rejection-meta">
-                审核人 {visibleRejection.reviewer ?? `#${visibleRejection.reviewer_id}`} · {formatDate(visibleRejection.created_at)}
-              </div>
-            </section>
-          ) : null}
+          <RejectionFeedbackPanel
+            feedbackItems={orderedFeedbackItems}
+            markedIds={markedFeedbackIds}
+            markingIds={markingFeedbackIds}
+            rejection={visibleRejection}
+            onFocus={focusFeedbackAnnotation}
+            onMarkModified={(item) => void handleMarkFeedbackModified(item)}
+          />
           <div className="card player-card">
             <div className="video-wrap">
               <video
@@ -2387,10 +2664,10 @@ export default function AnnotatePage() {
                   >
                     设结束 [D]
                   </button>
-                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || video?.workflow_status === "approved" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveDraft()}>
-                    {saveState === "saving" ? "保存中…" : "保存此行为 [Ctrl+Enter]"}
+                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || video?.workflow_status === "approved" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveCurrentBehavior()}>
+                    {saveState === "saving" ? "保存中…" : editingAnnotationId != null ? "保存编辑 [Ctrl+Enter]" : "保存此行为 [Ctrl+Enter]"}
                   </button>
-                  <button type="button" className="btn btn-sm" disabled={workspaceMode === "identity" || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
+                  <button type="button" className="btn btn-sm" disabled={workspaceMode === "identity" || editingAnnotationId != null || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
                     重置标注
                   </button>
                 </div>
@@ -2428,6 +2705,7 @@ export default function AnnotatePage() {
                       draftStartFrame={startPoint?.frame}
                       draftEndFrame={endPoint?.frame}
                       draftColor={activeCategory?.color}
+                      focusedAnnotationId={selectedAnnotationId}
                       onSeek={seekTo}
                     />
                   </div>
@@ -2471,14 +2749,22 @@ export default function AnnotatePage() {
             currentTime={currentTime}
             readOnly={workspaceMode === "identity"}
             lockedIds={lockedAnnotationIds}
-            decisionBySourceId={decisionBySourceId}
             selectedId={selectedAnnotationId}
             editingId={editingAnnotationId}
+            activeCategory={activeCategory}
+            startPoint={startPoint}
+            endPoint={endPoint}
+            selectedMouseIds={selectedMouseIds}
+            savingEdit={saveState === "saving" || annotationMutationBusy}
+            editError={editError}
             onSelect={setSelectedAnnotationId}
             onEditingChange={changeEditingAnnotation}
-            onEditSave={handleEditSave}
+            onEditSave={() => saveEditingAnnotation()}
             onDelete={handleDelete}
             onEditCategoryChange={handleEditCategoryChange}
+            onEditStartFrameChange={(frame) => setStartPoint(frame == null ? null : { frame })}
+            onEditEndFrameChange={(frame) => setEndPoint(frame == null ? null : { frame })}
+            onEditMouseIdsChange={setSelectedMouseIds}
           />
           {project ? (
             <div className="frame-preview" style={{ color: "var(--text-3)" }}>

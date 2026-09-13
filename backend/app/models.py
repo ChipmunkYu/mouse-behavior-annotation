@@ -1304,6 +1304,34 @@ class BehaviorReviewReopen(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class FeedbackMark(Base):
+    """Per rejected-feedback-snapshot '标记已修改' state.
+
+    Exactly one row per submission annotation snapshot; missing row means
+    unmarked (safe default for records created before this table existed).
+    Repeat marking is idempotent and keeps the original ``marked_at``.
+    """
+
+    __tablename__ = "feedback_marks"
+    __table_args__ = (
+        UniqueConstraint("submission_annotation_id", name="uq_feedback_marks_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    submission_annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("submission_annotations.id", ondelete="CASCADE"), nullable=False
+    )
+    marked_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    marked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    snapshot: Mapped["SubmissionAnnotation"] = relationship(
+        foreign_keys=[submission_annotation_id]
+    )
+    marker: Mapped[Optional["User"]] = relationship(foreign_keys=[marked_by])
+
+
 class CategorySchemeAudit(Base):
     """Append-only project category-scheme history."""
 

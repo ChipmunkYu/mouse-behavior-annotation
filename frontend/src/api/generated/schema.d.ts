@@ -991,6 +991,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/feedback-mark": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Mark Feedback
+         * @description Idempotently record '标记已修改' for one rejected feedback snapshot.
+         *
+         *     Any active project member who can access the video may mark; the first mark
+         *     wins and later repeats are no-ops that preserve ``marked_at``.
+         */
+        put: operations["mark_feedback_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__feedback_mark_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen": {
         parameters: {
             query?: never;
@@ -1446,6 +1469,13 @@ export interface components {
             decided_at?: string | null;
             /** Feedback */
             feedback?: string | null;
+            /**
+             * Marked
+             * @default false
+             */
+            marked: boolean;
+            /** Marked At */
+            marked_at?: string | null;
             /** Reviewer */
             reviewer?: string | null;
             /** Source Annotation Id */
@@ -1473,6 +1503,8 @@ export interface components {
             feedback_items: components["schemas"]["BehaviorReviewFeedbackItemOut"][];
             /** Locked Annotation Ids */
             locked_annotation_ids: number[];
+            /** Rejected Submission Id */
+            rejected_submission_id?: number | null;
             /** Submission Id */
             submission_id?: number | null;
             /** Submission Status */
@@ -4440,6 +4472,40 @@ export interface operations {
                 "application/json": components["schemas"]["BehaviorDecisionIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BehaviorReviewStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_feedback_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__feedback_mark_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+                submission_id: number;
+                snapshot_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

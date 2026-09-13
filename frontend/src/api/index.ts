@@ -494,6 +494,15 @@ export function reopenBehaviorReview(projectId: number | string, videoId: number
   return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen"]["post"]>(`/projects/${projectId}/videos/${videoId}/submissions/${submissionId}/reopen`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/reopen"]["post"]>(input) });
 }
 
+/**
+ * 幂等标记某条被拒反馈为「已修改」：PUT .../feedback-mark -> BehaviorReviewState。
+ * `submissionId` 必须是该 feedback item 的归属提交，即 `review-state.rejected_submission_id`
+ * （重新提交后它与 `submission_id` 不同）。
+ */
+export function markFeedbackModified(projectId: number | string, videoId: number | string, submissionId: number, submissionAnnotationId: number): Promise<BehaviorReviewState> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/feedback-mark"]["put"]>(`/projects/${projectId}/videos/${videoId}/submissions/${submissionId}/annotations/${submissionAnnotationId}/feedback-mark`, { method: "PUT" });
+}
+
 // ---------- 媒体（片段）生成（批次 4） ----------
 
 /**

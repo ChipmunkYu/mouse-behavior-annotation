@@ -13,8 +13,8 @@ from app.models import (
     Annotation, BackgroundJob, BehaviorReviewDecision, BehaviorReviewReopen, Clip, CorrectedDetectionAssignment, CorrectedTrack,
     DetectionImport, DetectionSnapshot, DetectionSuppression,
     DetectionSnapshotState, DetectionStateOverride, DraftDetectionChange,
-    DraftIdentityEdit, IdentityEdit, ProjectMembership, RawDetection, Review, Submission,
-    SubmissionAnnotation, SuppressionDetection, User, Video, VideoImportBatch,
+    DraftIdentityEdit, FeedbackMark, IdentityEdit, ProjectMembership, RawDetection, Review,
+    Submission, SubmissionAnnotation, SuppressionDetection, User, Video, VideoImportBatch,
 )
 from app.video_delete_db import (
     VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
@@ -121,6 +121,8 @@ def _full_graph(db, project_id, video_id, actor_id, category_id, *,
         start_frame=0, end_frame=1, confidence="certain", mouse_ids=[1],
     )
     db.add(frozen_annotation); db.flush()
+    db.add(FeedbackMark(submission_annotation_id=frozen_annotation.id, marked_by=actor_id,
+                        marked_at=datetime.utcnow()))
     decision = BehaviorReviewDecision(submission_annotation_id=frozen_annotation.id,
                                       status="approved", sequence=1, reviewer_id=actor_id)
     db.add(decision); db.flush()
@@ -318,7 +320,7 @@ def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):
         for table in (
             "corrected_tracks", "corrected_detection_assignments", "identity_edits",
             "detection_suppressions", "suppression_detections",
-            "behavior_review_decisions", "behavior_review_reopens",
+            "behavior_review_decisions", "behavior_review_reopens", "feedback_marks",
         ):
             assert db.execute(text(f"SELECT count(*) FROM {table}")).scalar_one() == 0
         assert db.get(Video, video_id) is None

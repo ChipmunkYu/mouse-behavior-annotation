@@ -22,8 +22,9 @@ from ..submission_service import (create_submission, resolve_and_hash_source,
                                   validate_snapshot_integrity)
 from ..video_write_gate import video_write_gate
 from ..video_playback import public_video
-from ..behavior_review import (decision_comparison, decision_dict, latest_decisions,
-                               locked_annotation_ids, reviewer_names, serialize_snapshot)
+from ..behavior_review import (decision_comparison, decision_dict, feedback_marks,
+                               latest_decisions, locked_annotation_ids,
+                               record_feedback_mark, reviewer_names, serialize_snapshot)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reviews"])
@@ -83,7 +84,8 @@ def _review_state(db: Session, video: Video, membership) -> dict:
                   .order_by(Submission.attempt_no.desc()).first())
     locks = locked_annotation_ids(db, video.id)
     if submission is None:
-        return {"submission_id": None, "attempt_no": None, "submission_status": None,
+        return {"submission_id": None, "rejected_submission_id": None,
+                "attempt_no": None, "submission_status": None,
                 "decision_revision": 0, "counts": {"pending": 0, "approved": 0, "rejected": 0},
                 "can_finalize_approval": False, "annotations": [], "feedback_items": [],
                 "locked_annotation_ids": locks, "can_reopen": False}
@@ -103,6 +105,7 @@ def _review_state(db: Session, video: Video, membership) -> dict:
         rejected_snapshots = list(rejected_submission.annotations)
         rejected_latest = latest_decisions(db, [row.id for row in rejected_snapshots])
         rejected_names = reviewer_names(db, list(rejected_latest.values()))
+        marks = feedback_marks(db, [row.id for row in rejected_snapshots])
         live = {row.id: row for row in db.query(Annotation).filter_by(video_id=video.id).all()}
         current_import = db.query(DetectionImport).filter_by(video_id=video.id, active=True).first()
         for row in rejected_snapshots:
@@ -110,6 +113,7 @@ def _review_state(db: Session, video: Video, membership) -> dict:
             if decision is None or decision.status != "rejected":
                 continue
             current = live.get(row.source_annotation_id)
+            mark = marks.get(row.id)
             feedback_items.append({
                 "submission_annotation_id": row.id,
                 "source_annotation_id": row.source_annotation_key,
@@ -119,10 +123,16 @@ def _review_state(db: Session, video: Video, membership) -> dict:
                 "current": _annotation_out(current) if current else None,
                 "reviewer": rejected_names.get(decision.reviewer_id),
                 "decided_at": decision.decided_at,
+                "marked": mark is not None,
+                "marked_at": mark.marked_at if mark is not None else None,
             })
+        # Unmarked first, then marked by timestamp, tie-broken by stable snapshot id.
+        feedback_items.sort(key=lambda item: (
+            item["marked"], item["marked_at"] or datetime.min, item["submission_annotation_id"]))
     return {
         "submission_id": submission.id, "attempt_no": submission.attempt_no,
         "submission_status": submission.status, "decision_revision": submission.decision_revision,
+        "rejected_submission_id": rejected_submission.id if rejected_submission is not None else None,
         "counts": counts,
         "can_finalize_approval": submission.status == "submitted" and can_review(membership)
                                  and bool(snapshots) and counts["approved"] == len(snapshots),
@@ -172,6 +182,34 @@ def put_behavior_decision(project_id: int, video_id: int, submission_id: int, sn
         if live is not None and live.video_id == video_id:
             live.review_status = body.status
             live.reviewer_id = membership.user_id if body.status != "pending" else None
+        db.commit()
+        return _review_state(db, state.video, membership)
+
+
+@router.put("/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/feedback-mark",
+            response_model=BehaviorReviewStateOut)
+def mark_feedback(project_id: int, video_id: int, submission_id: int, snapshot_id: int,
+                  request: Request, access: tuple = Depends(project_access),
+                  db: Session = Depends(get_db)) -> dict:
+    """Idempotently record '标记已修改' for one rejected feedback snapshot.
+
+    Any active project member who can access the video may mark; the first mark
+    wins and later repeats are no-ops that preserve ``marked_at``.
+    """
+    membership = access[1]
+    require_editor(membership, "Only active project members can mark feedback")
+    _get_video(db, project_id, video_id)
+    with video_write_gate(db, project_id=project_id, video_id=video_id, allow_submitted=True,
+                          operation_gate=request.app.state.video_operation_gate) as state:
+        submission = db.get(Submission, submission_id)
+        snapshot = db.get(SubmissionAnnotation, snapshot_id)
+        if (submission is None or submission.video_id != video_id or snapshot is None
+                or snapshot.submission_id != submission_id):
+            raise HTTPException(status_code=404, detail="Submission annotation snapshot not found")
+        decision = latest_decisions(db, [snapshot.id]).get(snapshot.id)
+        if decision is None or decision.status != "rejected":
+            raise HTTPException(status_code=409, detail="Only rejected feedback can be marked")
+        record_feedback_mark(db, snapshot.id, membership.user_id)
         db.commit()
         return _review_state(db, state.video, membership)
 

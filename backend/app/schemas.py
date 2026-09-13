@@ -454,10 +454,16 @@ class BehaviorReviewFeedbackItemOut(BaseModel):
     current: Optional[AnnotationOut] = None
     reviewer: Optional[str] = None
     decided_at: Optional[datetime] = None
+    # Per-snapshot "标记已修改" state; missing mark (old data) defaults to unmarked.
+    marked: bool = False
+    marked_at: Optional[datetime] = None
 
 
 class BehaviorReviewStateOut(BaseModel):
     submission_id: Optional[int] = None
+    # Owning attempt of ``feedback_items`` when it differs from ``submission_id``
+    # (e.g. after a resubmission); mark feedback against this id.
+    rejected_submission_id: Optional[int] = None
     attempt_no: Optional[int] = None
     submission_status: Optional[str] = None
     decision_revision: int = 0

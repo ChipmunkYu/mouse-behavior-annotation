@@ -1060,6 +1060,23 @@
             ],
             "title": "Feedback"
           },
+          "marked": {
+            "default": false,
+            "title": "Marked",
+            "type": "boolean"
+          },
+          "marked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Marked At"
+          },
           "reviewer": {
             "anyOf": [
               {
@@ -1144,6 +1161,17 @@
             },
             "title": "Locked Annotation Ids",
             "type": "array"
+          },
+          "rejected_submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected Submission Id"
           },
           "submission_id": {
             "anyOf": [
@@ -7405,6 +7433,81 @@
           }
         ],
         "summary": "Put Behavior Decision",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/submissions/{submission_id}/annotations/{snapshot_id}/feedback-mark": {
+      "put": {
+        "description": "Idempotently record '标记已修改' for one rejected feedback snapshot.\n\nAny active project member who can access the video may mark; the first mark\nwins and later repeats are no-ops that preserve ``marked_at``.",
+        "operationId": "mark_feedback_api_projects__project_id__videos__video_id__submissions__submission_id__annotations__snapshot_id__feedback_mark_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "submission_id",
+            "required": true,
+            "schema": {
+              "title": "Submission Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorReviewStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mark Feedback",
         "tags": [
           "reviews"
         ]
