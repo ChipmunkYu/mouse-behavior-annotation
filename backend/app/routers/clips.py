@@ -1,11 +1,15 @@
-"""生产跨视频片段库（批次 5）：跨视频聚合审核通过标注与对应 ready 的 Clip。
+"""生产跨视频片段库（批次 5）：跨视频聚合已发布片段资产。
 
 契约（对应 backend/README.md「批次 5：生产跨视频片段库」）：
-- 只返回「标注 `review_status=approved` 且所属视频当前 `workflow_status=approved`」的
-  标注；失效回 draft 后仍残留的 approved 标注一并排除，杜绝库内出现已失效片段。
-- 每项携带当前修订（`Clip.source_revision == video.annotation_revision`）对应 Clip 的
-  相对路径；Clip 缺失或非 ready（pending/processing/failed）时 `clip_path` /
-  `thumbnail_path` 为 null。
+- 权威来源是 submission-bound `Clip`（inner join `SubmissionAnnotation` /
+  `Submission`）；`Clip` 行存在即已发布训练资产事实，`Clip.status` 只表示生成进度，
+  且不再按 `Submission.status` 过滤，终局 `rejected`/`superseded` 提交的 approved
+  子集资产同样可见。
+- legacy 兼容分支仍在（实时 `Annotation` + `review_status=approved`），但只做逐行
+  anti-join：仅当同一 `video_id` + `source_annotation_key` 已有 submission-bound
+  `Clip` 时才排除该 legacy 行；回填完成前不删除。
+- 每项携带 `Clip` 相对路径；非 ready（pending/processing/failed）或实体缺失时
+  `clip_path` / `thumbnail_path` 为 null。
 - 排序 `start_time` + `id`（稳定分页）；分页默认 20、上限 100（page<1 或 page_size
   超界 → 422）。
 - 筛选：`category_id` / `video_id` / `annotator_id` / `search`（类别名或视频文件名，
@@ -34,6 +38,29 @@ router = APIRouter(tags=["clips"])
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 APPROVED = "approved"
+
+
+def _submission_bound_asset_exists():
+    """Per-row legacy anti-join.
+
+    True when the legacy ``Annotation`` row is already covered by a published
+    submission-bound ``Clip`` (same ``video_id`` + ``source_annotation_key``).
+    Only then is the legacy row excluded; partial publication of one behavior
+    must not hide the video's other legacy assets.
+    """
+    return (
+        select(literal(1))
+        .select_from(Clip)
+        .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
+        .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
+        .where(
+            Clip.submission_annotation_id.is_not(None),
+            SubmissionAnnotation.source_annotation_key == Annotation.id,
+            Submission.video_id == Annotation.video_id,
+        )
+        .correlate(Annotation)
+        .exists()
+    )
 
 
 def _base_filters(
@@ -113,12 +140,15 @@ def list_clips(
     db: Session = Depends(get_db),
 ) -> ClipPageOut:
     """项目成员分页浏览跨视频审核通过片段库（仅成员；不校验 active）。"""
-    authority_video_ids = select(Submission.video_id).distinct()
-    conds = [Submission.status == APPROVED, Video.project_id == project_id]
+    conds = [Video.project_id == project_id]
     if category_id is not None: conds.append(SubmissionAnnotation.category_id == category_id)
     if video_id is not None: conds.append(Submission.video_id == video_id)
     if annotator_id is not None: conds.append(Submission.submitted_by == annotator_id)
     if search: conds.append(or_(SubmissionAnnotation.category_name.ilike(f"%{search}%"), Submission.source_video_filename.ilike(f"%{search}%")))
+    # Published assets start from submission-bound Clip rows (inner join), never
+    # from the latest SubmissionAnnotation outer-joined to Clip. Submission.status
+    # is irrelevant: a rejected/superseded attempt's approved subset is still a
+    # permanent published asset.
     new_query = (
         select(
             literal("submission").label("authority_type"),
@@ -132,7 +162,7 @@ def list_clips(
             Submission.submitted_at.label("created_at"),
             User.username.label("annotator_name"),
             Clip.id.label("clip_id"),
-            case((Clip.id.is_(None), "pending"), else_=Clip.status).label("media_status"),
+            Clip.status.label("media_status"),
             Clip.clip_path, Clip.thumbnail_path,
             SubmissionAnnotation.category_group,
             SubmissionAnnotation.category_participant_mode,
@@ -140,15 +170,16 @@ def list_clips(
             SubmissionAnnotation.participant_roles_snapshot.label("participant_roles"),
             SubmissionAnnotation.mouse_ids,
         )
+        .select_from(Clip)
+        .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
         .outerjoin(User, User.id == Submission.submitted_by)
-        .outerjoin(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
         .where(*conds)
     )
     legacy_conds = _base_filters(project_id, category_id=category_id, video_id=video_id,
                                  annotator_id=annotator_id, search=search)
-    legacy_conds.append(~Annotation.video_id.in_(authority_video_ids))
+    legacy_conds.append(~_submission_bound_asset_exists())
     latest_legacy_clip_id = select(func.max(Clip.id)).where(
         Clip.annotation_id == Annotation.id
     ).correlate(Annotation).scalar_subquery()
@@ -214,6 +245,8 @@ def get_clip_thumbnail(
     if clip.status != "ready":
         raise HTTPException(status_code=404, detail="Thumbnail not ready")
     if clip.annotation_id is not None:
+        # Legacy asset: still served, but a per-row anti-join hides it once a
+        # submission-bound asset covers the same video_id + source_annotation_key.
         current = db.query(Clip.id).join(Annotation, Annotation.id == Clip.annotation_id).join(
             Video, Video.id == Annotation.video_id
         ).filter(
@@ -222,14 +255,17 @@ def get_clip_thumbnail(
             Clip.source_revision == Video.media_revision,
             Annotation.review_status == APPROVED,
             Video.workflow_status == APPROVED,
+            ~_submission_bound_asset_exists(),
         ).first()
     else:
+        # Published asset: Clip row existence is the fact; Submission.status does
+        # not gate the thumbnail.
         current = db.query(Clip.id).join(
             SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id
         ).join(Submission, Submission.id == SubmissionAnnotation.submission_id).join(
             Video, Video.id == Submission.video_id
         ).filter(
-            Clip.id == clip.id, Submission.status == APPROVED,
+            Clip.id == clip.id,
             Video.project_id == project_id,
         ).first()
     if current is None:
@@ -256,25 +292,28 @@ def clip_categories(
     db: Session = Depends(get_db),
 ) -> list[ClipCategoryCount]:
     """审核通过片段的类别统计（分类筛选 chip）：仅含计数 > 0 的类别，按 sort_order 排序。"""
+    # Count published assets from submission-bound Clip rows; Submission.status is
+    # not a filter. Legacy rows use the same per-row anti-join as the list.
     new_rows = (
         db.query(
             SubmissionAnnotation.category_id, SubmissionAnnotation.category_name,
-            func.count(SubmissionAnnotation.id).label("cnt"),
+            func.count(Clip.id).label("cnt"),
         )
+        .select_from(Clip)
+        .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
-        .filter(Submission.status == APPROVED, Video.project_id == project_id)
+        .filter(Video.project_id == project_id)
         .group_by(SubmissionAnnotation.category_id, SubmissionAnnotation.category_name)
         .order_by(SubmissionAnnotation.category_id)
         .all()
     )
-    authority_video_ids = db.query(Submission.video_id).distinct()
     legacy_rows = db.query(
         BehaviorCategory.id.label("category_id"), BehaviorCategory.name.label("category_name"),
         func.count(Annotation.id).label("cnt"),
     ).join(Annotation).join(Video).filter(
         Annotation.review_status == APPROVED, Video.workflow_status == APPROVED,
-        Video.project_id == project_id, ~Video.id.in_(authority_video_ids),
+        Video.project_id == project_id, ~_submission_bound_asset_exists(),
     ).group_by(BehaviorCategory.id, BehaviorCategory.name).all()
     counts: dict[tuple[int, str], int] = {}
     for row in [*new_rows, *legacy_rows]:

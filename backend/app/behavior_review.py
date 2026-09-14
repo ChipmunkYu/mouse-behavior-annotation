@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .models import (
     Annotation,
     BehaviorReviewDecision,
+    Clip,
     FeedbackMark,
     Submission,
     SubmissionAnnotation,
@@ -73,6 +74,92 @@ def record_feedback_mark(db: Session, snapshot_id: int, user_id: int) -> None:
                 marked_at=datetime.utcnow())
         .on_conflict_do_nothing(index_elements=["submission_annotation_id"])
     )
+
+
+def approved_snapshots(db: Session, submission: Submission) -> list[SubmissionAnnotation]:
+    """Publish-time approved subset: latest decision is approved (carried included)."""
+    snapshots = (db.query(SubmissionAnnotation)
+                 .filter_by(submission_id=submission.id)
+                 .order_by(SubmissionAnnotation.id).all())
+    latest = latest_decisions(db, [row.id for row in snapshots])
+    return [row for row in snapshots
+            if latest.get(row.id) is not None and latest[row.id].status == "approved"]
+
+
+# Canonical asset equivalence is expressed only with existing immutable fields; no
+# persistent content-hash column is introduced (see docs/计划/按行为发布片段设计.md 5.5).
+_ASSET_SNAPSHOT_FIELDS = (
+    "source_annotation_key", "source_material_revision", "material_digest",
+    "start_frame", "end_frame", "crop_region", "category_name",
+    "category_participant_mode", "role_definitions_snapshot",
+    "participant_roles_snapshot", "mouse_ids", "confidence",
+)
+_ASSET_SUBMISSION_FIELDS = (
+    "source_storage_key", "source_video_sha256", "source_file_size",
+    "source_mtime_ns", "source_device", "source_inode",
+)
+# The export contract version is a code constant; snapshot schema_version is the stored proxy.
+_ASSET_DETECTION_FIELDS = ("raw_digest", "state_digest", "metadata_digest", "schema_version")
+
+
+def asset_equivalent(left: SubmissionAnnotation, right: SubmissionAnnotation) -> bool:
+    """True when two submission snapshots would export identical content."""
+    if left is None or right is None or left.submission is None or right.submission is None:
+        return False
+    if any(getattr(left, field) != getattr(right, field) for field in _ASSET_SNAPSHOT_FIELDS):
+        return False
+    if any(getattr(left.submission, field) != getattr(right.submission, field)
+           for field in _ASSET_SUBMISSION_FIELDS):
+        return False
+    left_detection = left.submission.detection_snapshot
+    right_detection = right.submission.detection_snapshot
+    if left_detection is None or right_detection is None:
+        return False
+    return all(getattr(left_detection, field) == getattr(right_detection, field)
+               for field in _ASSET_DETECTION_FIELDS)
+
+
+def _carried_origin(db: Session, snapshot: SubmissionAnnotation) -> SubmissionAnnotation | None:
+    """Follow the carry chain to the origin snapshot, if any."""
+    decision = latest_decisions(db, [snapshot.id]).get(snapshot.id)
+    if decision is None or decision.carried_from_decision_id is None:
+        return None
+    origin = db.get(BehaviorReviewDecision, decision.carried_from_decision_id)
+    if origin is None:
+        return None
+    return db.get(SubmissionAnnotation, origin.submission_annotation_id)
+
+
+def find_canonical_clip(db: Session, snapshot: SubmissionAnnotation) -> Clip | None:
+    """Resolve an existing published Clip whose export content equals this snapshot.
+
+    The carry chain is only a candidate hint; every candidate is validated with
+    :func:`asset_equivalent` before reuse. Returns ``None`` when no asset matches.
+    """
+    origin = _carried_origin(db, snapshot)
+    if origin is not None:
+        origin_clip = db.query(Clip).filter_by(submission_annotation_id=origin.id).first()
+        if origin_clip is not None and asset_equivalent(snapshot, origin):
+            return origin_clip
+    candidates = (
+        db.query(Clip, SubmissionAnnotation)
+        .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
+        .filter(
+            Clip.submission_annotation_id.is_not(None),
+            SubmissionAnnotation.source_annotation_key == snapshot.source_annotation_key,
+            SubmissionAnnotation.source_material_revision == snapshot.source_material_revision,
+            SubmissionAnnotation.material_digest == snapshot.material_digest,
+        )
+        .order_by(Clip.id)
+        .all()
+    )
+    for clip, candidate in candidates:
+        if candidate.id == snapshot.id:
+            return clip
+    for clip, candidate in candidates:
+        if asset_equivalent(snapshot, candidate):
+            return clip
+    return None
 
 
 def current_final_approval(db: Session, video_id: int) -> Submission | None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models import Annotation, Clip, Video
+from app.models import Annotation, Clip, Submission, SubmissionAnnotation, Video
 
 from .conftest import auth_headers
 
@@ -589,3 +589,112 @@ def test_clipitem_field_completeness(ctx):
         "mouse_ids": [],
     }
     assert item["created_at"] == ann["created_at"]
+
+
+# ---------- 已发布资产（submission-bound Clip） ----------
+
+
+def _published_asset(ctx):
+    from tests.test_project_export import _approved
+
+    return _approved(ctx)
+
+
+def _add_legacy_annotation(ctx, video_id, category_id, annotator_id, start_time):
+    with ctx.session_factory() as db:
+        ann = Annotation(
+            video_id=video_id, annotator_id=annotator_id, category_id=category_id,
+            start_time=start_time, end_time=start_time + 2.0,
+            start_frame=int(start_time * 25), end_frame=int((start_time + 2.0) * 25),
+            review_status="approved", mouse_ids=[1], mouse_id_status="valid",
+        )
+        db.add(ann)
+        db.commit()
+        db.refresh(ann)
+        return ann.id
+
+
+def _rejected_asset(ctx):
+    """Build a terminal rejected attempt that already published its approved subset.
+
+    The publish-on-rejected transaction is owned by another lane; this helper
+    reproduces its observable DB state directly (submitted -> rejected is a legal
+    lifecycle transition) so the read path can be tested in isolation.
+    """
+    from tests.test_reviews import _annotate_with_mouse, _setup_video_with_import, _submit
+
+    login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
+    headers, project, categories, video = _setup_video_with_import(ctx, login)
+    suitable = [c for c in categories if c["mouse_count_min"] <= 1 <= c["mouse_count_max"]]
+    _annotate_with_mouse(ctx, headers, project, video, suitable[0]["id"], mouse_ids=[1])
+    assert _submit(ctx, headers, project, video).status_code == 200
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).filter_by(video_id=video["id"], status="submitted").one()
+        annotation = db.query(SubmissionAnnotation).filter_by(submission_id=submission.id).one()
+        submission.status = "rejected"
+        submission.decided_at = datetime.utcnow()
+        clip = Clip(submission_annotation_id=annotation.id, status="ready",
+                    clip_path="rejected_asset.mp4", thumbnail_path="rejected_asset.jpg")
+        ctx.app.state.settings.clips_dir.joinpath("rejected_asset.mp4").write_bytes(b"CLIP")
+        ctx.app.state.settings.thumbnails_dir.joinpath("rejected_asset.jpg").write_bytes(b"THUMB")
+        db.add(clip)
+        db.commit()
+        return headers, project, annotation.id, clip.id
+
+
+def test_rejected_submission_asset_visible(media_ctx):
+    """Terminal rejected attempt's approved subset stays a visible published asset."""
+    ctx = media_ctx
+    headers, project, annotation_id, _clip_id = _rejected_asset(ctx)
+    body = _library(ctx, project["id"], headers).json()
+    assert body["total"] == 1
+    assert body["items"][0]["item_key"] == f"submission:{annotation_id}"
+    assert body["items"][0]["media_status"] == "ready"
+    counts = _categories(ctx, project["id"], headers).json()
+    assert counts and counts[0]["count"] == 1
+
+
+def test_rejected_submission_asset_thumbnail_served(media_ctx):
+    ctx = media_ctx
+    headers, project, _annotation_id, clip_id = _rejected_asset(ctx)
+    resp = ctx.client.get(
+        f"/api/projects/{project['id']}/clips/{clip_id}/thumbnail", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_published_asset_visible_after_submission_superseded(media_ctx):
+    """superseded is reachable from approved; the asset must remain visible."""
+    ctx = media_ctx
+    headers, project, _suitable, _video, _annotations = _published_asset(ctx)
+    with ctx.session_factory() as db:
+        db.query(Submission).one().status = "superseded"
+        db.commit()
+    body = _library(ctx, project["id"], headers).json()
+    assert body["total"] == 1
+    assert body["items"][0]["item_key"].startswith("submission:")
+
+
+def test_legacy_per_row_anti_join_keeps_other_legacy_assets(media_ctx):
+    """Only the legacy row covered by a submission-bound Clip is hidden."""
+    ctx = media_ctx
+    headers, project, _suitable, video, annotations = _published_asset(ctx)
+    with ctx.session_factory() as db:
+        source = db.get(Annotation, annotations[0]["id"])
+        category_id, annotator_id = source.category_id, source.annotator_id
+
+    # Legacy Clip for the same video_id + source_annotation_key as the published asset.
+    _add_clip(ctx, project["id"], annotations[0]["id"], "ready")
+    # A second legacy asset in the same video must survive the partial publish.
+    other_id = _add_legacy_annotation(ctx, video["id"], category_id, annotator_id, start_time=3.0)
+    _add_clip(ctx, project["id"], other_id, "ready")
+
+    body = _library(ctx, project["id"], headers).json()
+    keys = {item["item_key"] for item in body["items"]}
+    assert body["total"] == 2
+    assert any(key.startswith("submission:") for key in keys)
+    assert f"legacy:{other_id}" in keys
+    assert f"legacy:{annotations[0]['id']}" not in keys
+
+    counts = _categories(ctx, project["id"], headers).json()
+    assert sum(row["count"] for row in counts) == 2

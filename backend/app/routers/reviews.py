@@ -397,6 +397,13 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
                 "code": "behavior_decisions_incomplete",
                 "message": "Every behavior snapshot must be approved before final video approval",
             })
+        if body.result == "rejected" and not any(
+                copy_decisions.get(copy.id) is not None
+                and copy_decisions[copy.id].status == "rejected" for copy in copies):
+            raise HTTPException(status_code=409, detail={
+                "code": "no_rejected_behavior",
+                "message": "A video rejection requires at least one rejected behavior snapshot",
+            })
         now = _now()
         if body.result == "approved":
             db.query(Submission).filter(
@@ -431,11 +438,14 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
         if body.result == "approved":
             db.query(DraftIdentityEdit).filter_by(detection_import_id=imp.id).delete(synchronize_session=False)
             db.flush()
-            job = enqueue_submission_media(db, submission)
-            job_id = job.id
+        # Both terminal results publish their approved subset (canonical reuse aware).
+        # Jobs may belong to another submission when a carried behavior's existing asset
+        # needs regeneration; all of them must be scheduled after commit.
+        job_ids = [job.id for job in enqueue_submission_media(
+            db, submission, request.app.state.settings)]
         db.commit(); db.refresh(review)
         result = _to_review_out(review)
-    if job_id is not None:
+    for job_id in job_ids:
         try:
             request.app.state.media_worker.schedule(job_id)
         except Exception:

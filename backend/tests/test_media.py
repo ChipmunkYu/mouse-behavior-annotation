@@ -24,7 +24,8 @@ import time
 import pytest
 
 from app.media import FfmpegMediaProcessor, MediaCommandError, format_time
-from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, claim_and_render_submission_clip
+from app.media_jobs import (CLEANUP_INCOMPLETE_PREFIX, claim_and_render_submission_clip,
+                            submission_media_dedupe_key)
 from app.models import (Annotation, BackgroundJob, Clip, DetectionImport, ProjectMembership,
                         Submission, SubmissionAnnotation, User, Video)
 
@@ -1172,3 +1173,233 @@ def test_worker_never_creates_clips_for_deleted_annotations(media_ctx):
         assert job.status == "succeeded"  # 无 Clip 行可处理 → 真空成功
         assert db.query(Clip).count() == 0  # 绝不复活/重建 Clip
     assert list(ctx.app.state.settings.clips_dir.glob("*")) == []
+
+
+# ---------- 终局 rejected 的已发布 approved 子集 ----------
+
+
+def _published_setup(media_ctx, *, annotations=2):
+    from tests.test_reviews import _annotate_with_mouse, _setup_video_with_import
+    ctx = media_ctx
+    login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
+    headers, project, categories, video = _setup_video_with_import(ctx, login)
+    category = next(c for c in categories if c["mouse_count_min"] == c["mouse_count_max"] == 1)
+    created = [_annotate_with_mouse(ctx, headers, project, video, category["id"],
+                                    start_time=index * 0.04, mouse_ids=[index + 1])
+               for index in range(annotations)]
+    reviewer = _reviewer_headers(ctx, project["id"])
+    assert _submit(ctx, project, video, headers).status_code == 200
+    return headers, reviewer, project, video, created
+
+
+def _decide_behavior(ctx, reviewer, project, video, state, index, status, feedback=None):
+    return ctx.client.put(
+        f"/api/projects/{project['id']}/videos/{video['id']}/submissions/"
+        f"{state['submission_id']}/annotations/{state['annotations'][index]['id']}/decision",
+        json={"status": status, "feedback": feedback,
+              "expected_decision_revision": state["decision_revision"]}, headers=reviewer).json()
+
+
+def test_rejected_publish_renders_published_subset(media_ctx):
+    ctx = media_ctx
+    headers, reviewer, project, video, _annotations = _published_setup(media_ctx)
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    state = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    state = _decide_behavior(ctx, reviewer, project, video, state, 0, "approved")
+    state = _decide_behavior(ctx, reviewer, project, video, state, 1, "rejected", "fix")
+    resp = ctx.client.post(base + "/review", json={"result": "rejected",
+        "expected_submission_id": state["submission_id"],
+        "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).one()
+        assert submission.status == "rejected"
+        clips = db.query(Clip).all()
+        assert len(clips) == 1 and clips[0].status == "ready"
+        job = db.query(BackgroundJob).filter_by(
+            dedupe_key=submission_media_dedupe_key(submission.id)).one()
+        assert job.status == "succeeded"
+
+    body = _media_status(ctx, project, video).json()
+    assert body["workflow_status"] == "rejected"
+    assert body["total"] == 1 and body["ready"] == 1
+    assert _generate(ctx, project, video).status_code == 200
+
+
+def test_rejected_publish_with_empty_subset_creates_no_job(media_ctx):
+    ctx = media_ctx
+    headers, reviewer, project, video, _annotations = _published_setup(media_ctx, annotations=1)
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    state = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    state = _decide_behavior(ctx, reviewer, project, video, state, 0, "rejected", "fix")
+    resp = ctx.client.post(base + "/review", json={"result": "rejected",
+        "expected_submission_id": state["submission_id"],
+        "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 0
+        assert db.query(BackgroundJob).count() == 0
+    assert _generate(ctx, project, video).status_code == 400
+
+
+# ---------- canonical 资产可用性：只补生成尚未生成的已通过行为 ----------
+
+
+def _publish_rejected_with_approved_subset(ctx, headers, reviewer, project, video):
+    """Approve behavior 0, reject behavior 1, then publish rejected. Returns the state."""
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    state = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    state = _decide_behavior(ctx, reviewer, project, video, state, 0, "approved")
+    state = _decide_behavior(ctx, reviewer, project, video, state, 1, "rejected", "fix")
+    resp = ctx.client.post(base + "/review", json={"result": "rejected",
+        "expected_submission_id": state["submission_id"],
+        "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+    return state
+
+
+def _carry_and_publish_approved(ctx, headers, reviewer, project, video, annotations):
+    """Materially fix behavior 1, resubmit (behavior 0 carried), then publish approved."""
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    assert ctx.client.patch(base + f"/annotations/{annotations[1]['id']}",
+                            json={"confidence": "uncertain"}, headers=headers).status_code == 200
+    assert _submit(ctx, project, video, headers).status_code == 200
+    state = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    assert state["annotations"][0]["decision"]["origin"] == "carried"
+    state = _decide_behavior(ctx, reviewer, project, video, state, 1, "approved")
+    resp = ctx.client.post(base + "/review", json={"result": "approved",
+        "expected_submission_id": state["submission_id"],
+        "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+    return state
+
+
+def _owner_job(db, submission_id):
+    return db.query(BackgroundJob).filter_by(
+        dedupe_key=submission_media_dedupe_key(submission_id)).one()
+
+
+def test_publish_reuses_ready_canonical_asset_without_transcode(media_ctx):
+    ctx = media_ctx
+    headers, reviewer, project, video, annotations = _published_setup(media_ctx)
+    state = _publish_rejected_with_approved_subset(ctx, headers, reviewer, project, video)
+    approved_snapshot_id = state["annotations"][0]["id"]
+    with ctx.session_factory() as db:
+        first = db.query(Submission).one()
+        first_id, first_job_id = first.id, _owner_job(db, first.id).id
+        job = db.get(BackgroundJob, first_job_id)
+        assert job.status == "succeeded"
+        attempts_before = job.attempts
+    calls_before = len(ctx.processor.clip_calls)
+
+    published = _carry_and_publish_approved(ctx, headers, reviewer, project, video, annotations)
+
+    new_names = [Path(call[3]).name for call in ctx.processor.clip_calls[calls_before:]]
+    assert not any(f"clip_{approved_snapshot_id}_revsub" in name for name in new_names)
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 2  # carried reused, changed behavior new
+        first_job = db.get(BackgroundJob, first_job_id)
+        assert first_job.status == "succeeded" and first_job.attempts == attempts_before
+        second = db.query(Submission).order_by(Submission.attempt_no.desc()).first()
+        assert second.id != first_id
+        assert _owner_job(db, second.id).payload["submission_annotation_ids"] == [
+            published["annotations"][1]["id"]]
+
+
+def test_publish_regenerates_failed_canonical_asset(media_ctx):
+    ctx = media_ctx
+    headers, reviewer, project, video, annotations = _published_setup(media_ctx)
+    state = _publish_rejected_with_approved_subset(ctx, headers, reviewer, project, video)
+    with ctx.session_factory() as db:
+        first = db.query(Submission).one()
+        first_id = first.id
+        clip = db.query(Clip).one()
+        assert clip.status == "ready"
+        clip_id = clip.id
+        clip.status, clip.clip_path, clip.thumbnail_path, clip.error = "failed", None, None, "injected"
+        db.commit()
+
+    _carry_and_publish_approved(ctx, headers, reviewer, project, video, annotations)
+
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 2  # reused row regenerated, no duplicate
+        regenerated = db.get(Clip, clip_id)
+        assert regenerated.status == "ready" and regenerated.clip_path is not None
+        assert db.get(BackgroundJob, _owner_job(db, first_id).id).status == "succeeded"
+
+
+def test_publish_merges_pending_id_into_queued_owner_job(media_ctx, monkeypatch):
+    ctx = media_ctx
+    headers, reviewer, project, video, annotations = _published_setup(media_ctx)
+    # Freeze the worker so the first publish's job stays queued for the second publish.
+    monkeypatch.setattr(ctx.app.state.media_worker, "schedule", lambda _job_id: None)
+    state = _publish_rejected_with_approved_subset(ctx, headers, reviewer, project, video)
+    owner_snapshot_id = state["annotations"][0]["id"]
+    with ctx.session_factory() as db:
+        first_id = db.query(Submission).one().id
+        clip = db.query(Clip).one()
+        clip_id = clip.id
+        clip.status, clip.clip_path, clip.thumbnail_path, clip.error = "failed", None, None, "injected"
+        job = _owner_job(db, first_id)
+        job_id = job.id
+        # Simulate the window: a queued job still holding an older (pre-reset) subset.
+        job.payload = {"submission_id": first_id, "submission_annotation_ids": []}
+        job.status = "queued"
+        db.commit()
+
+    _carry_and_publish_approved(ctx, headers, reviewer, project, video, annotations)
+
+    with ctx.session_factory() as db:
+        job = db.get(BackgroundJob, job_id)
+        assert job.status == "queued"
+        assert job.payload["submission_annotation_ids"] == [owner_snapshot_id]
+    # The merged queued job can still regenerate the reused asset row.
+    ctx.app.state.media_worker._run_job(job_id)
+    with ctx.session_factory() as db:
+        assert db.get(Clip, clip_id).status == "ready"
+
+
+def test_upsert_submission_job_does_not_rewrite_running_payload(media_ctx):
+    from app.media_jobs import _upsert_submission_job
+    ctx = media_ctx
+    project_id = ctx.make_project_with_video()["project"]["id"]
+    with ctx.session_factory() as db:
+        job = _upsert_submission_job(db, 4242, project_id, {1})
+        db.commit()
+        job_id = job.id
+    with ctx.session_factory() as db:
+        job = db.get(BackgroundJob, job_id)
+        job.status = "running"
+        job.payload = {"submission_id": 4242, "submission_annotation_ids": [1]}
+        db.commit()
+    with ctx.session_factory() as db:
+        job = _upsert_submission_job(db, 4242, project_id, {2})
+        db.commit()
+        assert job.status == "running"
+        assert job.payload["submission_annotation_ids"] == [1]
+
+
+def test_publish_regenerates_ready_canonical_asset_with_missing_files(media_ctx):
+    ctx = media_ctx
+    headers, reviewer, project, video, annotations = _published_setup(media_ctx)
+    state = _publish_rejected_with_approved_subset(ctx, headers, reviewer, project, video)
+    with ctx.session_factory() as db:
+        first = db.query(Submission).one()
+        first_id = first.id
+        clip = db.query(Clip).one()
+        assert clip.status == "ready"
+        clip_id = clip.id
+        clip_path = ctx.app.state.settings.clips_dir / clip.clip_path
+        thumb_path = ctx.app.state.settings.thumbnails_dir / clip.thumbnail_path
+    clip_path.unlink()
+    thumb_path.unlink()
+
+    _carry_and_publish_approved(ctx, headers, reviewer, project, video, annotations)
+
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 2
+        regenerated = db.get(Clip, clip_id)
+        assert regenerated.status == "ready"
+        assert (ctx.app.state.settings.clips_dir / regenerated.clip_path).is_file()
+        assert db.get(BackgroundJob, _owner_job(db, first_id).id).status == "succeeded"

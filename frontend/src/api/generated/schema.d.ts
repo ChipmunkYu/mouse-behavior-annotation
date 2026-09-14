@@ -897,7 +897,7 @@ export interface paths {
         put?: never;
         /**
          * Generate Media
-         * @description 仅 approved 视频可触发；幂等或重试（见模块 docstring）。
+         * @description 已发布资产（含终局 rejected 的 approved 子集）可触发；幂等或重试。
          */
         post: operations["generate_media_api_projects__project_id__videos__video_id__media_generate_post"];
         delete?: never;

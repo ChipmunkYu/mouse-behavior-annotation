@@ -2,7 +2,7 @@
  * 审核工作台 /projects/:projectId/review：
  * - 队列列表（包含待审核 Submission 快照，但不预加载视频流）
  * - 选中视频的共享播放器 + 时间轴 + 只读标注列表
- * - 审核历史、意见输入、通过 / 退回（均有确认）
+ * - 审核历史、意见输入、发布审核结果（按当前逐条裁决自动判定并确认）
  * - 审核页只负责裁决；通过后的视频片段由后台继续生成
  * - 键盘可用：Space 播放/暂停、←/→ 步进一帧（输入框聚焦时不触发）
  * - 仅后端返回 can_review=true 的成员可访问
@@ -185,8 +185,22 @@ export function behaviorDecisionRestriction(submissionStatus: string | null | un
   if (submissionStatus === "submitted") return null;
   if (submissionStatus === "rejected") return "视频已退回；当前只能撤销已有裁决为待审核。";
   if (submissionStatus === "withdrawn") return "提交已撤回；当前只能撤销已有裁决为待审核。";
-  if (submissionStatus === "approved") return "视频已最终通过；如需调整，请先在左侧重新打开审核。";
+  if (submissionStatus === "approved") return "视频已发布为通过；如需调整，请先在左侧重新打开审核。";
   return "当前没有可裁决的提交。";
+}
+
+export type PublishOutcome = "approved" | "rejected" | "incomplete";
+
+/**
+ * 视频级「发布审核结果」的结果判定（体验层前置判断；后端门禁为最终权威）：
+ * - 存在退回行为 → rejected（未审核行为保持未审核）；
+ * - 无退回且全部通过 → approved；
+ * - 无退回但仍有未审核 → incomplete（阻断提示，不调用发布接口）。
+ */
+export function resolvePublishOutcome(counts: { pending: number; approved: number; rejected: number }): PublishOutcome {
+  if (counts.rejected > 0) return "rejected";
+  if (counts.pending === 0 && counts.approved > 0) return "approved";
+  return "incomplete";
 }
 
 export function shouldClearBehaviorFocus(status: BehaviorReviewStatus): boolean {
@@ -620,26 +634,32 @@ export default function ReviewPage() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  /* ---------- 通过 / 退回 ---------- */
-  async function handleReview(result: "approved" | "rejected") {
+  /* ---------- 发布审核结果（视频级唯一动作） ---------- */
+  async function handlePublish() {
     if (!selectedVideo || !reviewState?.submission_id || reviewActionBusyRef.current) return;
     const operationVideoId = selectedVideo.id;
-    if (result === "approved" && !reviewState.can_finalize_approval) {
-      setErrorMsg("仅当现有行为全部通过后，才能通过视频");
+    const outcome = resolvePublishOutcome(reviewState.counts);
+    if (outcome === "incomplete") {
+      await confirm({
+        title: "审核未完成",
+        message: (
+          <>该视频仍有 <b>{reviewState.counts.pending}</b> 条行为未审核。请先将每条行为裁决为「通过」或「退回」，再发布审核结果。</>
+        ),
+        confirmLabel: "知道了",
+        dismissOnly: true,
+      });
       return;
     }
     const ok = await confirm({
-      title: result === "approved" ? "确认通过该视频？" : "确认退回该视频？",
+      title: outcome === "approved" ? "确认发布为通过？" : "确认发布为退回？",
       message:
-        result === "approved" ? (
-          <>
-            这是视频最终通过。通过后现有行为保持锁定；如需再改，须先明确重新打开审核。
-          </>
+        outcome === "approved" ? (
+          <>全部行为均已通过。发布后现有行为保持锁定；如需再改，须先明确重新打开审核。</>
         ) : (
-          <>可在未完成全部行为裁决时退回视频。已通过行为继续锁定，退回意见与对应行为一并保留。</>
+          <>已通过行为继续锁定，退回行为与对应意见一并保留，未审核行为保持未审核。</>
         ),
-      confirmLabel: result === "approved" ? "确认通过" : "确认退回",
-      danger: result === "rejected",
+      confirmLabel: "发布审核结果",
+      danger: outcome === "rejected",
     });
     if (!ok) return;
 
@@ -648,7 +668,7 @@ export default function ReviewPage() {
     setErrorMsg(null);
     try {
       await createVideoReview(pid, operationVideoId, {
-        result,
+        result: outcome,
         comment: comment.trim() || null,
         expected_submission_id: reviewState.submission_id,
         expected_decision_revision: reviewState.decision_revision,
@@ -664,13 +684,13 @@ export default function ReviewPage() {
       // 裁决后保留当前视频详情，并立即投影服务端已确认的工作流状态。
       setSelectedVideo((prev) => prev ? {
         ...prev,
-        workflow_status: result,
-        approved_at: result === "approved" ? new Date().toISOString() : null,
+        workflow_status: outcome,
+        approved_at: outcome === "approved" ? new Date().toISOString() : null,
       } : prev);
       setNotice(
-        result === "approved"
-          ? `已最终通过：${selectedVideo.filename}。`
-          : `已退回：${selectedVideo.filename}。已通过行为仍保持锁定。`
+        outcome === "approved"
+          ? `已发布审核结果：${selectedVideo.filename}（通过）。`
+          : `已发布审核结果：${selectedVideo.filename}（退回）。已通过行为仍保持锁定。`
       );
       setComment("");
       await loadQueue();
@@ -812,18 +832,25 @@ export default function ReviewPage() {
                     className="textarea"
                     rows={5}
                     value={comment}
-                    placeholder={reviewState?.can_reopen ? "说明为什么需要重新打开本次最终通过" : "这里只填写视频整体说明；单条意见请写在对应行为下"}
+                    placeholder={reviewState?.can_reopen ? "说明为什么需要重新打开本次审核结果" : "这里只填写视频整体说明；单条意见请写在对应行为下"}
                     onChange={(e) => setComment(e.target.value)}
                   />
                 </div>
                 <div className="review-actions">
-                  {reviewState?.can_reopen ? <button type="button" className="btn" disabled={reviewBusy || decisionBusyId != null} onClick={() => void handleReopen()}>{reviewBusy ? "处理中…" : "重新打开审核"}</button> : <>
-                    <button type="button" className="btn btn-danger" disabled={!decisionAccess.decisionOpen} onClick={() => void handleReview("rejected")}>{reviewBusy ? "提交中…" : "退回视频"}</button>
-                    <button type="button" className="btn btn-primary" disabled={!decisionAccess.decisionOpen || !reviewState?.can_finalize_approval} title={!reviewState?.can_finalize_approval ? "现有行为全部通过后才能最终通过视频" : "最终通过视频"} onClick={() => void handleReview("approved")}>{reviewBusy ? "提交中…" : "最终通过视频"}</button>
-                  </>}
+                  {reviewState?.can_reopen ? <button type="button" className="btn" disabled={reviewBusy || decisionBusyId != null} onClick={() => void handleReopen()}>{reviewBusy ? "处理中…" : "重新打开审核"}</button> : (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!decisionAccess.decisionOpen}
+                      title="按当前逐条裁决发布审核结果"
+                      onClick={() => void handlePublish()}
+                    >
+                      {reviewBusy ? "提交中…" : "发布审核结果"}
+                    </button>
+                  )}
                 </div>
                 {!reviewDisabled && !reviewState?.submission_id ? <div className="frame-preview">暂无可审核的提交。</div> : null}
-                {annotations.length === 0 ? <div className="frame-preview">该视频暂无行为标注，不能通过；可退回或等待标注者补充。</div> : null}
+                {annotations.length === 0 ? <div className="frame-preview">该视频暂无行为标注；请等待标注者补充后再审核。</div> : null}
                 <details className="review-history-details">
                   <summary>审核历史（{reviews.length}）</summary>
                   <div className="review-history-scroll"><ReviewHistory reviews={reviews} /></div>

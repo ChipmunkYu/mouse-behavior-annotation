@@ -5,8 +5,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.models import (Annotation, BehaviorReviewDecision, BehaviorReviewReopen, DetectionImport,
-                        Review, Submission, SubmissionAnnotation, Video)
+from app.media_jobs import submission_media_dedupe_key
+from app.models import (Annotation, BackgroundJob, BehaviorReviewDecision, BehaviorReviewReopen,
+                        Clip, DetectionImport, Review, Submission, SubmissionAnnotation, Video)
 from tests.test_reviews import (_add_reviewer, _annotate_with_mouse, _review,
                                 _setup_video_with_import, _submit)
 
@@ -172,10 +173,28 @@ def test_final_approve_requires_all_but_reject_allows_pending(ctx, login_headers
         json={"result": "approved", "expected_submission_id": state["submission_id"],
               "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
     assert denied.status_code == 409
+    # A video rejection needs at least one rejected behavior; the other may stay pending.
+    state = _decide(ctx, reviewer, project, video, state, 0, "rejected", "请修改").json()
     rejected = ctx.client.post(f"/api/projects/{project['id']}/videos/{video['id']}/review",
         json={"result": "rejected", "expected_submission_id": state["submission_id"],
               "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
     assert rejected.status_code == 200
+    current = ctx.client.get(f"/api/projects/{project['id']}/videos/{video['id']}/review-state",
+                             headers=reviewer).json()
+    assert current["counts"] == {"pending": 1, "approved": 0, "rejected": 1}
+
+
+def test_rejected_review_requires_a_rejected_behavior(ctx, login_headers):
+    _h, reviewer, project, video, _a, state = _setup(ctx, login_headers)
+    state = _decide(ctx, reviewer, project, video, state, 0, "approved").json()
+    resp = ctx.client.post(f"/api/projects/{project['id']}/videos/{video['id']}/review",
+        json={"result": "rejected", "expected_submission_id": state["submission_id"],
+              "expected_decision_revision": state["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "no_rejected_behavior"
+    with ctx.session_factory() as db:
+        assert db.query(Review).count() == 0
+        assert db.get(Submission, state["submission_id"]).status == "submitted"
 
 
 def test_lock_rejection_comparison_carry_and_reopen(ctx, login_headers):
@@ -322,6 +341,7 @@ def test_real_track_split_undo_preserves_decisions_and_does_not_address_feedback
 def test_revoke_permissions_stale_context_and_append_only_audit(ctx, login_headers):
     headers, reviewer, project, video, annotations, state = _setup(ctx, login_headers, count=1)
     state = _decide(ctx, reviewer, project, video, state, 0, "approved").json()
+    state = _decide(ctx, reviewer, project, video, state, 0, "rejected", "请修正").json()
     assert _review(ctx, reviewer, project, video, "rejected").status_code == 200
     member_id = ctx.create_user("ordinary_member")
     ctx.add_member(project["id"], member_id)
@@ -344,7 +364,7 @@ def test_revoke_permissions_stale_context_and_append_only_audit(ctx, login_heade
             with pytest.raises(IntegrityError, match="append-only"):
                 db.execute(text(sql))
             db.rollback()
-        assert db.query(BehaviorReviewDecision).count() == 2
+        assert db.query(BehaviorReviewDecision).count() == 3
 
 
 @pytest.mark.parametrize("result", ["approved", "rejected"])
@@ -444,3 +464,73 @@ def test_0016_superseded_approval_does_not_deadlock_latest_rejection(ctx, login_
         headers=reviewer, json={"reason": "verify latest approval"})
     assert reopened.status_code == 200, reopened.text
     assert ctx.client.patch(annotation_url, json={"confidence": "uncertain"}, headers=headers).status_code == 200
+
+
+def test_rejected_publish_creates_assets_for_approved_subset_only(ctx, login_headers):
+    headers, reviewer, project, video, _annotations, state = _setup(ctx, login_headers)
+    state = _decide(ctx, reviewer, project, video, state, 0, "approved").json()
+    state = _decide(ctx, reviewer, project, video, state, 1, "rejected", "请修改").json()
+    assert _review(ctx, reviewer, project, video, "rejected").status_code == 200
+    approved_snapshot_id = state["annotations"][0]["id"]
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).one()
+        assert submission.status == "rejected"
+        clips = db.query(Clip).all()
+        assert [clip.submission_annotation_id for clip in clips] == [approved_snapshot_id]
+        job = db.query(BackgroundJob).filter_by(
+            dedupe_key=submission_media_dedupe_key(submission.id)).one()
+        assert job.payload["submission_annotation_ids"] == [approved_snapshot_id]
+
+
+def test_publish_reuses_canonical_assets_without_duplicate_job(ctx, login_headers):
+    headers, reviewer, project, video, annotations, state = _setup(ctx, login_headers)
+    state = _decide(ctx, reviewer, project, video, state, 0, "approved").json()
+    state = _decide(ctx, reviewer, project, video, state, 1, "rejected", "删除它").json()
+    assert _review(ctx, reviewer, project, video, "rejected").status_code == 200
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 1  # only the approved behavior is published
+    assert ctx.client.delete(base + f"/annotations/{annotations[1]['id']}",
+                             headers=headers).status_code == 204
+    assert _submit(ctx, headers, project, video).status_code == 200
+    carried = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    assert carried["counts"] == {"pending": 0, "approved": 1, "rejected": 0}
+    assert carried["annotations"][0]["decision"]["origin"] == "carried"
+    resp = ctx.client.post(base + "/review", json={"result": "approved",
+        "expected_submission_id": carried["submission_id"],
+        "expected_decision_revision": carried["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 1  # reused, not duplicated
+        second = db.query(Submission).order_by(Submission.attempt_no.desc()).first()
+        assert db.query(BackgroundJob).filter_by(
+            dedupe_key=submission_media_dedupe_key(second.id)).first() is None
+
+
+def test_publish_creates_new_asset_when_material_changes(ctx, login_headers):
+    headers, reviewer, project, video, annotations, state = _setup(ctx, login_headers)
+    state = _decide(ctx, reviewer, project, video, state, 0, "approved").json()
+    state = _decide(ctx, reviewer, project, video, state, 1, "rejected", "请修改").json()
+    assert _review(ctx, reviewer, project, video, "rejected").status_code == 200
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 1
+    assert ctx.client.patch(base + f"/annotations/{annotations[1]['id']}",
+                            json={"confidence": "uncertain"}, headers=headers).status_code == 200
+    assert _submit(ctx, headers, project, video).status_code == 200
+    carried = ctx.client.get(base + "/review-state", headers=reviewer).json()
+    assert carried["counts"] == {"pending": 1, "approved": 1, "rejected": 0}
+    assert carried["annotations"][0]["decision"]["origin"] == "carried"
+    assert carried["annotations"][1]["decision"]["origin"] is None
+    changed_snapshot_id = carried["annotations"][1]["id"]
+    carried = _decide(ctx, reviewer, project, video, carried, 1, "approved").json()
+    resp = ctx.client.post(base + "/review", json={"result": "approved",
+        "expected_submission_id": carried["submission_id"],
+        "expected_decision_revision": carried["decision_revision"]}, headers=reviewer)
+    assert resp.status_code == 200, resp.text
+    with ctx.session_factory() as db:
+        assert db.query(Clip).count() == 2  # one reused, one new asset
+        second = db.query(Submission).order_by(Submission.attempt_no.desc()).first()
+        job = db.query(BackgroundJob).filter_by(
+            dedupe_key=submission_media_dedupe_key(second.id)).one()
+        assert job.payload["submission_annotation_ids"] == [changed_snapshot_id]
