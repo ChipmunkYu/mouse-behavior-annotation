@@ -28,7 +28,7 @@ from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, claim_and_render_submissio
 from app.models import (Annotation, BackgroundJob, Clip, DetectionImport, ProjectMembership,
                         Submission, SubmissionAnnotation, User, Video)
 
-from .conftest import auth_headers
+from .conftest import FakeMediaProcessor, auth_headers
 
 
 def _now():
@@ -216,12 +216,13 @@ def test_format_time():
 
 def test_clip_command_is_argument_list_no_shell(monkeypatch):
     proc = _proc(crf=23, preset="veryfast", timeout_seconds=45)
-    cmd = proc.build_clip_command("C:/in.mp4", 1.5, 3.0, "C:/out.mp4")
+    cmd = proc.build_clip_command("C:/in.mp4", 1.5, 45, "C:/out.mp4")
     assert cmd[0] == "ffmpeg"
     assert "-y" in cmd
     assert cmd[cmd.index("-ss") + 1] == "1.5"
     assert "-to" not in cmd
-    assert cmd[cmd.index("-t") + 1] == "1.5"
+    assert "-t" not in cmd  # 帧数为权威，绝不按时间裁剪
+    assert cmd[cmd.index("-frames:v") + 1] == "45"
     assert cmd[cmd.index("-i") + 1] == "C:/in.mp4"
     assert "-c:v" in cmd and "libx264" in cmd[cmd.index("-c:v") + 1]
     assert "veryfast" in cmd
@@ -241,7 +242,7 @@ def test_clip_command_is_argument_list_no_shell(monkeypatch):
         return sp.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
-    proc.render_clip(input_path="in.mp4", start=0.0, end=1.0, output_path="out.mp4")
+    proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["timeout"] == 45
     assert isinstance(captured["cmd"], list)
@@ -260,22 +261,45 @@ def test_thumbnail_command_is_argument_list():
 
 def test_optional_audio_mapping():
     proc = _proc(map_audio=True)
-    cmd = proc.build_clip_command("in.mp4", 0.0, 1.0, "out.mp4")
+    cmd = proc.build_clip_command("in.mp4", 0.0, 25, "out.mp4")
     assert cmd.count("-map") == 2
     assert "0:v:0" in cmd and "0:a:0?" in cmd
     assert "-c:a" in cmd and "aac" in cmd[cmd.index("-c:a") + 1]
     assert "-an" not in cmd
     # 默认不映射音频
-    assert _proc().build_clip_command("in.mp4", 0.0, 1.0, "out.mp4").count("-map") == 1
-    assert "-an" in _proc().build_clip_command("in.mp4", 0.0, 1.0, "out.mp4")
+    assert _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4").count("-map") == 1
+    assert "-an" in _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4")
 
 
 def test_part_outputs_have_explicit_muxers_and_duration():
-    clip = _proc().build_clip_command("in.mp4", 1.25, 2.75, ".clip.mp4.part")
+    clip = _proc().build_clip_command("in.mp4", 1.25, 45, ".clip.mp4.part")
     thumb = _proc().build_thumbnail_command("in.mp4", 2.0, ".thumb.jpg.part")
     assert clip[-3:] == ["-f", "mp4", ".clip.mp4.part"]
-    assert clip[clip.index("-t") + 1] == "1.5" and "-to" not in clip
+    assert "-t" not in clip and clip[clip.index("-frames:v") + 1] == "45"
     assert thumb[-3:] == ["-f", "image2", ".thumb.jpg.part"]
+
+
+@pytest.mark.parametrize("frames", [1, 10, 30, 238])
+def test_clip_command_frame_count_is_authoritative(frames):
+    cmd = _proc().build_clip_command("in.mp4", 1.5, frames, "out.mp4")
+    assert "-t" not in cmd
+    assert cmd[cmd.index("-frames:v") + 1] == str(frames)
+
+
+@pytest.mark.parametrize("frames", [0, -1, 1.5, True, "10"])
+def test_clip_command_rejects_non_positive_or_non_integer_frames(frames):
+    with pytest.raises(ValueError):
+        _proc().build_clip_command("in.mp4", 0.0, frames, "out.mp4")
+
+
+def test_sqlite_engine_enables_wal_and_busy_timeout(tmp_path):
+    from app import database as db_mod
+
+    url = f"sqlite:///{(tmp_path / 'pragma.db').as_posix()}"
+    engine = db_mod.configure_engine(url)
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 15000
 
 
 def test_media_error_truncates_stderr(monkeypatch):
@@ -288,7 +312,7 @@ def test_media_error_truncates_stderr(monkeypatch):
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
     with pytest.raises(MediaCommandError) as exc:
-        proc.render_clip(input_path="in.mp4", start=0.0, end=1.0, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
     msg = str(exc.value)
     assert "Media command failed (exit 1)" in msg
     assert "truncated" in msg
@@ -305,13 +329,13 @@ def test_media_command_timeout(monkeypatch):
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
     with pytest.raises(MediaCommandError, match="timed out after 5s"):
-        proc.render_clip(input_path="in.mp4", start=0.0, end=1.0, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
 
 
 def test_missing_executable_reports_clearly():
     proc = _proc(ffmpeg_path="definitely-not-a-real-ffmpeg-binary-xyz123")
     with pytest.raises(MediaCommandError, match="Media executable not found"):
-        proc.render_clip(input_path="in.mp4", start=0.0, end=1.0, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
 
 
 # ---------- 自动入队 / 生成 / 状态 ----------
@@ -625,12 +649,36 @@ def test_processor_receives_resolved_input_and_times(media_ctx):
     project, _categories, video, anns = _setup(ctx, headers, annotations=1, start_times=[1.0])
     _approve(ctx, project, video)
 
-    input_path, start, end, _out = ctx.processor.clip_calls[0]
+    input_path, start, frames, _out = ctx.processor.clip_calls[0]
     videos_dir = ctx.app.state.settings.videos_dir.resolve()
     assert Path(input_path).is_relative_to(videos_dir)  # 输入限制在 videos_dir 内
     assert Path(input_path) == (videos_dir / "src.mp4").resolve()
     assert start == pytest.approx(anns[0]["start_frame"] / video["fps"])
-    assert end == pytest.approx((anns[0]["end_frame"] + 1) / video["fps"])
+    assert frames == anns[0]["end_frame"] - anns[0]["start_frame"] + 1
+
+
+def test_render_submission_clip_files_passes_inclusive_frame_count(tmp_path):
+    from types import SimpleNamespace
+
+    from app.media_jobs import render_submission_clip_files
+
+    processor = FakeMediaProcessor()
+    settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
+    snapshot = SimpleNamespace(fps=25.0, frame_count=100, width=1280, height=720)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    annotation = SimpleNamespace(id=9, submission_id=7, start_time=1.0, end_time=3.0,
+                                 start_frame=25, end_frame=74, crop_region=None)
+    clip = SimpleNamespace(annotation_id=None, source_revision=None, clip_path=None,
+                           thumbnail_path=None, status="pending", error=None,
+                           generated_at=None, updated_at=None)
+
+    created = render_submission_clip_files(processor, settings, submission, annotation, clip,
+                                           input_path=tmp_path / "in.mp4")
+
+    _input, start, frames, _output = processor.clip_calls[0]
+    assert start == pytest.approx(25 / 25.0)
+    assert frames == 74 - 25 + 1  # inclusive frame range
+    assert clip.status == "ready" and len(created) == 2
 
 
 # ---------- 文件原子性 / 路径安全 ----------
@@ -1024,6 +1072,38 @@ def test_restart_exhausted_job_releases_processing_clip_for_retry(media_ctx):
         assert db.query(Clip).one().status == "ready"
 
 
+def test_recover_interrupted_releases_leftover_processing_clip(media_ctx):
+    ctx = media_ctx
+    headers = auth_headers(ctx.client)
+    project, _categories, video, anns = _setup(ctx, headers, annotations=1)
+    with ctx.session_factory() as db:
+        v = db.get(Video, video["id"])
+        v.workflow_status = "approved"
+        revision = v.media_revision
+        db.commit()
+        job = BackgroundJob(
+            project_id=project["id"], job_type="media", status="running", attempts=1,
+            dedupe_key=f"media:video:{video['id']}:rev:{revision}",
+            payload={"video_id": video["id"], "project_id": project["id"], "revision": revision},
+        )
+        db.add_all([
+            Clip(project_id=project["id"], annotation_id=anns[0]["id"],
+                 source_revision=revision, status="processing"),
+            job,
+        ])
+        db.commit()
+        # Advance the revision so the per-job reset no longer matches this clip; only the
+        # startup-wide sweep can release this stale claim.
+        v.media_revision = revision + 1
+        db.commit()
+        job_id = job.id
+
+    ctx.app.state.media_worker._recover_interrupted()
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job_id).status == "queued"
+        assert db.query(Clip).one().status == "pending"
+
+
 def test_restart_does_not_requeue_cleanup_incomplete_media_job(media_ctx):
     ctx = media_ctx
     headers = auth_headers(ctx.client)
@@ -1172,3 +1252,32 @@ def test_worker_never_creates_clips_for_deleted_annotations(media_ctx):
         assert job.status == "succeeded"  # 无 Clip 行可处理 → 真空成功
         assert db.query(Clip).count() == 0  # 绝不复活/重建 Clip
     assert list(ctx.app.state.settings.clips_dir.glob("*")) == []
+
+
+def test_submission_render_failure_leaves_no_processing_clip(media_ctx):
+    ctx = media_ctx
+    from tests.test_project_export import _approved
+
+    _approved(ctx)
+    with ctx.session_factory() as db:
+        job = db.query(BackgroundJob).filter(
+            BackgroundJob.job_type == "media",
+            BackgroundJob.payload["submission_id"].as_integer().is_not(None),
+        ).one()
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        annotation_id = clip.submission_annotation_id
+        for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                             (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+            if stored:
+                (root / stored).unlink(missing_ok=True)
+        clip.status, clip.clip_path, clip.thumbnail_path = "pending", None, None
+        job.status, job.error, job.finished_at = "queued", None, None
+        db.commit()
+        job_id = job.id
+
+    ctx.processor.fail_clips.add(annotation_id)
+    ctx.app.state.media_worker._run_job(job_id)
+    with ctx.session_factory() as db:
+        assert db.get(BackgroundJob, job_id).status == "failed"
+        assert db.query(Clip).filter(Clip.status == "processing").count() == 0
+        assert db.query(Clip).one().status == "failed"

@@ -157,12 +157,12 @@ def login_headers(ctx):
 class FakeMediaProcessor:
     """可替换媒体执行器（批次 4）：不调用真实 ffmpeg，写入伪文件并可注入失败。
 
-    - `clip_calls` / `thumb_calls`：记录 (input_path, start, end, output_path) 调用。
+    - `clip_calls` / `thumb_calls`：记录 (input_path, start, frames, output_path) 调用。
     - `fail_clips` / `fail_thumbnails`：annotation_id 集合，命中即抛 MediaCommandError。
     """
 
     def __init__(self) -> None:
-        self.clip_calls: list[tuple[str, float, float, str]] = []
+        self.clip_calls: list[tuple[str, float, int, str]] = []
         self.thumb_calls: list[tuple[str, float, str]] = []
         self.clip_crops: list[tuple | None] = []
         self.thumb_crops: list[tuple | None] = []
@@ -177,8 +177,8 @@ class FakeMediaProcessor:
         end = name.index("_rev", start)
         return int(name[start:end])
 
-    def render_clip(self, *, input_path: str, start: float, end: float, output_path: str, crop=None) -> None:
-        self.clip_calls.append((input_path, start, end, output_path))
+    def render_clip(self, *, input_path: str, start: float, frames: int, output_path: str, crop=None) -> None:
+        self.clip_calls.append((input_path, start, frames, output_path))
         self.clip_crops.append(crop)
         ann_id = self._annotation_id(output_path)
         if ann_id in self.fail_clips:
