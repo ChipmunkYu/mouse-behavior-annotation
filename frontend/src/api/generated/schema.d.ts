@@ -144,6 +144,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/behavior-stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Behavior Stats
+         * @description 行为级审核统计：每个项目类别一行，按当前提交的不可变快照计数。
+         */
+        get: operations["behavior_stats_api_projects__project_id__behavior_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/categories": {
         parameters: {
             query?: never;
@@ -1510,6 +1530,28 @@ export interface components {
             /** Submission Status */
             submission_status?: string | null;
         };
+        /** BehaviorStatsItem */
+        BehaviorStatsItem: {
+            /** Approved */
+            approved: number;
+            /** Category Group */
+            category_group: string;
+            /** Category Id */
+            category_id: number;
+            /** Category Name */
+            category_name: string;
+            /** Pending */
+            pending: number;
+            /** Possible Total */
+            possible_total: number;
+            /** Rejected */
+            rejected: number;
+        };
+        /** BehaviorStatsOut */
+        BehaviorStatsOut: {
+            /** Items */
+            items: components["schemas"]["BehaviorStatsItem"][];
+        };
         /** Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post */
         Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post: {
             /** Metadata File */
@@ -2650,6 +2692,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssignmentStatsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    behavior_stats_api_projects__project_id__behavior_stats_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BehaviorStatsOut"];
                 };
             };
             /** @description Validation Error */

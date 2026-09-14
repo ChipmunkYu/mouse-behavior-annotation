@@ -1207,6 +1207,65 @@
         "title": "BehaviorReviewStateOut",
         "type": "object"
       },
+      "BehaviorStatsItem": {
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "category_group": {
+            "title": "Category Group",
+            "type": "string"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "category_name": {
+            "title": "Category Name",
+            "type": "string"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "possible_total": {
+            "title": "Possible Total",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category_id",
+          "category_name",
+          "category_group",
+          "approved",
+          "pending",
+          "rejected",
+          "possible_total"
+        ],
+        "title": "BehaviorStatsItem",
+        "type": "object"
+      },
+      "BehaviorStatsOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorStatsItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "BehaviorStatsOut",
+        "type": "object"
+      },
       "Body_replace_detection_import_api_projects__project_id__videos__video_id__detection_imports_post": {
         "properties": {
           "metadata_file": {
@@ -4003,6 +4062,54 @@
           }
         ],
         "summary": "Assignment Stats",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/behavior-stats": {
+      "get": {
+        "description": "行为级审核统计：每个项目类别一行，按当前提交的不可变快照计数。",
+        "operationId": "behavior_stats_api_projects__project_id__behavior_stats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorStatsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Behavior Stats",
         "tags": [
           "videos"
         ]

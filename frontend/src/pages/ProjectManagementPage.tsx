@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getAssignmentStats, getCategoryScheme, getProjectInvite, listCategorySchemeAudit, listMembers, listProjects, lockCategoryScheme, putCategoryScheme, removeMember, resetProjectInvite, updateMember } from "../api";
+import { getAssignmentStats, getBehaviorStats, getCategoryScheme, getProjectInvite, listCategorySchemeAudit, listMembers, listProjects, lockCategoryScheme, putCategoryScheme, removeMember, resetProjectInvite, updateMember } from "../api";
 import { ApiError } from "../api/client";
-import type { AssignmentStats, CategoryScheme, CategorySchemeAudit, CategorySchemeCategoryInput, Membership, Project } from "../api/types";
+import type { AssignmentStats, BehaviorStats, CategoryScheme, CategorySchemeAudit, CategorySchemeCategoryInput, Membership, Project } from "../api/types";
 import CategorySchemeEditor, { normalizeCategorySchemeDraft, toCategorySchemeRequestCategories, validateCategoryScheme } from "../components/CategorySchemeEditor";
 import { useConfirm } from "../components/ConfirmDialog";
-import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
+import { Card, CollapsibleCard, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
 import { formatDate } from "../utils/format";
 
 function friendlyError(err: unknown): string {
@@ -78,25 +78,77 @@ function CategorySchemeManager({ pid, confirm }: { pid: number; confirm: ReturnT
     finally { setBusy(false); }
   }
 
-  if (loading) return <Card title="类别方案"><Loading text="加载类别方案…" /></Card>;
+  if (loading) return <CollapsibleCard id={`management:${pid}:scheme-owner`} title="类别方案"><Loading text="加载类别方案…" /></CollapsibleCard>;
   return <>
-    <Card title="类别方案" extra={<span className={`scheme-state ${locked ? "locked" : "draft"}`}>{locked ? "🔒 已永久锁定" : `配置中 · 版本 ${scheme?.category_scheme_version ?? 0}`}</span>}>
+    <CollapsibleCard id={`management:${pid}:scheme-owner`} title="类别方案" extra={<span className={`scheme-state ${locked ? "locked" : "draft"}`}>{locked ? "🔒 已永久锁定" : `配置中 · 版本 ${scheme?.category_scheme_version ?? 0}`}</span>}>
       {error ? <ErrorBox message={error} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
       {!locked ? <div className="scheme-intro">配置行为类别及参与对象规则。角色标识由系统维护，无需手动填写。</div> : <div className="scheme-intro">以下是已锁定的运行方案，仅供查看。</div>}
       <CategorySchemeEditor value={normalized} onChange={setDraft} disabled={locked} showCompleteness={!locked} emptyHint="新增至少一个类别，保存并核对后即可永久锁定。" />
       {!locked ? <div className="scheme-actions"><span className="flex-spacer" /><button className="btn" disabled={busy} onClick={() => void load()}>重新加载</button><button className="btn btn-primary" disabled={busy || !validation.valid || !dirty} title={!validation.valid ? validation.issues[0] : !dirty ? "当前没有待保存修改" : "保存完整方案"} onClick={() => void save()}>{busy ? "处理中…" : "保存完整方案"}</button><button className="btn btn-danger" disabled={busy || draft.length === 0 || dirty || !validation.valid} title={!validation.valid ? validation.issues[0] : dirty ? "请先保存当前修改" : "核对后永久锁定"} onClick={() => void lock()}>永久锁定…</button></div> : null}
-    </Card>
-    <Card title="方案历史"><div className="scheme-audit">{audit.length ? [...audit].reverse().map((item) => <div key={item.id}><b>{item.action === "lock" ? "永久锁定" : "保存方案"}</b><span>版本 {item.scheme_version}</span><span>{formatDate(item.created_at)}</span></div>) : <span className="muted">尚无方案操作记录</span>}</div></Card>
+    </CollapsibleCard>
+    <CollapsibleCard id={`management:${pid}:scheme-history`} title="方案历史" defaultOpen={false}><div className="scheme-audit">{audit.length ? [...audit].reverse().map((item) => <div key={item.id}><b>{item.action === "lock" ? "永久锁定" : "保存方案"}</b><span>版本 {item.scheme_version}</span><span>{formatDate(item.created_at)}</span></div>) : <span className="muted">尚无方案操作记录</span>}</div></CollapsibleCard>
   </>;
+}
+
+/** 行为统计表：每个行为类别一行，含零值类别；分组作为次要文字与 title 提示。 */
+export function BehaviorStatsTable({ data }: { data: BehaviorStats | null }) {
+  const items = data?.items ?? [];
+  return (
+    <div className="stats-table-wrap">
+      <table className="stats-table behavior-stats-table">
+        <thead>
+          <tr><th>行为</th><th>已通过</th><th>待审核</th><th>退回</th><th>可能总数</th></tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.category_id}>
+              <td className="stats-behavior"><b>{item.category_name}</b>{item.category_group ? <small title={item.category_group}>{item.category_group}</small> : null}</td>
+              <td>{item.approved}</td>
+              <td>{item.pending}</td>
+              <td>{item.rejected}</td>
+              <td>{item.possible_total}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {items.length === 0 ? <div className="muted stats-table-empty">暂无行为类别。</div> : null}
+    </div>
+  );
+}
+
+/** 以北京时间为准格式化统计抓取时刻（YYYY-MM-DD HH:mm，24 小时制），与机器时区无关。 */
+function beijingStamp(at: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(at);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
 export default function ProjectManagementPage() {
   const pid = Number(useParams<{ projectId: string }>().projectId);
-  const [project, setProject] = useState<Project | null>(null); const [members, setMembers] = useState<Membership[] | null>(null); const [stats, setStats] = useState<AssignmentStats | null>(null); const [invite, setInvite] = useState<string | null>(null);
-  const [baseError, setBaseError] = useState<string | null>(null); const [inviteError, setInviteError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null); const [busyId, setBusyId] = useState<number | null>(null); const [confirmDialog, confirm] = useConfirm();
+  const [project, setProject] = useState<Project | null>(null); const [members, setMembers] = useState<Membership[] | null>(null); const [stats, setStats] = useState<AssignmentStats | null>(null); const [behaviorStats, setBehaviorStats] = useState<BehaviorStats | null>(null); const [behaviorError, setBehaviorError] = useState<string | null>(null); const [invite, setInvite] = useState<string | null>(null);
+  const [baseError, setBaseError] = useState<string | null>(null); const [inviteError, setInviteError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null); const [busyId, setBusyId] = useState<number | null>(null); const [statsBusy, setStatsBusy] = useState(false); const statsBusyRef = useRef(false); const [statsFetchedAt, setStatsFetchedAt] = useState<string | null>(null); const [confirmDialog, confirm] = useConfirm();
   const canManage = project?.role === "owner" || project?.role === "admin";
-  const loadBase = useCallback(async () => { try { const projects = await listProjects(); const current = projects.find((p) => p.id === pid) ?? null; setProject(current); if (!current || (current.role !== "owner" && current.role !== "admin")) { setMembers([]); setStats(null); setBaseError(null); return; } const [memberRows, assignmentStats] = await Promise.all([listMembers(pid), getAssignmentStats(pid)]); setMembers(memberRows); setStats(assignmentStats); setBaseError(null); } catch (err) { setBaseError(friendlyError(err)); setMembers([]); } }, [pid]);
+  const loadBase = useCallback(async () => { try { const projects = await listProjects(); const current = projects.find((p) => p.id === pid) ?? null; setProject(current); if (!current || (current.role !== "owner" && current.role !== "admin")) { setMembers([]); setBaseError(null); return; } setMembers(await listMembers(pid)); setBaseError(null); } catch (err) { setBaseError(friendlyError(err)); setMembers([]); } }, [pid]);
   useEffect(() => { void loadBase(); }, [loadBase]);
+  // 统计仅手动刷新：挂载、标签页重新可见 / 窗口获得焦点、点击刷新按钮；不做定时轮询。
+  const loadStats = useCallback(async () => {
+    if (!canManage) { setStats(null); setBehaviorStats(null); setBehaviorError(null); return; }
+    if (statsBusyRef.current) return;
+    statsBusyRef.current = true; setStatsBusy(true);
+    try {
+      const [assignment, behavior] = await Promise.allSettled([getAssignmentStats(pid), getBehaviorStats(pid)]);
+      if (assignment.status === "fulfilled") setStats(assignment.value); else setBaseError(friendlyError(assignment.reason));
+      if (behavior.status === "fulfilled") { setBehaviorStats(behavior.value); setBehaviorError(null); setStatsFetchedAt(beijingStamp(new Date())); } else setBehaviorError(friendlyError(behavior.reason));
+    } finally { statsBusyRef.current = false; setStatsBusy(false); }
+  }, [canManage, pid]);
+  useEffect(() => { void loadStats(); }, [loadStats]);
+  useEffect(() => {
+    if (!canManage) return;
+    const onWake = () => { if (document.visibilityState === "visible") void loadStats(); };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => { document.removeEventListener("visibilitychange", onWake); window.removeEventListener("focus", onWake); };
+  }, [canManage, loadStats]);
   const loadInvite = useCallback(async () => { if (!canManage) { setInvite(null); setInviteError(null); return; } try { setInvite((await getProjectInvite(pid)).invite_code); setInviteError(null); } catch (err) { setInvite(null); setInviteError(friendlyError(err)); } }, [canManage, pid]);
   useEffect(() => { void loadInvite(); }, [loadInvite]);
   async function patchMember(member: Membership, patch: { role?: "admin" | "member"; can_review?: boolean }) { setBusyId(member.id); try { await updateMember(pid, member.id, patch); await loadBase(); setNotice(`已更新 ${member.username} 的权限。`); } catch (err) { setBaseError(friendlyError(err)); } finally { setBusyId(null); } }
@@ -104,9 +156,7 @@ export default function ProjectManagementPage() {
   async function copyInvite() { if (!invite) return; try { await navigator.clipboard.writeText(invite); setNotice("邀请码已复制。失效前请仅发给需要加入项目的人。"); } catch { setInviteError("浏览器未允许复制，请手动选择邀请码复制。"); } }
   async function resetInvite() { if (!await confirm({ title: "重置邀请码", message: "旧邀请码会立即失效，尚未加入的成员需要使用新邀请码。", confirmLabel: "重置邀请码", danger: true })) return; try { const result = await resetProjectInvite(pid); setInvite(result.invite_code); setNotice("邀请码已重置，旧邀请码已失效。"); } catch (err) { setInviteError(friendlyError(err)); } }
   if (members === null) return <div className="container"><Loading text="加载项目管理信息…" /></div>;
-  return <div className="container management-page">{confirmDialog}<div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}</div><h1>项目管理</h1><div className="sub">管理类别方案、成员权限、邀请码与责任分配概况</div></div></div>{baseError ? <ErrorBox message={baseError} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
-    {project?.role === "owner" ? <CategorySchemeManager pid={pid} confirm={confirm} /> : null}
-    {project?.role === "admin" ? <Card title="类别方案" extra={<span className={`scheme-state ${project.category_scheme_locked_at ? "locked" : "draft"}`}>{project.category_scheme_locked_at ? "🔒 已永久锁定" : `配置中 · 版本 ${project.category_scheme_version}`}</span>}><div className="scheme-intro">类别方案只能由项目所有者查看、配置并永久锁定；管理员仍可管理成员、邀请码和任务分配。</div></Card> : null}
-    {!canManage ? <Card><EmptyState title="无管理权限" hint="只有项目所有者和管理员可以管理成员与邀请码。" /></Card> : <><div className="stats-strip" aria-label="项目工作流统计">{[[stats?.total,"视频总数"],[stats?.draft,"草稿"],[stats?.submitted,"待审核"],[stats?.approved,"已通过"],[stats?.rejected,"已退回"],[stats?.unassigned,"未分配"]].map(([value,label]) => <div key={String(label)}><b>{value ?? 0}</b><span>{label}</span></div>)}</div><Card title="项目邀请码" extra={<div className="inline-actions"><button className="btn btn-sm" onClick={() => void copyInvite()} disabled={!invite}>复制</button><button className="btn btn-sm btn-danger" onClick={() => void resetInvite()}>重置</button></div>}>{inviteError ? <ErrorBox message={`邀请码加载失败：${inviteError}`} /> : null}<div className="invite-code mono" tabIndex={0}>{invite ?? (inviteError ? "暂不可用" : "加载中…")}</div><div className="field-hint">任何获得邀请码的登录用户都可作为成员加入。重置后旧邀请码立即失效。</div></Card><Card title={`成员（${members.length}）`}><div className="member-table-wrap"><table className="member-table"><thead><tr><th>成员</th><th>角色</th><th>审核权限</th><th>任务进度（总数 / 草稿 / 待审核 / 已通过 / 已退回）</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>{members.map((m) => { const owner = m.role === "owner"; const progress = stats?.by_assignee.find((item) => item.assignee_membership_id === m.id); return <tr key={m.id}><td><b>{m.username}</b>{m.id === project?.membership_id ? <span className="you-mark">你</span> : null}<small>用户 #{m.user_id}</small></td><td>{owner ? <StatusBadge value="owner" tone="ok" /> : <select className="select" aria-label={`${m.username} 的角色`} value={m.role} disabled={busyId === m.id} onChange={(e) => void patchMember(m, { role: e.target.value as "admin" | "member" })}><option value="member">成员</option><option value="admin">管理员</option></select>}</td><td>{owner || m.role === "admin" ? <span className="permission-fixed">可审核</span> : <label className="switch-label"><input type="checkbox" checked={m.can_review} disabled={busyId === m.id} onChange={(e) => void patchMember(m, { can_review: e.target.checked })} />允许审核</label>}</td><td><div className="member-progress">{[progress?.total,progress?.draft,progress?.submitted,progress?.approved,progress?.rejected].map((v,i) => <span key={i}><b>{v ?? 0}</b></span>)}</div></td><td>{owner ? <span className="muted">所有者受保护</span> : <button className="btn btn-sm btn-danger" disabled={busyId === m.id} onClick={() => void remove(m)}>删除</button>}</td></tr>; })}</tbody></table></div></Card></>}
+  return <div className="container management-page">{confirmDialog}<div className="page-header"><div><div className="breadcrumb"><Link to="/projects">项目</Link> / {project?.name ?? `#${pid}`}</div><h1>项目管理</h1></div></div>{baseError ? <ErrorBox message={baseError} /> : null}{notice ? <div className="ok-box" role="status">✓ {notice}</div> : null}
+    {!canManage ? <Card><EmptyState title="无管理权限" hint="只有项目所有者和管理员可以管理成员与邀请码。" /></Card> : <><div className="stats-strip" aria-label="项目工作流统计">{[[stats?.total,"视频总数"],[stats?.draft,"草稿"],[stats?.submitted,"待审核"],[stats?.approved,"已通过"],[stats?.rejected,"已退回"],[stats?.unassigned,"未分配"]].map(([value,label]) => <div key={String(label)}><b>{value ?? 0}</b><span>{label}</span></div>)}</div><CollapsibleCard id={`management:${pid}:behavior-stats`} title="行为统计表" extra={<>{statsFetchedAt ? <span className="stats-fetched-at">当前结果统计截至 {statsFetchedAt}</span> : null}<button type="button" className="btn btn-sm" onClick={() => void loadStats()} disabled={statsBusy} aria-busy={statsBusy}>{statsBusy ? "刷新中…" : "刷新"}</button></>}>{behaviorError ? <ErrorBox message={`行为统计加载失败：${behaviorError}`} /> : behaviorStats == null ? <Loading text="加载行为统计…" /> : <BehaviorStatsTable data={behaviorStats} />}</CollapsibleCard><CollapsibleCard id={`management:${pid}:invite`} title="项目邀请码" extra={<div className="inline-actions"><button className="btn btn-sm" onClick={() => void copyInvite()} disabled={!invite}>复制</button><button className="btn btn-sm btn-danger" onClick={() => void resetInvite()}>重置</button></div>}>{inviteError ? <ErrorBox message={`邀请码加载失败：${inviteError}`} /> : null}<div className="invite-code mono" tabIndex={0}>{invite ?? (inviteError ? "暂不可用" : "加载中…")}</div><div className="field-hint">任何获得邀请码的登录用户都可作为成员加入。重置后旧邀请码立即失效。</div></CollapsibleCard><CollapsibleCard id={`management:${pid}:members`} title={`成员（${members.length}）`}><div className="member-table-wrap"><table className="member-table"><thead><tr><th>成员</th><th>角色</th><th>审核权限</th><th>任务进度（总数 / 草稿 / 待审核 / 已通过 / 已退回）</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>{members.map((m) => { const owner = m.role === "owner"; const progress = stats?.by_assignee.find((item) => item.assignee_membership_id === m.id); return <tr key={m.id}><td><b>{m.username}</b>{m.id === project?.membership_id ? <span className="you-mark">你</span> : null}<small>用户 #{m.user_id}</small></td><td>{owner ? <StatusBadge value="owner" tone="ok" /> : <select className="select" aria-label={`${m.username} 的角色`} value={m.role} disabled={busyId === m.id} onChange={(e) => void patchMember(m, { role: e.target.value as "admin" | "member" })}><option value="member">成员</option><option value="admin">管理员</option></select>}</td><td>{owner || m.role === "admin" ? <span className="permission-fixed">可审核</span> : <label className="switch-label"><input type="checkbox" checked={m.can_review} disabled={busyId === m.id} onChange={(e) => void patchMember(m, { can_review: e.target.checked })} />允许审核</label>}</td><td><div className="member-progress">{[progress?.total,progress?.draft,progress?.submitted,progress?.approved,progress?.rejected].map((v,i) => <span key={i}><b>{v ?? 0}</b></span>)}</div></td><td>{owner ? <span className="muted">所有者受保护</span> : <button className="btn btn-sm btn-danger" disabled={busyId === m.id} onClick={() => void remove(m)}>删除</button>}</td></tr>; })}</tbody></table></div></CollapsibleCard>{project?.role === "owner" ? <CategorySchemeManager pid={pid} confirm={confirm} /> : null}{project?.role === "admin" ? <CollapsibleCard id={`management:${pid}:scheme-admin`} title="类别方案" extra={<span className={`scheme-state ${project.category_scheme_locked_at ? "locked" : "draft"}`}>{project.category_scheme_locked_at ? "🔒 已永久锁定" : `配置中 · 版本 ${project.category_scheme_version}`}</span>}><div className="scheme-intro">类别方案只能由项目所有者查看、配置并永久锁定；管理员仍可管理成员、邀请码和任务分配。</div></CollapsibleCard> : null}</>}
   </div>;
 }

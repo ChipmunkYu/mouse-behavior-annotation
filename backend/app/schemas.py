@@ -313,6 +313,20 @@ class AssignmentStatsOut(BaseModel):
     by_assignee: list[AssignmentStatsItem]
 
 
+class BehaviorStatsItem(BaseModel):
+    category_id: int
+    category_name: str
+    category_group: str
+    approved: int
+    pending: int
+    rejected: int
+    possible_total: int
+
+
+class BehaviorStatsOut(BaseModel):
+    items: list[BehaviorStatsItem]
+
+
 # ---------- 标注 ----------
 class AnnotationCreate(BaseModel):
     category_id: StrictBusinessInt

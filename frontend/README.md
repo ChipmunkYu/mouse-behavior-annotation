@@ -66,7 +66,7 @@
   - **导出任务**：`POST /api/projects/:pid/export`（body `{category_ids?:number[]}`）发起后轮询 `GET /api/projects/:pid/export/status`（与媒体面板同规则：仅任务进行中每 4s 轮询，落定 / 离开页面即停止）；处理中显示 Job 进度与状态（排队 / 处理中 / 已完成 / 失败 / 已取消），成功提供「下载导出 ZIP」+ 7 天保留提醒（`expires_at` 存在时显示具体保留截止时间），409 冲突提示「上一个导出仍在进行中」。
   - **下载**：`GET /api/projects/:pid/export/download` 与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准（缺失时回退 `project-{pid}-export.zip`），下载时提示文件名与有效期。
   - 1366×768 双列布局（统计 / 范围 / 任务 | 内容预览），窄屏自动堆叠为单列。
-- **项目管理** `/projects/:projectId/manage`：owner 可复核创建时原子保存的完整类别方案并另行永久锁定；类别方案 GET/PUT/lock/audit 为 active owner-only。owner/admin 另可管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。
+- **项目管理** `/projects/:projectId/manage`：owner 可复核创建时原子保存的完整类别方案并另行永久锁定；类别方案 GET/PUT/lock/audit 为 active owner-only。owner/admin 另可管理非 owner 成员的 `admin/member` 角色和 member 审核能力，查看/复制/重置项目邀请码，并查看项目及逐负责人的分工统计；仍负责视频的成员须先改派或清空才能移除。页面另含「行为统计表」（每个行为类别一行：已通过 / 待审核 / 退回 / 可能总数，来自 `GET .../behavior-stats`，含零值类别，失败只影响该区块）；行为统计表、项目邀请码、成员表、类别方案、方案历史均可折叠并用 localStorage 记住开合状态；统计仅在挂载、标签页重新可见 / 窗口重新获得焦点或点击「刷新」时手动拉取，不做定时轮询。行为统计表标题栏在「刷新」按钮左侧显示「当前结果统计截至 YYYY-MM-DD HH:mm」（北京时间，UTC+8，与机器时区无关）。
 - **项目内导航**：视频库 / 片段库 / 审核 / 导出 / 项目管理；审核入口按有效审核能力显示，导出和项目管理仅 owner/admin，片段库全员可见。
 - **鉴权**：ProtectedRoute 路由守卫；任一 API 返回 401 自动清除登录态并回到登录页。
 

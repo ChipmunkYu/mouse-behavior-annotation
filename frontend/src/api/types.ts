@@ -16,6 +16,8 @@ export type MembershipUpdateInput = Schemas["MembershipUpdate"];
 export type Invite = Schemas["InviteOut"];
 export type AssignmentStatsItem = Schemas["AssignmentStatsItem"];
 export type AssignmentStats = Schemas["AssignmentStatsOut"];
+export type BehaviorStatsItem = Schemas["BehaviorStatsItem"];
+export type BehaviorStats = Schemas["BehaviorStatsOut"];
 export type VideoClaimsInput = Schemas["VideoClaimsRequest"];
 export type VideoClaimsResponse = Schemas["VideoClaimsResponse"];
 

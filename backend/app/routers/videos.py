@@ -22,10 +22,12 @@ from sqlalchemy.orm import Session
 
 from ..auth import AuthContext, authenticate_token, get_auth_context, get_current_user
 from ..assignee_triggers import ASSIGNEE_CONFLICT_DETAIL, is_assignee_write_conflict
+from ..behavior_review import latest_decisions
+from ..category_scheme_service import categories_for_project
 from ..database import get_db
 from ..display_proxy_enqueue import enqueue_for_video, hash_display_proxy_source, submit_after_commit
 from ..deps import project_access
-from ..models import BackgroundJob, ProjectMembership, User, Video
+from ..models import BackgroundJob, ProjectMembership, Submission, SubmissionAnnotation, User, Video
 from ..media_auth import (
     MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
 )
@@ -48,6 +50,8 @@ from ..schemas import (
     AssignmentBatchRequest,
     AssignmentStatsItem,
     AssignmentStatsOut,
+    BehaviorStatsItem,
+    BehaviorStatsOut,
     VideoClaimsRequest,
     VideoClaimsResponse,
     VideoCreate,
@@ -595,6 +599,53 @@ def assignment_stats(project_id: int, access: tuple = Depends(project_access),
         approved=totals[3], rejected=totals[4], unassigned=totals[5],
         claimable=totals[6], by_assignee=items,
     )
+
+
+@router.get("/api/projects/{project_id}/behavior-stats", response_model=BehaviorStatsOut)
+def behavior_stats(project_id: int, access: tuple = Depends(project_access),
+                   db: Session = Depends(get_db)) -> BehaviorStatsOut:
+    """行为级审核统计：每个项目类别一行，按当前提交的不可变快照计数。"""
+    categories = categories_for_project(db, project_id)
+    by_category = {category.id: category for category in categories}
+
+    # 每个视频只取 attempt_no 最大的提交；最新提交已撤回/作废的视频不贡献计数。
+    latest_attempts = db.query(
+        Submission.video_id, func.max(Submission.attempt_no).label("attempt_no")
+    ).join(Video, Video.id == Submission.video_id).filter(
+        Video.project_id == project_id
+    ).group_by(Submission.video_id).subquery()
+    submission_ids = [row.id for row in db.query(Submission.id).join(
+        latest_attempts,
+        (Submission.video_id == latest_attempts.c.video_id)
+        & (Submission.attempt_no == latest_attempts.c.attempt_no),
+    ).filter(Submission.status.in_(("submitted", "approved", "rejected"))).all()]
+
+    snapshots = (db.query(SubmissionAnnotation)
+                 .filter(SubmissionAnnotation.submission_id.in_(submission_ids)).all()
+                 if submission_ids else [])
+    decisions = latest_decisions(db, [row.id for row in snapshots])
+
+    counts: dict[int, dict[str, int]] = {}
+    for snapshot in snapshots:
+        decision = decisions.get(snapshot.id)
+        status = decision.status if decision is not None else "pending"
+        if status not in ("approved", "rejected"):
+            status = "pending"
+        bucket = counts.setdefault(snapshot.category_id, {"approved": 0, "pending": 0, "rejected": 0})
+        bucket[status] += 1
+
+    items = []
+    for category in categories:
+        bucket = counts.get(category.id, {"approved": 0, "pending": 0, "rejected": 0})
+        approved, pending, rejected = bucket["approved"], bucket["pending"], bucket["rejected"]
+        items.append(BehaviorStatsItem(
+            category_id=category.id, category_name=category.name, category_group=category.group,
+            approved=approved, pending=pending, rejected=rejected,
+            possible_total=approved + pending,
+        ))
+    items.sort(key=lambda item: (item.possible_total,
+                                 by_category[item.category_id].sort_order, item.category_id))
+    return BehaviorStatsOut(items=items)
 
 
 def _authorized_video_path(

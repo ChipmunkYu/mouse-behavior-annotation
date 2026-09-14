@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 /** 中性状态徽标（不使用类别色，类别色仅用于区分行为）。 */
 const BADGE_TONE: Record<string, string> = {
@@ -125,6 +125,63 @@ export function Card({
         </div>
       ) : null}
       <div className="card-body">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * 可折叠卡片：标题是原生 button，aria-expanded/aria-controls 指向始终渲染的 body，
+ * 折叠时用 hidden 收起内容并去掉标题底边，不留多余间距或边框。
+ * `id` 同时用于 localStorage 记忆开合状态，调用方应保证在同一页面内唯一。
+ */
+export function CollapsibleCard({
+  id,
+  title,
+  extra,
+  children,
+  className,
+  defaultOpen = true,
+}: {
+  id: string;
+  title: ReactNode;
+  extra?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  defaultOpen?: boolean;
+}) {
+  const storageKey = `collapsible-card:${id}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved === "1") return true;
+      if (saved === "0") return false;
+    } catch {
+      // 禁用 localStorage 时回退到默认状态。
+    }
+    return defaultOpen;
+  });
+  const bodyId = `${id}-body`;
+  function toggle() {
+    setOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(storageKey, next ? "1" : "0");
+      } catch {
+        // 写入失败不影响本次开合。
+      }
+      return next;
+    });
+  }
+  return (
+    <div className={className ? `card collapsible ${className}` : "card collapsible"} data-open={open}>
+      <div className="card-header">
+        <button type="button" className="card-toggle" aria-expanded={open} aria-controls={bodyId} onClick={toggle}>
+          <span className="card-toggle-icon" aria-hidden="true" />
+          <span className="card-title">{title}</span>
+        </button>
+        {extra ? <div className="card-extra">{extra}</div> : null}
+      </div>
+      <div className="card-body" id={bodyId} hidden={!open}>{children}</div>
     </div>
   );
 }

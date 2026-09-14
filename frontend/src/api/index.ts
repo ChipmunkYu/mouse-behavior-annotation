@@ -47,6 +47,7 @@ import type {
   VideoImportBatch,
   VideoImportCompletion,
   AssignmentStats,
+  BehaviorStats,
   Membership,
   MembershipUpdateInput,
   Invite,
@@ -168,6 +169,11 @@ export function batchAssignVideos(projectId: number | string, video_ids: number[
 export function getAssignmentStats(projectId: number | string): Promise<AssignmentStats> {
   // 响应同时包含 unassigned（全部未分配）与 claimable（未分配草稿）。
   return apiFetch<AssignmentStats>(`/projects/${projectId}/assignment-stats`);
+}
+
+export function getBehaviorStats(projectId: number | string): Promise<BehaviorStats> {
+  // 行为级审核统计：每个类别一行，possible_total = approved + pending。
+  return apiFetch<BehaviorStats>(`/projects/${projectId}/behavior-stats`);
 }
 
 export function createVideo(projectId: number | string, input: VideoCreateInput): Promise<Video> {
