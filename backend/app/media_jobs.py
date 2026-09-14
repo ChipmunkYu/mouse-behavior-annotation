@@ -237,7 +237,7 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
         processor.render_clip(
             input_path=str(input_path),
             start=start,
-            end=end,
+            frames=annotation.end_frame - annotation.start_frame + 1,
             output_path=str(temp_clip),
         )
         mid = (start + end) / 2.0  # 缩略图取 inclusive 帧区间的时间中点
@@ -294,7 +294,7 @@ def render_submission_clip_files(processor, settings, submission: Submission,
             fps=snapshot.fps, frame_count=snapshot.frame_count,
             width=snapshot.width, height=snapshot.height, crop_region=annotation.crop_region)
         processor.render_clip(input_path=str(input_path), start=plan.start,
-                              end=plan.end, output_path=str(temp_clip), crop=plan.crop)
+                              frames=plan.frame_count, output_path=str(temp_clip), crop=plan.crop)
         processor.render_thumbnail(input_path=str(input_path), at=plan.thumbnail_at,
                                    output_path=str(temp_thumb), crop=plan.crop)
         os.replace(temp_clip, final_clip); created.append(final_clip)
@@ -616,6 +616,30 @@ def reset_interrupted_job_clips(db: Session, job: BackgroundJob) -> int:
     return reset
 
 
+def release_processing_clips(db: Session, submission_annotation_ids) -> int:
+    """Reset still-`processing` Clips for the given Submission annotations back to `pending`.
+
+    A failed job must never leave a zombie claim: a `processing` Clip whose owner died
+    can never be re-claimed and blocks retries forever. Returns the reset rowcount.
+    """
+    ids = list(submission_annotation_ids)
+    if not ids:
+        return 0
+    return db.query(Clip).filter(
+        Clip.submission_annotation_id.in_(ids), Clip.status == "processing"
+    ).update(
+        {
+            "status": "pending",
+            "clip_path": None,
+            "thumbnail_path": None,
+            "error": None,
+            "generated_at": None,
+            "updated_at": _now(),
+        },
+        synchronize_session=False,
+    )
+
+
 def enqueue_media_job(db: Session, video: Video, settings=None) -> BackgroundJob | None:
     """审核通过后自动入队（幂等）：创建 pending Clips + (重)入队媒体任务并提交。
 
@@ -819,7 +843,24 @@ class MediaWorker:
                     job.status = "queued"
                     job.started_at = None
                     job.error = "Interrupted; requeued at startup"
+            # At startup no claim owner can exist: the single media worker and the single
+            # export worker both finish this recovery before either schedules any job, so
+            # any surviving `processing` row is a stale claim that would otherwise block
+            # retries forever.
+            released = db.query(Clip).filter(Clip.status == "processing").update(
+                {
+                    "status": "pending",
+                    "clip_path": None,
+                    "thumbnail_path": None,
+                    "error": None,
+                    "generated_at": None,
+                    "updated_at": _now(),
+                },
+                synchronize_session=False,
+            )
             db.commit()
+            if released:
+                logger.info("Released %s stale processing Clip claim(s) at startup", released)
 
     # ---------- 任务执行 ----------
 
@@ -1061,6 +1102,8 @@ class MediaWorker:
             raise
         except Exception as exc:
             db.rollback()
+            # A failed job must never leave a zombie `processing` claim behind.
+            release_processing_clips(db, expected_ids)
             first_pending = next((clip for _annotation, clip in pairs
                                   if not clip_entities_ready(clip, self.settings)), None)
             if first_pending is not None:
@@ -1073,6 +1116,7 @@ class MediaWorker:
                 _cleanup_paths([staging], operation="remove Submission staging")
         job = db.get(BackgroundJob, job.id)
         if failures:
+            release_processing_clips(db, expected_ids)
             self._commit_terminal(db, job, "failed", error=_truncate_error(failures[0]))
         else:
             job.progress = 100

@@ -13,6 +13,7 @@ from .frame_intervals import canonical_frame_interval
 class SubmissionMediaPlan:
     start: float
     end: float
+    frame_count: int
     thumbnail_at: float
     crop: tuple[int, int, int, int] | None
     output_width: int
@@ -40,4 +41,5 @@ def build_submission_media_plan(*, start_time: float, end_time: float,
         if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > width or y + h > height:
             raise ValueError("invalid crop region")
         crop, out_width, out_height = (x, y, w, h), w, h
-    return SubmissionMediaPlan(start, end, (start + end) / 2, crop, out_width, out_height)
+    return SubmissionMediaPlan(start, end, interval.frame_count, (start + end) / 2, crop,
+                               out_width, out_height)

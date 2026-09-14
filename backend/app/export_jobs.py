@@ -236,6 +236,7 @@ class ExportWorker:
                     db.rollback()
                     self._record_cleanup_incomplete(job_id, exc)
                 except Exception as exc:
+                    logger.exception("Export job %s failed: %s", job_id, exc)
                     db.rollback(); job = db.get(BackgroundJob, job_id)
                     if job and job.status == "running":
                         if self.before_terminal_hook:

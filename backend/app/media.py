@@ -2,6 +2,8 @@
 
 - 命令一律以参数列表调用 subprocess，**绝不使用 shell=True**。
 - 输入源解析严格限制在配置的 videos_dir 内（越界 / 缺失 → MediaCommandError）。
+- 输出长度以帧数为准：`-frames:v <frames>` 精确产出 frames 帧（源多为 VFR，
+  按时间 `-t` 裁剪可能丢失末帧）。
 - 输出先写临时文件，由 worker 成功后原子替换；失败由 worker 清理半成品；
   stderr 截断写入错误字段。
 - 本机可能没有 ffmpeg：测试通过 `FakeMediaProcessor` / 其它替换实现注入，
@@ -48,10 +50,10 @@ class MediaProcessor(Protocol):
     """媒体执行器协议：测试可注入 FakeMediaProcessor / 其它替换实现。"""
 
     def render_clip(
-        self, *, input_path: str, start: float, end: float, output_path: str,
+        self, *, input_path: str, start: float, frames: int, output_path: str,
         crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        """把 input_path 的 [start, end) 秒片段重编码为 H.264 MP4 写至 output_path（临时文件）。"""
+        """把 input_path 从 start 秒起、共 frames 帧重编码为 H.264 MP4 写至 output_path（临时文件）。"""
 
     def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
                          crop: tuple[int, int, int, int] | None = None) -> None:
@@ -82,13 +84,15 @@ class FfmpegMediaProcessor:
         self.map_audio = map_audio
 
     def build_clip_command(
-        self, input_path: str, start: float, end: float, output_path: str,
+        self, input_path: str, start: float, frames: int, output_path: str,
         crop: tuple[int, int, int, int] | None = None,
     ) -> list[str]:
-        """精确重编码命令：-ss 定位 + -t 片长 + libx264 + yuv420p + faststart。"""
-        duration = end - start
-        if duration <= 0:
-            raise ValueError("clip end must be greater than start")
+        """精确重编码命令：-ss 定位 + -frames:v 帧数上限 + libx264 + yuv420p + faststart。
+
+        `-frames:v <frames>` 是输出长度权威；绝不使用 `-t`（按时间裁剪在 VFR 源上会丢末帧）。
+        """
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+            raise ValueError("clip frames must be a positive integer")
         cmd = [
             self.ffmpeg,
             "-y",
@@ -96,8 +100,6 @@ class FfmpegMediaProcessor:
             format_time(start),
             "-i",
             input_path,
-            "-t",
-            format_time(duration),
             "-map",
             "0:v:0",
             "-c:v",
@@ -120,6 +122,8 @@ class FfmpegMediaProcessor:
         if crop is not None:
             x, y, w, h = crop
             cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+        # Output length is authoritative in frames; -t must never appear.
+        cmd += ["-frames:v", str(frames)]
         # Worker outputs end in .mp4.part, so extension inference is intentionally unavailable.
         cmd += ["-f", "mp4", output_path]
         return cmd
@@ -200,10 +204,10 @@ class FfmpegMediaProcessor:
             raise MediaCommandError("ffprobe returned incomplete video properties") from exc
 
     def render_clip(
-        self, *, input_path: str, start: float, end: float, output_path: str,
+        self, *, input_path: str, start: float, frames: int, output_path: str,
         crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        self._run(self.build_clip_command(str(input_path), start, end, str(output_path), crop))
+        self._run(self.build_clip_command(str(input_path), start, frames, str(output_path), crop))
 
     def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
                          crop: tuple[int, int, int, int] | None = None) -> None:

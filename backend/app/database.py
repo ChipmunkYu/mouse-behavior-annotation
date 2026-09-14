@@ -34,6 +34,10 @@ def configure_engine(database_url: str) -> Engine:
         def _enable_sqlite_fk(dbapi_conn, _record):  # noqa: ANN001
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            # WAL removes reader/writer contention; busy_timeout turns "database is
+            # locked" into a bounded retry instead of an immediate OperationalError.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=15000")
             cursor.close()
 
     SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
