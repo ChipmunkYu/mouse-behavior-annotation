@@ -14,7 +14,7 @@ from ..export_jobs import (
     JOB_TYPE_EXPORT,
     ExportScheduleError,
     _resolve_within,
-    approved_rows,
+    asset_rows,
     enqueue_export_job,
     latest_export_job,
     schedule_export_job,
@@ -34,7 +34,7 @@ def _export_video_gate(
 ) -> Iterator[None]:
     category_ids = list(dict.fromkeys(body.category_ids or []))
     video_ids = sorted({submission.video_id for _annotation, submission, _clip
-                        in approved_rows(db, project_id, category_ids)})
+                        in asset_rows(db, project_id, category_ids)})
     if not video_ids:
         yield
         return
@@ -106,7 +106,7 @@ def export_status(
     category_ids = None
     if latest is not None:
         category_ids = (latest.payload or {}).get("category_ids") or None
-    rows = approved_rows(db, project_id, category_ids)
+    rows = asset_rows(db, project_id, category_ids)
     missing: list[MissingClipOut] = []
     ready = 0
     for annotation, submission, clip in rows:

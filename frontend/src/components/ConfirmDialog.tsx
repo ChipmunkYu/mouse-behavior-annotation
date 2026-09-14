@@ -3,6 +3,7 @@
  * - confirm(options) 返回 Promise<boolean>，确认 resolve(true)，取消 / Esc / 点击遮罩 resolve(false)
  * - 取消不会发出任何请求，由调用方决定后续动作
  * - 键盘可达：打开时焦点落在「取消」；Esc 取消；非危险操作 Enter 确认；关闭后焦点归还触发元素
+ * - dismissOnly：只渲染一个确认按钮的阻断提示，确认即关闭
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -13,6 +14,8 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** 危险操作：确认按钮使用红色（删除 / 退回等不可逆操作） */
   danger?: boolean;
+  /** 仅保留一个确认按钮的阻断提示：确认即关闭，无取消语义。 */
+  dismissOnly?: boolean;
 }
 
 /** 返回 [对话框元素, confirm 函数]；confirm 函数可在任意位置 await。 */
@@ -71,16 +74,24 @@ export function useConfirm(): [ReactNode, (options: ConfirmOptions) => Promise<b
           {options.message}
         </div>
         <div className="modal-actions">
-          <button type="button" className="btn" onClick={() => close(false)} autoFocus>
-            {options.cancelLabel ?? "取消"} [Esc]
-          </button>
-          <button
-            type="button"
-            className={options.danger ? "btn btn-danger" : "btn btn-primary"}
-            onClick={() => close(true)}
-          >
-            {options.confirmLabel ?? "确认"}{options.danger ? null : " [Enter]"}
-          </button>
+          {options.dismissOnly ? (
+            <button type="button" className="btn btn-primary" onClick={() => close(true)} autoFocus>
+              {options.confirmLabel ?? "知道了"} [Enter]
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn" onClick={() => close(false)} autoFocus>
+                {options.cancelLabel ?? "取消"} [Esc]
+              </button>
+              <button
+                type="button"
+                className={options.danger ? "btn btn-danger" : "btn btn-primary"}
+                onClick={() => close(true)}
+              >
+                {options.confirmLabel ?? "确认"}{options.danger ? null : " [Enter]"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -28,6 +28,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .behavior_review import approved_snapshots, find_canonical_clip
 from .media import MediaCommandError, MediaProcessor
 from .models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
 from .submission_service import validate_snapshot_integrity, validate_storage_key
@@ -632,28 +633,112 @@ def enqueue_media_job(db: Session, video: Video, settings=None) -> BackgroundJob
     return job
 
 
-def enqueue_submission_media(db: Session, submission: Submission) -> BackgroundJob:
-    """Create immutable-authority Clip and queued job rows; caller owns transaction."""
-    annotation_ids = [row[0] for row in db.query(SubmissionAnnotation.id).filter_by(
-        submission_id=submission.id).order_by(SubmissionAnnotation.id)]
-    for annotation_id in annotation_ids:
-        db.execute(sqlite_insert(Clip).values(
-            project_id=submission.video.project_id,
-            submission_annotation_id=annotation_id, status="pending", media_revision=1,
-        ).on_conflict_do_nothing(
-            index_elements=["submission_annotation_id"],
-            index_where=Clip.submission_annotation_id.is_not(None),
-        ))
-    key = submission_media_dedupe_key(submission.id)
+def _clip_has_unfinished_job(db: Session, clip: Clip) -> bool:
+    """True when the clip's owning submission has a queued/running job covering it."""
+    if clip.submission_annotation is None or clip.submission_annotation.submission is None:
+        return False
+    job = (db.query(BackgroundJob)
+           .filter_by(dedupe_key=submission_media_dedupe_key(clip.submission_annotation.submission_id))
+           .first())
+    if job is None or job.status not in {"queued", "running"}:
+        return False
+    ids = (job.payload or {}).get("submission_annotation_ids") or []
+    return clip.submission_annotation_id in ids
+
+
+def canonical_clip_reusable(db: Session, clip: Clip | None, settings) -> bool:
+    """An equivalent asset is reused only when it is already usable or in flight.
+
+    ``ready`` with both entities present is usable; ``pending``/``processing`` with an
+    unfinished owning job is in flight. A ``failed`` clip, or a ``ready`` clip whose
+    files vanished, must be regenerated rather than silently reused.
+    """
+    if clip is None:
+        return False
+    if settings is not None and clip_entities_ready(clip, settings):
+        return True
+    return clip.status in {"pending", "processing"} and _clip_has_unfinished_job(db, clip)
+
+
+def _upsert_submission_job(db: Session, submission_id: int, project_id: int,
+                           snapshot_ids) -> BackgroundJob:
+    """Idempotently create/requeue one submission-scoped media job for a snapshot set."""
+    key = submission_media_dedupe_key(submission_id)
+    requested = sorted(set(snapshot_ids))
+    payload = {"submission_id": submission_id, "submission_annotation_ids": requested}
     db.execute(sqlite_insert(BackgroundJob).values(
-        project_id=submission.video.project_id, job_type=JOB_TYPE_MEDIA, status="queued",
-        progress=0, dedupe_key=key,
-        payload={"submission_id": submission.id, "submission_annotation_ids": annotation_ids},
+        project_id=project_id, job_type=JOB_TYPE_MEDIA, status="queued",
+        progress=0, dedupe_key=key, payload=payload,
     ).on_conflict_do_nothing(index_elements=["dedupe_key"]))
     job = db.query(BackgroundJob).filter_by(dedupe_key=key).one()
-    if job.status in {"failed", "cancelled"}:
+    if job.status == "queued":
+        # A queued row may still carry an earlier reset subset. Merge so a worker that
+        # picks it up later cannot silently skip the newly required snapshot id.
+        existing = (job.payload or {}).get("submission_annotation_ids") or []
+        merged = sorted(set(existing) | set(requested))
+        if merged != existing:
+            job.payload = {"submission_id": submission_id, "submission_annotation_ids": merged}
+    elif job.status == "running":
+        # The running worker already froze its payload before claiming; rewriting it here
+        # would not be read. Recovery for an asset it cannot cover is the owning
+        # submission's media/generate retry (see routers/media.py).
+        pass
+    elif job.status in {"failed", "cancelled", "succeeded"}:
+        # No usable asset, or the previous run cannot be trusted (e.g. missing files):
+        # force a retry instead of reusing the row as-is, clearing stale timestamps.
         job.status, job.progress, job.error, job.attempts = "queued", 0, None, 0
+        job.started_at = None
+        job.finished_at = None
+        job.payload = payload
     return job
+
+
+def enqueue_submission_media(db: Session, submission: Submission,
+                             settings=None) -> list[BackgroundJob]:
+    """Create immutable-authority Clip rows and queued jobs for one published subset.
+
+    Canonical asset reuse only when the equivalent Clip is usable or in flight. When it
+    is not, the existing Clip's owning submission job is requeued (never a duplicate
+    Clip row), so the approved behavior still gets a generation/retry path. Snapshots
+    whose own Clip is newly created or needs (re)generation are listed in the owning
+    job payload; an empty set creates no job. Caller owns transaction.
+    """
+    targets: dict[int, dict] = {}
+
+    def require_generation(submission_id: int, project_id: int, snapshot_id: int) -> None:
+        entry = targets.setdefault(submission_id, {"project_id": project_id, "snapshot_ids": set()})
+        entry["snapshot_ids"].add(snapshot_id)
+
+    for snapshot in approved_snapshots(db, submission):
+        canonical = find_canonical_clip(db, snapshot)
+        if canonical is None:
+            db.execute(sqlite_insert(Clip).values(
+                project_id=submission.video.project_id,
+                submission_annotation_id=snapshot.id, status="pending", media_revision=1,
+            ).on_conflict_do_nothing(
+                index_elements=["submission_annotation_id"],
+                index_where=Clip.submission_annotation_id.is_not(None),
+            ))
+            require_generation(submission.id, submission.video.project_id, snapshot.id)
+            continue
+        if canonical.submission_annotation_id == snapshot.id:
+            # Same snapshot already owns an asset row; queue it only when it is unusable.
+            if settings is None or not clip_entities_ready(canonical, settings):
+                require_generation(submission.id, submission.video.project_id, snapshot.id)
+            continue
+        if canonical_clip_reusable(db, canonical, settings):
+            continue  # usable/in-flight historical asset: reuse, no transcode
+        owner = canonical.submission_annotation.submission
+        require_generation(owner.id, owner.video.project_id, canonical.submission_annotation_id)
+
+    jobs = [_upsert_submission_job(db, submission_id, entry["project_id"], entry["snapshot_ids"])
+            for submission_id, entry in targets.items()]
+    if not jobs:
+        existing = (db.query(BackgroundJob)
+                    .filter_by(dedupe_key=submission_media_dedupe_key(submission.id)).first())
+        if existing is not None:
+            jobs.append(existing)
+    return jobs
 
 
 # ---------- worker ----------
@@ -930,8 +1015,10 @@ class MediaWorker:
                 or any(isinstance(value, bool) or not isinstance(value, int) for value in expected_ids)
                 or expected_ids != sorted(set(expected_ids))):
             raise MediaCommandError("media job immutable annotation payload is invalid or duplicated")
-        if submission is None or submission.status not in {"approved", "superseded"}:
-            raise MediaCommandError("media job submission is missing or not approved")
+        # Terminal authority, not approval: a rejected submission may have published its
+        # approved subset. Runtime authority is the Clip rows plus immutable refs below.
+        if submission is None or submission.status not in {"approved", "rejected", "superseded"}:
+            raise MediaCommandError("media job submission is missing or not terminal")
         if submission.video.project_id != job.project_id:
             raise MediaCommandError("media job submission does not belong to job project")
         validate_snapshot_integrity(db, submission.detection_snapshot)

@@ -119,3 +119,22 @@ def test_export_multiple_annotations_ordered(ctx):
     assert [e["start_time"] for e in events] == [1.0, 10.0]
     assert events[0]["behavior"] == categories[0]["name"]
     assert events[1]["behavior"] == categories[1]["name"]
+
+
+def test_asset_rows_ignore_submission_status_and_require_clip(media_ctx):
+    """Published asset rows are keyed by Clip existence, not Submission.status."""
+    from app.export_jobs import asset_rows
+    from app.models import Clip, Submission
+
+    from tests.test_project_export import _approved
+
+    ctx = media_ctx
+    _headers, project, _categories, _video, _annotations = _approved(ctx)
+    with ctx.session_factory() as db:
+        assert len(asset_rows(db, project["id"], None)) == 1
+        db.query(Submission).one().status = "superseded"
+        db.commit()
+        assert len(asset_rows(db, project["id"], None)) == 1
+        db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).delete()
+        db.commit()
+        assert asset_rows(db, project["id"], None) == []

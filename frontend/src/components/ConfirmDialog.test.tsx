@@ -62,4 +62,20 @@ describe("useConfirm keyboard boundaries", () => {
     });
     expect(result).toBe(false);
   });
+
+  it("renders a single confirm button for a dismiss-only notice", async () => {
+    let result: boolean | undefined;
+    await act(async () => {
+      void openConfirm!({ title: "审核未完成", message: "还有未审核行为", confirmLabel: "知道了", dismissOnly: true }).then((value) => { result = value; });
+    });
+
+    const buttons = host.querySelectorAll<HTMLButtonElement>(".modal-actions button");
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].textContent).toContain("知道了");
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+    });
+    expect(result).toBe(true);
+  });
 });

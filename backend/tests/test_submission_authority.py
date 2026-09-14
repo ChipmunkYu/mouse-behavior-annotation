@@ -13,8 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.models import (Annotation, BackgroundJob, BehaviorCategory, Clip, DetectionImport,
-                         DetectionSnapshot, DetectionSnapshotState, RawDetection, Submission,
-                         SubmissionAnnotation, User)
+                         DetectionSnapshot, DetectionSnapshotState, RawDetection, Review,
+                         Submission, SubmissionAnnotation, User)
 from app import video_write_gate as gate_module
 from app import media_jobs as media_jobs_module
 from app.submission_service import delete_raw_baseline
@@ -88,31 +88,82 @@ def test_withdraw_vs_review_real_thread_race_has_one_clean_winner(ctx, login_hea
 
 
 def test_review_vs_review_real_thread_race_has_one_clean_winner(ctx, login_headers, monkeypatch):
-    headers, project, video, _annotation = _ready(ctx, login_headers)
+    headers, project, video, annotation = _ready(ctx, login_headers)
+    _annotate_with_mouse(ctx, headers, project, video, annotation["category_id"],
+                         start_time=0.04, mouse_ids=[2])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
     assert _submit(ctx, headers, project, video).status_code == 200
     url = f"/api/projects/{project['id']}/videos/{video['id']}/review"
     state = ctx.client.get(url + "-state", headers=reviewer_headers).json()
-    approved = ctx.client.put(
-        f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{state['submission_id']}/annotations/{state['annotations'][0]['id']}/decision",
-        json={"status": "approved", "expected_decision_revision": state["decision_revision"]},
-        headers=reviewer_headers)
-    assert approved.status_code == 200, approved.text
-    context = {"expected_submission_id": approved.json()["submission_id"],
-               "expected_decision_revision": approved.json()["decision_revision"]}
+    # Approve every behavior: a final approval requires all approved, and a video
+    # rejection requires a rejected behavior, so only same-result requests race here.
+    for row in state["annotations"]:
+        state = ctx.client.put(
+            f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{state['submission_id']}/annotations/{row['id']}/decision",
+            json={"status": "approved", "feedback": None,
+                  "expected_decision_revision": state["decision_revision"]},
+            headers=reviewer_headers).json()
+    context = {"expected_submission_id": state["submission_id"],
+               "expected_decision_revision": state["decision_revision"]}
     with TestClient(ctx.client.app) as left, TestClient(ctx.client.app) as right:
         responses = _race(monkeypatch,
                           lambda: left.post(url, json={"result": "approved", **context}, headers=reviewer_headers),
-                          lambda: right.post(url, json={"result": "rejected", **context}, headers=reviewer_headers))
+                          lambda: right.post(url, json={"result": "approved", **context}, headers=reviewer_headers))
     assert sorted(response.status_code for response in responses) == [200, 409]
     with ctx.session_factory() as db:
         submission = db.query(Submission).one()
         assert submission.status in {"approved", "rejected"}
         assert submission.attempt_no == 1
         assert submission.review is not None
-        expected = 1 if submission.status == "approved" else 0
-        assert db.query(Clip).count() == db.query(BackgroundJob).count() == expected
+        # The single winning approval publishes both approved behaviors.
+        assert db.query(BackgroundJob).count() == 1
+        assert db.query(Clip).count() == 2
+
+
+def test_review_gate_is_mutually_exclusive_without_state_change(ctx, login_headers):
+    """The approved and rejected gates are mutually exclusive on one submission."""
+    headers, project, video, annotation = _ready(ctx, login_headers)
+    _annotate_with_mouse(ctx, headers, project, video, annotation["category_id"],
+                         start_time=0.04, mouse_ids=[2])
+    _add_reviewer(ctx, project["id"])
+    reviewer_headers = login_headers(username="reviewer1", password="pw123")
+    assert _submit(ctx, headers, project, video).status_code == 200
+    base = f"/api/projects/{project['id']}/videos/{video['id']}"
+    state = ctx.client.get(base + "/review-state", headers=reviewer_headers).json()
+
+    def decide(index, status, feedback=None):
+        nonlocal state
+        state = ctx.client.put(
+            f"{base}/submissions/{state['submission_id']}/annotations/{state['annotations'][index]['id']}/decision",
+            json={"status": status, "feedback": feedback,
+                  "expected_decision_revision": state["decision_revision"]},
+            headers=reviewer_headers).json()
+
+    def review(result):
+        return ctx.client.post(base + "/review", json={"result": result,
+            "expected_submission_id": state["submission_id"],
+            "expected_decision_revision": state["decision_revision"]}, headers=reviewer_headers)
+
+    # All approved: a video rejection has no rejected behavior to justify it.
+    decide(0, "approved")
+    decide(1, "approved")
+    rejected = review("rejected")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "no_rejected_behavior"
+
+    # One rejected: final approval is incomplete.
+    decide(1, "rejected", "请修改")
+    approved = review("approved")
+    assert approved.status_code == 409
+    assert approved.json()["detail"]["code"] == "behavior_decisions_incomplete"
+
+    # Neither failed gate mutated terminal state or published assets.
+    with ctx.session_factory() as db:
+        assert db.query(Review).count() == 0
+        assert db.get(Submission, state["submission_id"]).status == "submitted"
+        assert db.query(Clip).count() == 0
+        assert db.query(BackgroundJob).count() == 0
 
 
 def test_submit_creates_immutable_authority_and_reuses_snapshot(ctx, login_headers):

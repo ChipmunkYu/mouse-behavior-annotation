@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import project_access
-from ..behavior_review import current_final_approval
 from ..media_jobs import (clip_entities_ready, enqueue_media_job, enqueue_submission_media,
                           media_dedupe_key, submission_media_dedupe_key)
 from ..models import Annotation, BackgroundJob, Clip, Submission, SubmissionAnnotation, Video
@@ -33,6 +32,17 @@ def _get_video_in_project(db: Session, project_id: int, video_id: int) -> Video:
     if video is None or video.project_id != project_id:
         raise HTTPException(status_code=404, detail="Video not found in this project")
     return video
+
+
+def _published_submission(db: Session, video_id: int) -> Submission | None:
+    """Latest attempt when it is a terminal publish result (approved or rejected).
+
+    A rejected submission may own published assets for its approved subset, so the
+    media surface must not be limited to final approvals.
+    """
+    latest = (db.query(Submission).filter_by(video_id=video_id)
+              .order_by(Submission.attempt_no.desc()).first())
+    return latest if latest is not None and latest.status in {"approved", "rejected"} else None
 
 
 def _to_job_out(job: BackgroundJob) -> JobOut:
@@ -63,7 +73,7 @@ def media_status(
 ) -> MediaStatusOut:
     """项目成员可读：当前修订的片段生成进度与该视频对应任务。"""
     video = _get_video_in_project(db, project_id, video_id)
-    submission = current_final_approval(db, video.id)
+    submission = _published_submission(db, video.id)
     revision = submission.source_media_revision if submission else video.media_revision
     clips = (
         db.query(Clip)
@@ -109,7 +119,7 @@ def generate_media(
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> JobOut:
-    """仅 approved 视频可触发；幂等或重试（见模块 docstring）。"""
+    """已发布资产（含终局 rejected 的 approved 子集）可触发；幂等或重试。"""
     membership = access[1]
     if not can_review(membership):
         raise HTTPException(
@@ -117,21 +127,31 @@ def generate_media(
             detail="Only owner/admin/reviewer can generate media",
         )
     video = _get_video_in_project(db, project_id, video_id)
-    submission = current_final_approval(db, video.id)
-    if submission is None and video.workflow_status != "approved":
+    submission = _published_submission(db, video.id)
+    if submission is not None:
+        jobs = enqueue_submission_media(db, submission, request.app.state.settings)
+        if not jobs:
+            raise HTTPException(status_code=400, detail="No published assets require media generation")
+        db.commit()
+        for item in jobs:
+            db.refresh(item)
+        job = next((item for item in jobs
+                    if item.dedupe_key == submission_media_dedupe_key(submission.id)), jobs[0])
+    elif video.workflow_status == "approved":
+        job = enqueue_media_job(db, video, request.app.state.settings)
+        if job is None:
+            raise HTTPException(status_code=400, detail="No media generation is required")
+        jobs = [job]
+    else:
         raise HTTPException(
             status_code=400,
-            detail="Only approved videos can generate media",
+            detail="Only approved videos or published assets can generate media",
         )
-    if submission is not None:
-        job = enqueue_submission_media(db, submission)
-        db.commit(); db.refresh(job)
-    else:
-        job = enqueue_media_job(db, video, request.app.state.settings)
-    try:
-        request.app.state.media_worker.schedule(job.id)
-    except Exception:
-        logger.exception("Schedule media job %s failed; queued row remains recoverable", job.id)
+    for item in jobs:
+        try:
+            request.app.state.media_worker.schedule(item.id)
+        except Exception:
+            logger.exception("Schedule media job %s failed; queued row remains recoverable", item.id)
     db.refresh(job)
     return _to_job_out(job)
 

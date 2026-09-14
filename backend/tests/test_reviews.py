@@ -160,9 +160,8 @@ def _review(ctx, headers, project, video, result, comment="ok"):
     state_url = f"/api/projects/{project['id']}/videos/{video['id']}/review-state"
     state = ctx.client.get(state_url, headers=headers)
     payload = state.json() if state.status_code == 200 else {}
-    if result == "approved":
-        if state.status_code == 200 and state.json()["submission_status"] == "submitted":
-            payload = state.json()
+    if state.status_code == 200 and payload.get("submission_status") == "submitted":
+        if result == "approved":
             for row in payload["annotations"]:
                 decision = ctx.client.put(
                     f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{payload['submission_id']}/annotations/{row['id']}/decision",
@@ -170,6 +169,17 @@ def _review(ctx, headers, project, video, result, comment="ok"):
                           "expected_decision_revision": payload["decision_revision"]}, headers=headers)
                 if decision.status_code != 200:
                     break
+                payload = decision.json()
+        elif result == "rejected" and not any(
+                (row.get("decision") or {}).get("status") == "rejected"
+                for row in payload["annotations"]):
+            # Release gate: a video rejection needs at least one rejected behavior.
+            row = payload["annotations"][0]
+            decision = ctx.client.put(
+                f"/api/projects/{project['id']}/videos/{video['id']}/submissions/{payload['submission_id']}/annotations/{row['id']}/decision",
+                json={"status": "rejected", "feedback": comment or "请修改",
+                      "expected_decision_revision": payload["decision_revision"]}, headers=headers)
+            if decision.status_code == 200:
                 payload = decision.json()
     return ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/review",
@@ -374,10 +384,17 @@ def test_submit_rejects_needs_mouse_ids(ctx, login_headers):
     assert resp.json()["detail"] == "1 annotation(s) still need valid mouse_ids before submission"
 
 
+def _clear_rejection(ctx, headers, project, video, annotation_id, confidence):
+    return ctx.client.patch(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations/{annotation_id}",
+        json={"confidence": confidence}, headers=headers,
+    )
+
+
 def test_submit_roles(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
-    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
 
     reviewer_id = _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
@@ -391,19 +408,21 @@ def test_submit_roles(ctx, login_headers):
     annotator_id = ctx.create_user("annot1")
     ctx.add_member(project["id"], annotator_id, role="annotator")
     annotator_headers = login_headers(username="annot1", password="pw123")
+    assert _clear_rejection(ctx, headers, project, video, ann["id"], "uncertain").status_code == 200
     assert _submit(ctx, annotator_headers, project, video).status_code == 200
 
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     admin_id = ctx.create_user("admin1")
     ctx.add_member(project["id"], admin_id, role="admin")
     admin_headers = login_headers(username="admin1", password="pw123")
+    assert _clear_rejection(ctx, headers, project, video, ann["id"], "occluded").status_code == 200
     assert _submit(ctx, admin_headers, project, video).status_code == 200
 
 
 def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
-    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
@@ -412,6 +431,8 @@ def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, lo
 
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     assert _video_state(ctx, video["id"])["workflow_status"] == "rejected"
+    # The rejected behavior must be materially modified before resubmission.
+    assert _clear_rejection(ctx, headers, project, video, ann["id"], "uncertain").status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 409
 
@@ -425,20 +446,22 @@ def test_submit_state_gate_draft_rejected_ok_submitted_approved_rejected(ctx, lo
 def test_submit_resubmit_resets_annotation_review_fields(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
-    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+    rejected = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+    pending = _annotate_with_mouse(ctx, headers, project, video, cat["id"], start_time=0.04, mouse_ids=[2])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     with ctx.session_factory() as db:
-        a = db.get(Annotation, ann["id"])
-        # Video-level rejection does not fabricate per-item legacy decisions.
-        assert a.review_status == "pending"
-        assert a.reviewer_id is None
+        # Explicit rejection projects onto the rejected behavior; a still-pending
+        # behavior is never fabricated into a rejection by the video-level result.
+        assert db.get(Annotation, rejected["id"]).review_status == "rejected"
+        assert db.get(Annotation, pending["id"]).review_status == "pending"
 
+    assert _clear_rejection(ctx, headers, project, video, rejected["id"], "uncertain").status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 200
-    assert _annotation_review_fields(ctx, video["id"]) == [("pending", None)]
+    assert _annotation_review_fields(ctx, video["id"]) == [("pending", None), ("pending", None)]
 
 
 def test_submit_cross_project_video_404(ctx, login_headers):
@@ -531,7 +554,7 @@ def test_queue_revalidates_nested_assignee_with_effective_manager_permission(
 def test_queue_excludes_rejected_and_approved(ctx, login_headers):
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
     cat = next((c for c in categories if c["mouse_count_min"] == 1 and c["mouse_count_max"] == 1), categories[0])
-    _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
+    ann = _annotate_with_mouse(ctx, headers, project, video, cat["id"], mouse_ids=[1])
     _add_reviewer(ctx, project["id"])
     reviewer_headers = login_headers(username="reviewer1", password="pw123")
 
@@ -541,6 +564,7 @@ def test_queue_excludes_rejected_and_approved(ctx, login_headers):
     assert _review(ctx, reviewer_headers, project, video, "rejected").status_code == 200
     assert _queue(ctx, headers, project).json() == []
 
+    assert _clear_rejection(ctx, headers, project, video, ann["id"], "uncertain").status_code == 200
     assert _submit(ctx, headers, project, video).status_code == 200
     assert _review(ctx, reviewer_headers, project, video, "approved").status_code == 200
     assert _queue(ctx, headers, project).json() == []
@@ -698,9 +722,11 @@ def test_review_reject_syncs_video_and_annotations(ctx, login_headers):
     assert state["submitted_at"] is not None
 
     with ctx.session_factory() as db:
+        # A video rejection now requires an explicit rejected behavior; the legacy
+        # projection follows that decision instead of being fabricated by the result.
         a = db.get(Annotation, ann["id"])
-        assert a.review_status == "pending"
-        assert a.reviewer_id is None
+        assert a.review_status == "rejected"
+        assert a.reviewer_id == reviewer_id
 
 
 def test_review_roles_and_state_gate(ctx, login_headers):

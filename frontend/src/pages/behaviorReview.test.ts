@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
 import { rejectedSubmitBlockerMessage, REVIEW_COMPARISON_LABELS } from "./AnnotatePage";
-import { behaviorDecisionAccess, behaviorDecisionRestriction, reviewSubmitBlockers, shouldClearBehaviorFocus } from "./ReviewPage";
+import { behaviorDecisionAccess, behaviorDecisionRestriction, resolvePublishOutcome, reviewSubmitBlockers, shouldClearBehaviorFocus } from "./ReviewPage";
 
 describe("behavior review errors", () => {
   const error = new ApiError(409, "conflict", {
@@ -48,5 +48,21 @@ describe("behavior review errors", () => {
     const direct = new ApiError(409, "conflict", { code: "rejected_annotations_not_addressed", items: [{ source_annotation_id: null, submission_annotation_id: 31, comparison: "unchanged" }] });
     expect(rejectedSubmitBlockerMessage(direct)).toBe("以下退回行为尚未处理，不能重新提交：标注 #31（未修改）");
     expect(reviewSubmitBlockers(direct)).toEqual([31]);
+  });
+});
+
+describe("video-level publish outcome", () => {
+  it("publishes rejection as soon as any behavior is rejected", () => {
+    expect(resolvePublishOutcome({ pending: 0, approved: 2, rejected: 1 })).toBe("rejected");
+    expect(resolvePublishOutcome({ pending: 3, approved: 0, rejected: 1 })).toBe("rejected");
+  });
+
+  it("publishes approval only when nothing is rejected or pending", () => {
+    expect(resolvePublishOutcome({ pending: 0, approved: 4, rejected: 0 })).toBe("approved");
+  });
+
+  it("blocks with an incomplete outcome when behaviors are still pending", () => {
+    expect(resolvePublishOutcome({ pending: 2, approved: 1, rejected: 0 })).toBe("incomplete");
+    expect(resolvePublishOutcome({ pending: 0, approved: 0, rejected: 0 })).toBe("incomplete");
   });
 });

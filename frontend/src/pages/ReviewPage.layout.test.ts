@@ -102,4 +102,17 @@ describe("review workspace layout", () => {
     expect(reviewSource).toContain("clearBehaviorNoticeTimer();");
     expect(reviewSource).toContain("current === dismissed ? null : current");
   });
+
+  it("exposes one video-level publish action and blocks incomplete reviews", () => {
+    const actions = reviewSource.slice(reviewSource.indexOf('className="review-actions"'), reviewSource.indexOf("审核历史（"));
+    expect(actions).toContain("发布审核结果");
+    expect(actions.match(/<button/g)).toHaveLength(2);
+    expect(reviewSource).not.toContain("退回视频");
+    expect(reviewSource).not.toContain("最终通过视频");
+    expect(reviewSource).not.toContain("最终通过");
+    expect(reviewSource).toContain("resolvePublishOutcome(reviewState.counts)");
+    expect(reviewSource).toContain('title: "审核未完成"');
+    expect(reviewSource).toContain("dismissOnly: true");
+    expect(reviewSource).toContain('confirmLabel: "发布审核结果"');
+  });
 });

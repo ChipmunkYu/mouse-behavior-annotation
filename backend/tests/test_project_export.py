@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import zipfile
+from datetime import datetime
 
 import pytest
 from sqlalchemy import text
@@ -66,6 +67,20 @@ def _remove_submission_clips(ctx):
                 if stored:
                     (root / stored).unlink(missing_ok=True)
             db.delete(clip)
+        db.commit()
+    return ids
+
+
+def _remove_submission_clip_files(ctx):
+    """Delete asset entities but keep the Clip rows: the published fact stays."""
+    with ctx.session_factory() as db:
+        clips = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).all()
+        ids = [clip.submission_annotation_id for clip in clips]
+        for clip in clips:
+            for stored, root in ((clip.clip_path, ctx.app.state.settings.clips_dir),
+                                 (clip.thumbnail_path, ctx.app.state.settings.thumbnails_dir)):
+                if stored:
+                    (root / stored).unlink(missing_ok=True)
         db.commit()
     return ids
 
@@ -346,10 +361,10 @@ def test_probe_mismatch_and_render_failure_publish_no_final(media_ctx):
     ctx.processor.probe_clip = original
 
 
-def test_missing_submission_clip_is_generated_before_packaging(media_ctx):
+def test_missing_submission_clip_entity_is_regenerated_before_packaging(media_ctx):
     ctx = media_ctx
     headers, project, _categories, _video, _annotations = _approved(ctx)
-    _remove_submission_clips(ctx)
+    _remove_submission_clip_files(ctx)  # Clip rows remain as published facts
     calls = len(ctx.processor.clip_calls)
     job = _export(ctx, project, headers)
     assert job["status"] == "succeeded"
@@ -357,6 +372,53 @@ def test_missing_submission_clip_is_generated_before_packaging(media_ctx):
     with ctx.session_factory() as db:
         clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
         assert clip.status == "ready"
+
+
+def test_missing_submission_clip_row_is_not_invented(media_ctx):
+    """Removing the published asset row must not let export fabricate a new one."""
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    _remove_submission_clips(ctx)
+    response = ctx.client.post(f"/api/projects/{project['id']}/export", json={}, headers=headers)
+    assert response.status_code == 400
+    with ctx.session_factory() as db:
+        assert db.query(BackgroundJob).filter_by(job_type="export").count() == 0
+        assert db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).count() == 0
+
+
+def _rejected_asset(ctx):
+    """Terminal rejected attempt that already published its approved subset.
+
+    Publish-on-rejected is owned by another lane; this reproduces its observable
+    DB state directly (submitted -> rejected is a legal lifecycle transition).
+    """
+    login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
+    headers, project, categories, video = _setup_video_with_import(ctx, login)
+    suitable = [c for c in categories if c["mouse_count_min"] <= 1 <= c["mouse_count_max"]]
+    _annotate_with_mouse(ctx, headers, project, video, suitable[0]["id"], mouse_ids=[1])
+    assert _submit(ctx, headers, project, video).status_code == 200
+    with ctx.session_factory() as db:
+        submission = db.query(Submission).filter_by(video_id=video["id"], status="submitted").one()
+        annotation = db.query(SubmissionAnnotation).filter_by(submission_id=submission.id).one()
+        submission.status = "rejected"
+        submission.decided_at = datetime.utcnow()
+        clip = Clip(submission_annotation_id=annotation.id, status="ready",
+                    clip_path="rejected_export.mp4", thumbnail_path="rejected_export.jpg")
+        ctx.app.state.settings.clips_dir.joinpath("rejected_export.mp4").write_bytes(b"CLIP")
+        ctx.app.state.settings.thumbnails_dir.joinpath("rejected_export.jpg").write_bytes(b"THUMB")
+        db.add(clip)
+        db.commit()
+    return headers, project
+
+
+def test_rejected_submission_asset_is_exportable(media_ctx):
+    """Submission.status must not gate export of an already-published asset."""
+    ctx = media_ctx
+    headers, project = _rejected_asset(ctx)
+    job = _export(ctx, project, headers)
+    assert job["status"] == "succeeded", repr(job)
+    directories, files = _clip_dirs(_archive(ctx, job))
+    assert len(directories) == 1 and {name.rsplit("/", 1)[1] for name in files} == FILES
 
 
 def test_current_export_startup_recovers_processing_clip_and_reruns(media_ctx):
@@ -445,7 +507,7 @@ def test_legacy_export_payload_processing_clip_recovery_compatibility(media_ctx)
 def test_render_failure_cleans_staging_and_never_publishes_final(media_ctx):
     ctx = media_ctx
     headers, project, _categories, _video, _annotations = _approved(ctx)
-    submission_annotation_id = _remove_submission_clips(ctx)[0]
+    submission_annotation_id = _remove_submission_clip_files(ctx)[0]
     ctx.processor.fail_clips.add(submission_annotation_id)
     job = _export(ctx, project, headers)
     assert job["status"] == "failed" and "result_path" not in job

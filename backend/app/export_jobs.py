@@ -1,4 +1,4 @@
-"""Atomic project ZIP export from immutable approved Submission authority."""
+"""Atomic project ZIP export from published submission-bound Clip assets."""
 from __future__ import annotations
 
 import json
@@ -50,14 +50,19 @@ def latest_export_job(db: Session, project_id: int) -> BackgroundJob | None:
         BackgroundJob.id.desc()).first()
 
 
-def approved_rows(db: Session, project_id: int, category_ids: list[int] | None,
-                  submission_annotation_ids: list[int] | None = None):
-    """Read only immutable current approved Submission copies (status API/enqueue only)."""
+def asset_rows(db: Session, project_id: int, category_ids: list[int] | None,
+               submission_annotation_ids: list[int] | None = None):
+    """Read published submission-bound Clip assets (status API/enqueue only).
+
+    Authority is the immutable ``Clip`` row bound to its ``SubmissionAnnotation``;
+    ``Submission.status`` is intentionally not filtered, so the approved subset of
+    a terminal ``rejected``/``superseded`` attempt remains exportable.
+    """
     query = (db.query(SubmissionAnnotation, Submission, Clip)
              .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
-             .outerjoin(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
+             .join(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
              .join(Video, Video.id == Submission.video_id)
-             .filter(Video.project_id == project_id, Submission.status == "approved"))
+             .filter(Video.project_id == project_id))
     if category_ids:
         query = query.filter(SubmissionAnnotation.category_id.in_(category_ids))
     if submission_annotation_ids is not None:
@@ -67,13 +72,13 @@ def approved_rows(db: Session, project_id: int, category_ids: list[int] | None,
 
 def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | None) -> BackgroundJob | None:
     requested = sorted(set(category_ids or []))
-    rows = approved_rows(db, project.id, requested or None)
-    # Empty means all concrete categories actually represented by approved immutable copies now.
+    rows = asset_rows(db, project.id, requested or None)
+    # Empty means all concrete categories actually represented by published assets now.
     represented = {annotation.category_id for annotation, _submission, _clip in rows}
     frozen_categories = requested if requested else sorted(represented)
     rows = [row for row in rows if row[0].category_id in represented]
     if not rows:
-        raise ValueError("No approved clips are eligible for export")
+        raise ValueError("No published clip assets are eligible for export")
     used_categories: set[str] = set()
     category_directories = {}
     category_tokens = {str(category_id): secrets.token_hex(16) for category_id in frozen_categories}
@@ -276,9 +281,12 @@ class ExportWorker:
         refs = payload.get("refs")
         if not isinstance(ids, list) or ids != list(dict.fromkeys(ids)) or len(refs or []) != len(ids):
             raise MediaCommandError("invalid immutable export reference set")
+        # Inner join the published asset: a snapshot without its own Clip is not a
+        # published fact and must fail rather than be invented here. Submission
+        # status is not re-gated; the frozen immutable reference set is authoritative.
         rows = (db.query(SubmissionAnnotation, Submission, Clip)
                 .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
-                .outerjoin(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
+                .join(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
                 .join(Video, Video.id == Submission.video_id)
                 .filter(Video.project_id == job.project_id, SubmissionAnnotation.id.in_(ids))
                 .order_by(SubmissionAnnotation.id).all()) if ids else []
@@ -288,9 +296,6 @@ class ExportWorker:
         refs_by_id = {ref.get("submission_annotation_id"): ref for ref in refs}
         for annotation_id in ids:
             annotation, submission, clip = by_id[annotation_id]; ref = refs_by_id.get(annotation_id, {})
-            # Superseded is allowed: it was approved at enqueue and immutable; never reselect current.
-            if submission.status not in {"approved", "superseded"}:
-                raise MediaCommandError("frozen Submission is no longer approved/superseded")
             if (ref.get("submission_id") != submission.id or ref.get("snapshot_id") != submission.detection_snapshot_id
                     or ref.get("source_media_revision") != submission.source_media_revision
                     or ref.get("source_sha256") != submission.source_video_sha256
@@ -308,9 +313,11 @@ class ExportWorker:
         return [by_id[item_id] for item_id in ids]
 
     def _ensure_clip(self, db, job, annotation, submission, clip, staged_source: Path) -> Path:
+        # A published asset must already exist as a Clip row. Never invent one here:
+        # doing so would fabricate a publication fact for a snapshot the publish
+        # transaction did not release. Only retry/repair the existing asset entity.
         if clip is None:
-            clip = Clip(submission_annotation_id=annotation.id, media_revision=1, status="pending")
-            db.add(clip); db.commit(); db.refresh(clip)
+            raise MediaCommandError("published asset Clip is missing; refusing to invent one")
         if not clip_entities_ready(clip, self.settings):
             return claim_and_render_submission_clip(db, self.processor, self.settings, submission.id,
                                                     annotation.id, clip.id, input_path=staged_source)[0]
