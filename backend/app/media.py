@@ -4,6 +4,8 @@
 - 输入源解析严格限制在配置的 videos_dir 内（越界 / 缺失 → MediaCommandError）。
 - 输出长度以帧数为准：`-frames:v <frames>` 精确产出 frames 帧（源多为 VFR，
   按时间 `-t` 裁剪可能丢失末帧）。
+- 输出帧率以调用方声明的 `fps` 为准：`-r <fps> -vsync 0` 声明帧率但不改帧时序；
+  `-vsync cfr` 会在 VFR 源上补/丢帧，故禁用，输出帧数仍由 `-frames:v` 决定。
 - 输出先写临时文件，由 worker 成功后原子替换；失败由 worker 清理半成品；
   stderr 截断写入错误字段。
 - 本机可能没有 ffmpeg：测试通过 `FakeMediaProcessor` / 其它替换实现注入，
@@ -12,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -51,9 +54,12 @@ class MediaProcessor(Protocol):
 
     def render_clip(
         self, *, input_path: str, start: float, frames: int, output_path: str,
-        crop: tuple[int, int, int, int] | None = None,
+        fps: float, crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        """把 input_path 从 start 秒起、共 frames 帧重编码为 H.264 MP4 写至 output_path（临时文件）。"""
+        """把 input_path 从 start 秒起、共 frames 帧重编码为 H.264 MP4 写至 output_path（临时文件）。
+
+        `fps` 为调用方声明的源帧率，输出必须显式声明该帧率且不补帧/丢帧（VFR 源）。
+        """
 
     def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
                          crop: tuple[int, int, int, int] | None = None) -> None:
@@ -85,14 +91,18 @@ class FfmpegMediaProcessor:
 
     def build_clip_command(
         self, input_path: str, start: float, frames: int, output_path: str,
-        crop: tuple[int, int, int, int] | None = None,
+        fps: float, crop: tuple[int, int, int, int] | None = None,
     ) -> list[str]:
         """精确重编码命令：-ss 定位 + -frames:v 帧数上限 + libx264 + yuv420p + faststart。
 
         `-frames:v <frames>` 是输出长度权威；绝不使用 `-t`（按时间裁剪在 VFR 源上会丢末帧）。
+        `-r <fps> -vsync 0` 把调用方声明的源帧率写入输出，同时透传源帧时序：`-vsync cfr`
+        会在 VFR 源上补帧/丢帧（改变帧数与内容），因此不使用。
         """
         if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
             raise ValueError("clip frames must be a positive integer")
+        if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or fps <= 0:
+            raise ValueError("clip fps must be finite and positive")
         cmd = [
             self.ffmpeg,
             "-y",
@@ -122,6 +132,11 @@ class FfmpegMediaProcessor:
         if crop is not None:
             x, y, w, h = crop
             cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+        # Declare the caller fps with -r but keep frame timing untouched (-vsync 0 /
+        # passthrough): cfr would pad or drop frames on VFR sources. Output length
+        # stays authoritative in frames. repr() keeps round-trip precision for
+        # non-integer source rates.
+        cmd += ["-r", repr(float(fps)), "-vsync", "0"]
         # Output length is authoritative in frames; -t must never appear.
         cmd += ["-frames:v", str(frames)]
         # Worker outputs end in .mp4.part, so extension inference is intentionally unavailable.
@@ -205,9 +220,10 @@ class FfmpegMediaProcessor:
 
     def render_clip(
         self, *, input_path: str, start: float, frames: int, output_path: str,
-        crop: tuple[int, int, int, int] | None = None,
+        fps: float, crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        self._run(self.build_clip_command(str(input_path), start, frames, str(output_path), crop))
+        self._run(self.build_clip_command(str(input_path), start, frames, str(output_path),
+                                          fps, crop))
 
     def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
                          crop: tuple[int, int, int, int] | None = None) -> None:

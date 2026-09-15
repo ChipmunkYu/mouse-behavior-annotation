@@ -239,6 +239,7 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
             start=start,
             frames=annotation.end_frame - annotation.start_frame + 1,
             output_path=str(temp_clip),
+            fps=video.fps,
         )
         mid = (start + end) / 2.0  # 缩略图取 inclusive 帧区间的时间中点
         processor.render_thumbnail(
@@ -294,7 +295,8 @@ def render_submission_clip_files(processor, settings, submission: Submission,
             fps=snapshot.fps, frame_count=snapshot.frame_count,
             width=snapshot.width, height=snapshot.height, crop_region=annotation.crop_region)
         processor.render_clip(input_path=str(input_path), start=plan.start,
-                              frames=plan.frame_count, output_path=str(temp_clip), crop=plan.crop)
+                              frames=plan.frame_count, output_path=str(temp_clip),
+                              crop=plan.crop, fps=snapshot.fps)
         processor.render_thumbnail(input_path=str(input_path), at=plan.thumbnail_at,
                                    output_path=str(temp_thumb), crop=plan.crop)
         os.replace(temp_clip, final_clip); created.append(final_clip)

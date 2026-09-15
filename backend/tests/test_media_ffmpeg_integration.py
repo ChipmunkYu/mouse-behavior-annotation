@@ -99,6 +99,41 @@ def test_real_submission_render_part_publish_and_probe(tmp_path, ffmpeg_path, ff
     assert not list(tmp_path.rglob("*.staging"))
 
 
+def test_real_render_pins_non_integer_declared_fps(tmp_path, ffmpeg_path, ffprobe_path):
+    """生产根因回归：非整数源 fps 渲染后 avg_frame_rate 不被量化、帧数仍精确。"""
+    ffmpeg, ffprobe = ffmpeg_path, ffprobe_path
+    source = tmp_path / "non-integer-source.mp4"
+    _run([
+        ffmpeg, "-y", "-f", "lavfi", "-i",
+        "testsrc=size=322x242:rate=30.012237198451:duration=1", "-an", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", "-f", "mp4", str(source),
+    ])
+    numerator, denominator = map(
+        int, _probe(ffprobe, source)["streams"][0]["avg_frame_rate"].split("/"))
+    declared_fps = numerator / denominator  # 与生产 snapshot.fps 同源的非整数帧率
+
+    settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
+    snapshot = SimpleNamespace(fps=declared_fps, frame_count=30, width=322, height=242)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    annotation = SimpleNamespace(id=9, submission_id=7, start_time=5 / declared_fps,
+                                 end_time=15 / declared_fps, start_frame=5, end_frame=14,
+                                 crop_region=None)
+    clip = SimpleNamespace(annotation_id=None, source_revision=None, clip_path=None,
+                           thumbnail_path=None, status="pending", error=None,
+                           generated_at=None, updated_at=None)
+    processor = FfmpegMediaProcessor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+                                     timeout_seconds=60, map_audio=False)
+
+    render_submission_clip_files(processor, settings, submission, annotation, clip,
+                                 input_path=source)
+
+    stream = _probe(ffprobe, settings.clips_dir / clip.clip_path)["streams"][0]
+    out_numerator, out_denominator = map(int, stream["avg_frame_rate"].split("/"))
+    assert int(stream["nb_read_frames"]) == 10  # exact frame_count behavior preserved
+    assert out_numerator / out_denominator == pytest.approx(declared_fps, rel=1e-9)
+    assert stream["avg_frame_rate"] != "30/1"  # integer quantization would regress the contract
+
+
 def test_real_clip_then_thumbnail_failure_publishes_no_final(tmp_path, ffmpeg_path):
     ffmpeg = ffmpeg_path
     source = tmp_path / "source.mp4"

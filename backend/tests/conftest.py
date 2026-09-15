@@ -163,6 +163,7 @@ class FakeMediaProcessor:
 
     def __init__(self) -> None:
         self.clip_calls: list[tuple[str, float, int, str]] = []
+        self.clip_fps: list[float] = []
         self.thumb_calls: list[tuple[str, float, str]] = []
         self.clip_crops: list[tuple | None] = []
         self.thumb_crops: list[tuple | None] = []
@@ -177,8 +178,10 @@ class FakeMediaProcessor:
         end = name.index("_rev", start)
         return int(name[start:end])
 
-    def render_clip(self, *, input_path: str, start: float, frames: int, output_path: str, crop=None) -> None:
+    def render_clip(self, *, input_path: str, start: float, frames: int, output_path: str,
+                    fps: float, crop=None) -> None:
         self.clip_calls.append((input_path, start, frames, output_path))
+        self.clip_fps.append(fps)
         self.clip_crops.append(crop)
         ann_id = self._annotation_id(output_path)
         if ann_id in self.fail_clips:

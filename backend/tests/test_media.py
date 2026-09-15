@@ -217,7 +217,7 @@ def test_format_time():
 
 def test_clip_command_is_argument_list_no_shell(monkeypatch):
     proc = _proc(crf=23, preset="veryfast", timeout_seconds=45)
-    cmd = proc.build_clip_command("C:/in.mp4", 1.5, 45, "C:/out.mp4")
+    cmd = proc.build_clip_command("C:/in.mp4", 1.5, 45, "C:/out.mp4", fps=25.0)
     assert cmd[0] == "ffmpeg"
     assert "-y" in cmd
     assert cmd[cmd.index("-ss") + 1] == "1.5"
@@ -243,7 +243,7 @@ def test_clip_command_is_argument_list_no_shell(monkeypatch):
         return sp.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
-    proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
+    proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["timeout"] == 45
     assert isinstance(captured["cmd"], list)
@@ -262,18 +262,18 @@ def test_thumbnail_command_is_argument_list():
 
 def test_optional_audio_mapping():
     proc = _proc(map_audio=True)
-    cmd = proc.build_clip_command("in.mp4", 0.0, 25, "out.mp4")
+    cmd = proc.build_clip_command("in.mp4", 0.0, 25, "out.mp4", fps=25.0)
     assert cmd.count("-map") == 2
     assert "0:v:0" in cmd and "0:a:0?" in cmd
     assert "-c:a" in cmd and "aac" in cmd[cmd.index("-c:a") + 1]
     assert "-an" not in cmd
     # 默认不映射音频
-    assert _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4").count("-map") == 1
-    assert "-an" in _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4")
+    assert _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4", fps=25.0).count("-map") == 1
+    assert "-an" in _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4", fps=25.0)
 
 
 def test_part_outputs_have_explicit_muxers_and_duration():
-    clip = _proc().build_clip_command("in.mp4", 1.25, 45, ".clip.mp4.part")
+    clip = _proc().build_clip_command("in.mp4", 1.25, 45, ".clip.mp4.part", fps=25.0)
     thumb = _proc().build_thumbnail_command("in.mp4", 2.0, ".thumb.jpg.part")
     assert clip[-3:] == ["-f", "mp4", ".clip.mp4.part"]
     assert "-t" not in clip and clip[clip.index("-frames:v") + 1] == "45"
@@ -282,15 +282,31 @@ def test_part_outputs_have_explicit_muxers_and_duration():
 
 @pytest.mark.parametrize("frames", [1, 10, 30, 238])
 def test_clip_command_frame_count_is_authoritative(frames):
-    cmd = _proc().build_clip_command("in.mp4", 1.5, frames, "out.mp4")
+    cmd = _proc().build_clip_command("in.mp4", 1.5, frames, "out.mp4", fps=25.0)
     assert "-t" not in cmd
     assert cmd[cmd.index("-frames:v") + 1] == str(frames)
+
+
+def test_clip_command_pins_declared_non_integer_fps_and_keeps_frame_limit():
+    """生产根因回归：非整数源 fps 必须显式声明且不补/丢帧，精确帧数不受影响。"""
+    fps = 30.012237198451
+    cmd = _proc().build_clip_command("in.mp4", 1.5, 45, "out.mp4", fps=fps)
+    assert cmd[cmd.index("-r") + 1] == "30.012237198451"
+    assert cmd[cmd.index("-vsync") + 1] == "0"  # cfr would pad/drop frames on VFR sources
+    assert cmd[cmd.index("-frames:v") + 1] == "45"
+    assert "-t" not in cmd
+
+
+@pytest.mark.parametrize("fps", [0, -1, True, "30", float("nan"), float("inf")])
+def test_clip_command_rejects_non_positive_or_nonfinite_fps(fps):
+    with pytest.raises(ValueError):
+        _proc().build_clip_command("in.mp4", 0.0, 25, "out.mp4", fps=fps)
 
 
 @pytest.mark.parametrize("frames", [0, -1, 1.5, True, "10"])
 def test_clip_command_rejects_non_positive_or_non_integer_frames(frames):
     with pytest.raises(ValueError):
-        _proc().build_clip_command("in.mp4", 0.0, frames, "out.mp4")
+        _proc().build_clip_command("in.mp4", 0.0, frames, "out.mp4", fps=25.0)
 
 
 def test_sqlite_engine_enables_wal_and_busy_timeout(tmp_path):
@@ -313,7 +329,7 @@ def test_media_error_truncates_stderr(monkeypatch):
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
     with pytest.raises(MediaCommandError) as exc:
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
     msg = str(exc.value)
     assert "Media command failed (exit 1)" in msg
     assert "truncated" in msg
@@ -330,13 +346,13 @@ def test_media_command_timeout(monkeypatch):
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
     with pytest.raises(MediaCommandError, match="timed out after 5s"):
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
 
 
 def test_missing_executable_reports_clearly():
     proc = _proc(ffmpeg_path="definitely-not-a-real-ffmpeg-binary-xyz123")
     with pytest.raises(MediaCommandError, match="Media executable not found"):
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4")
+        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
 
 
 # ---------- 自动入队 / 生成 / 状态 ----------
@@ -656,6 +672,7 @@ def test_processor_receives_resolved_input_and_times(media_ctx):
     assert Path(input_path) == (videos_dir / "src.mp4").resolve()
     assert start == pytest.approx(anns[0]["start_frame"] / video["fps"])
     assert frames == anns[0]["end_frame"] - anns[0]["start_frame"] + 1
+    assert ctx.processor.clip_fps[0] == video["fps"]  # 普通视频路径钉住 video.fps
 
 
 def test_render_submission_clip_files_passes_inclusive_frame_count(tmp_path):
@@ -665,7 +682,8 @@ def test_render_submission_clip_files_passes_inclusive_frame_count(tmp_path):
 
     processor = FakeMediaProcessor()
     settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
-    snapshot = SimpleNamespace(fps=25.0, frame_count=100, width=1280, height=720)
+    snapshot_fps = 30.012237198451
+    snapshot = SimpleNamespace(fps=snapshot_fps, frame_count=100, width=1280, height=720)
     submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
     annotation = SimpleNamespace(id=9, submission_id=7, start_time=1.0, end_time=3.0,
                                  start_frame=25, end_frame=74, crop_region=None)
@@ -677,8 +695,9 @@ def test_render_submission_clip_files_passes_inclusive_frame_count(tmp_path):
                                            input_path=tmp_path / "in.mp4")
 
     _input, start, frames, _output = processor.clip_calls[0]
-    assert start == pytest.approx(25 / 25.0)
+    assert start == pytest.approx(25 / snapshot_fps)
     assert frames == 74 - 25 + 1  # inclusive frame range
+    assert processor.clip_fps[0] == snapshot_fps  # submission 路径钉住 snapshot.fps
     assert clip.status == "ready" and len(created) == 2
 
 
