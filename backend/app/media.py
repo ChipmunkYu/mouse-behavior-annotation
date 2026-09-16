@@ -6,6 +6,9 @@
   按时间 `-t` 裁剪可能丢失末帧）。
 - 输出帧率以调用方声明的 `fps` 为准：`-r <fps> -vsync 0` 声明帧率但不改帧时序；
   `-vsync cfr` 会在 VFR 源上补/丢帧，故禁用，输出帧数仍由 `-frames:v` 决定。
+- 视频滤镜链末尾追加 `setpts=N/(<fps>*TB)`，把第 0 帧 PTS 归零、相邻帧间隔钉为
+  1/fps，使容器时长满足 canonical frame/fps 时间轴（源 PTS 透传会让容器时长漂移，
+  触发导出契约 `ffprobe duration mismatch`）。
 - 输出先写临时文件，由 worker 成功后原子替换；失败由 worker 清理半成品；
   stderr 截断写入错误字段。
 - 本机可能没有 ffmpeg：测试通过 `FakeMediaProcessor` / 其它替换实现注入，
@@ -98,6 +101,9 @@ class FfmpegMediaProcessor:
         `-frames:v <frames>` 是输出长度权威；绝不使用 `-t`（按时间裁剪在 VFR 源上会丢末帧）。
         `-r <fps> -vsync 0` 把调用方声明的源帧率写入输出，同时透传源帧时序：`-vsync cfr`
         会在 VFR 源上补帧/丢帧（改变帧数与内容），因此不使用。
+        视频滤镜链末尾的 `setpts=N/(<fps>*TB)` 把第 0 帧 PTS 归零、相邻帧间隔钉为
+        1/fps，使容器时长等于 frames/fps；仅透传源 PTS 会让容器时长漂移（生产 clip 1014
+        55 帧 @ 30.012442789554914 fps → 1.866s，超出导出契约的一帧容差）。
         """
         if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
             raise ValueError("clip frames must be a positive integer")
@@ -131,7 +137,13 @@ class FfmpegMediaProcessor:
             cmd += ["-an"]
         if crop is not None:
             x, y, w, h = crop
-            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+            filters = [f"crop={w}:{h}:{x}:{y}"]
+        else:
+            filters = []
+        # Pin the canonical frame/fps timeline: frame N lands at N/fps so the
+        # container duration equals frames/fps instead of drifting with source PTS.
+        filters.append(f"setpts=N/({repr(float(fps))}*TB)")
+        cmd += ["-vf", ",".join(filters)]
         # Declare the caller fps with -r but keep frame timing untouched (-vsync 0 /
         # passthrough): cfr would pad or drop frames on VFR sources. Output length
         # stays authoritative in frames. repr() keeps round-trip precision for

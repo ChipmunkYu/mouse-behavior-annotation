@@ -297,6 +297,19 @@ def test_clip_command_pins_declared_non_integer_fps_and_keeps_frame_limit():
     assert "-t" not in cmd
 
 
+@pytest.mark.parametrize("crop", [None, (10, 12, 300, 200)])
+def test_clip_command_pins_canonical_frame_timeline(crop):
+    """生产根因回归：setpts 把第 0 帧 PTS 归零、间隔钉为 1/fps，容器时长不随源 PTS 漂移。"""
+    fps = 30.012442789554914
+    cmd = _proc().build_clip_command("in.mp4", 1.5, 55, "out.mp4", fps=fps, crop=crop)
+    filters = cmd[cmd.index("-vf") + 1].split(",")
+    assert filters[-1] == f"setpts=N/({repr(float(fps))}*TB)"
+    assert filters[:-1] == (["crop=300:200:10:12"] if crop else [])
+    assert cmd[cmd.index("-vsync") + 1] == "0"
+    assert cmd[cmd.index("-frames:v") + 1] == "55"
+    assert "-t" not in cmd
+
+
 @pytest.mark.parametrize("fps", [0, -1, True, "30", float("nan"), float("inf")])
 def test_clip_command_rejects_non_positive_or_nonfinite_fps(fps):
     with pytest.raises(ValueError):

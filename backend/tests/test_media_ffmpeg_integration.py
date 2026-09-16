@@ -134,6 +134,49 @@ def test_real_render_pins_non_integer_declared_fps(tmp_path, ffmpeg_path, ffprob
     assert stream["avg_frame_rate"] != "30/1"  # integer quantization would regress the contract
 
 
+def test_real_render_pins_container_duration_to_canonical_timeline(
+        tmp_path, ffmpeg_path, ffprobe_path):
+    """生产根因回归：透传源 PTS 会让容器时长漂移出 canonical frame/fps 时间轴。
+
+    源按 30 fps 网格编码，声明时间轴为 32 fps。旧命令 `-vsync 0` 透传源 PTS，容器时长
+    约为 frames/30，超出 `abs=1/declared_fps` 的一帧容差；`setpts=N/(fps*TB)` 把第 0 帧
+    PTS 归零、相邻帧间隔钉为 1/declared_fps，时长精确回到 frames/declared_fps。
+    生产 clip 1014 的漂移只有约一帧量级（源网格 30 fps vs 声明 30.012442789554914 fps），
+    这里刻意放大网格差异以便在小样本上稳定复现同一根因。
+    """
+    ffmpeg, ffprobe = ffmpeg_path, ffprobe_path
+    source = tmp_path / "duration-drift-source.mp4"
+    _source(ffmpeg, source, 30)
+    declared_fps, frames, start_frame = 32.0, 55, 46
+
+    settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
+    snapshot = SimpleNamespace(fps=declared_fps, frame_count=frames, width=322, height=242)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    annotation = SimpleNamespace(
+        id=9, submission_id=7, start_time=start_frame / declared_fps,
+        end_time=(start_frame + frames - 1) / declared_fps, start_frame=start_frame,
+        end_frame=start_frame + frames - 1, crop_region=None)
+    clip = SimpleNamespace(annotation_id=None, source_revision=None, clip_path=None,
+                           thumbnail_path=None, status="pending", error=None,
+                           generated_at=None, updated_at=None)
+    processor = FfmpegMediaProcessor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+                                     timeout_seconds=60, map_audio=False)
+
+    render_submission_clip_files(processor, settings, submission, annotation, clip,
+                                 input_path=source)
+
+    probed = _probe(ffprobe, settings.clips_dir / clip.clip_path)
+    stream, media_format = probed["streams"][0], probed["format"]
+    assert int(stream["nb_read_frames"]) == frames  # exact frame_count preserved
+    numerator, denominator = map(int, stream["avg_frame_rate"].split("/"))
+    assert numerator / denominator == pytest.approx(declared_fps, rel=1e-9)  # fps contract
+    tolerance = 1 / declared_fps + 1e-6
+    assert float(media_format["duration"]) == pytest.approx(
+        frames / declared_fps, abs=tolerance)  # canonical N/fps duration
+    # The pre-fix passthrough value (frames/30) is what used to trip `ffprobe duration mismatch`.
+    assert abs(float(media_format["duration"]) - frames / 30) > tolerance
+
+
 def test_real_clip_then_thumbnail_failure_publishes_no_final(tmp_path, ffmpeg_path):
     ffmpeg = ffmpeg_path
     source = tmp_path / "source.mp4"
