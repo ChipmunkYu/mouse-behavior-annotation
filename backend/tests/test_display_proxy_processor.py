@@ -151,11 +151,27 @@ def test_source_timestamp_validation_accepts_short_vfr_intervals(interval):
 
 
 @pytest.mark.parametrize("interval", [0.251, 0.013])
-def test_source_timestamp_validation_rejects_interval_outside_vfr_bounds(interval):
-    with pytest.raises(UnsupportedDisplaySource, match="VFR bounds"):
+def test_source_timestamp_validation_accepts_interval_outside_vfr_bounds(interval):
+    DisplayProxyProcessor._validate_timestamps(
+        _timestamps_with_interval(interval), (30.0, 10.0, 300),
+        time_base=1 / 15360, output=False, nominal_fps=30.0,
+    )
+
+
+@pytest.mark.parametrize("interval", [0.251, 0.013])
+def test_output_timestamp_validation_rejects_interval_outside_vfr_bounds(interval):
+    with pytest.raises(DisplayProxyError, match="VFR bounds"):
         DisplayProxyProcessor._validate_timestamps(
             _timestamps_with_interval(interval), (30.0, 10.0, 300),
-            time_base=1 / 15360, output=False, nominal_fps=30.0,
+            time_base=1 / 15360, output=True, nominal_fps=30.0,
+        )
+
+
+def test_output_timestamp_validation_rejects_timeline_duration_difference():
+    with pytest.raises(DisplayProxyError, match="timestamps and duration"):
+        DisplayProxyProcessor._validate_timestamps(
+            _timestamps(), (30.0, 20.0, 300),
+            time_base=1 / 15360, output=True,
         )
 
 
@@ -218,12 +234,46 @@ def test_render_probes_transcodes_then_fully_decodes(monkeypatch):
     assert calls[2][-4:] == ["0:v:0", "-f", "null", "-"]
 
 
-def test_render_rejects_source_timestamp_timeline_inconsistency(monkeypatch):
+def test_render_accepts_source_timestamp_timeline_inconsistency(monkeypatch):
     processor = DisplayProxyProcessor()
-    monkeypatch.setattr(processor, "probe", lambda _path: _probe(duration="20.0"))
-    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: _timestamps())
-    with pytest.raises(UnsupportedDisplaySource, match="timestamps and duration"):
+    documents = iter([_probe(duration="20.0"), _probe()])
+    timestamps = iter([_timestamps(), _timestamps()])
+    calls = []
+    monkeypatch.setattr(processor, "probe", lambda _path: next(documents))
+    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: next(timestamps))
+    monkeypatch.setattr(processor, "_run", lambda command, *paths: calls.append(command))
+    monkeypatch.setattr(processor, "_validate_faststart", lambda _path: None)
+    processor.render(input_path="in.mp4", output_path="out.part")
+    assert calls[0] == processor.transcode_command("in.mp4", "out.part", "30/1")
+
+
+def test_render_rejects_non_monotonic_source_before_transcode(monkeypatch):
+    values = list(_timestamps())
+    values[100] = values[99]
+    processor = DisplayProxyProcessor()
+    calls = []
+    monkeypatch.setattr(processor, "probe", lambda _path: _probe())
+    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: tuple(values))
+    monkeypatch.setattr(processor, "_run", lambda command, *paths: calls.append(command))
+    with pytest.raises(UnsupportedDisplaySource, match="strictly monotonic"):
         processor.render(input_path="in.mp4", output_path="out.part")
+    assert calls == []
+
+
+def test_render_transcodes_source_with_out_of_bounds_interval_and_timeline_gap(monkeypatch):
+    processor = DisplayProxyProcessor()
+    source = _probe(duration="20.0")
+    documents = iter([source, _probe()])
+    timestamps = iter([_timestamps_with_interval(0.251), _timestamps()])
+    calls = []
+    monkeypatch.setattr(processor, "probe", lambda _path: next(documents))
+    monkeypatch.setattr(processor, "probe_frame_timestamps", lambda _path: next(timestamps))
+    monkeypatch.setattr(processor, "_run", lambda command, *paths: calls.append(command))
+    monkeypatch.setattr(processor, "_validate_faststart", lambda _path: calls.append(["faststart", _path]))
+    processor.render(input_path="in.mp4", output_path="out.part")
+    assert calls[0] == processor.transcode_command("in.mp4", "out.part", "30/1")
+    assert calls[1] == ["faststart", "out.part"]
+    assert calls[2][-4:] == ["0:v:0", "-f", "null", "-"]
 
 
 @pytest.mark.parametrize(("output", "message"), [

@@ -258,12 +258,15 @@ class DisplayProxyProcessor:
             interval = current - previous
             if interval <= 0:
                 raise error("media frame timestamps are not strictly monotonic")
-            if interval < minimum_interval or interval > maximum_interval:
+            # Source VFR may legitimately exceed these bounds; only the output is
+            # required to be a bounded, timeline-consistent CFR stream.
+            if output and (interval < minimum_interval or interval > maximum_interval):
                 raise error("media frame timestamp interval is outside the supported 30fps VFR bounds")
             previous = current
-        timeline_duration = timestamps[-1] - timestamps[0]
-        if abs(duration - timeline_duration) > expected + tolerance:
-            raise error("media timestamps and duration differ by more than one frame")
+        if output:
+            timeline_duration = timestamps[-1] - timestamps[0]
+            if abs(duration - timeline_duration) > expected + tolerance:
+                raise error("media timestamps and duration differ by more than one frame")
 
     @staticmethod
     def _validate_ordinal_timestamps(timestamps: tuple[float, ...], *, frame_count: int,
