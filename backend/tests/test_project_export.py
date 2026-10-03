@@ -6,6 +6,7 @@ import re
 import shutil
 import zipfile
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -14,7 +15,7 @@ from app.export_contract import (FILES, TracksSummary, safe_part, transform_dete
                                  validate_clip_directory)
 from app.media import MediaCommandError
 from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, reset_interrupted_job_clips
-from app.export_jobs import export_dedupe_key
+from app.export_jobs import ExportWorker, export_dedupe_key
 from app.models import (Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission,
                         SubmissionAnnotation)
 from tests.conftest import auth_headers
@@ -260,10 +261,61 @@ def test_independent_consumer_relative_frames_empty_frames_and_no_forbidden_fiel
     assert [frame["frame"] for frame in tracks] == list(range(len(tracks)))
     assert all(frame["time"] == pytest.approx(frame["frame"] / metadata["clip"]["fps"])
                for frame in tracks)
-    assert annotation["frame_range"] == {"start": 0, "end": len(tracks) - 1}
+    assert annotation["frame_range"] == {"start": 0, "end": 1}
+    assert annotation["time_range"] == {"start": 0.0, "end": pytest.approx(2 / 25)}
+    assert metadata["schema_version"] == "2.0"
+    assert metadata["clip"]["frame_count"] == len(tracks) == 5
+    assert metadata["source"]["clip"]["start_frame"] == 0
+    assert metadata["source"]["clip"]["end_frame"] == 4
+    assert metadata["source"]["annotation"]["start_frame"] == 0
+    assert metadata["source"]["annotation"]["end_frame"] == 1
     serialized = json.dumps([annotation, tracks, metadata]).lower()
     assert not any(term in serialized for term in ("annotation_id", "submission_id", "reviewer",
                                                     "annotator", "storage_key", "sha256"))
+
+
+class _NeighborQuery:
+    def __init__(self, neighbors): self.neighbors = neighbors
+    def filter(self, *args): return self
+    def all(self): return self.neighbors
+
+
+class _NeighborDb:
+    def __init__(self, neighbors=()): self.neighbors = neighbors
+    def query(self, _model): return _NeighborQuery(self.neighbors)
+
+
+def _range_annotation(**overrides):
+    values = {"id": 1, "submission_id": 7, "category_id": 9, "start_frame": 100,
+              "end_frame": 129, "mouse_ids": [1]}
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_export_range_adds_one_second_and_truncates_at_video_boundaries():
+    submission = SimpleNamespace(id=7, detection_snapshot=SimpleNamespace(fps=30.0, frame_count=300))
+    assert ExportWorker._export_range(_NeighborDb(), _range_annotation(), submission) == (70, 159)
+    assert ExportWorker._export_range(_NeighborDb(), _range_annotation(start_frame=5, end_frame=20), submission) == (0, 50)
+    assert ExportWorker._export_range(_NeighborDb(), _range_annotation(start_frame=280, end_frame=290), submission) == (250, 299)
+
+
+def test_export_range_stops_outside_adjacent_same_category_shared_mouse_annotations():
+    submission = SimpleNamespace(id=7, detection_snapshot=SimpleNamespace(fps=30.0, frame_count=300))
+    neighbors = [_range_annotation(id=2, start_frame=75, end_frame=89, mouse_ids=[1, 2]),
+                 _range_annotation(id=3, start_frame=140, end_frame=150, mouse_ids=[1]),
+                 _range_annotation(id=4, start_frame=95, end_frame=99, mouse_ids=[8])]
+    assert ExportWorker._export_range(_NeighborDb(neighbors), _range_annotation(), submission) == (90, 139)
+
+
+def test_export_renders_extended_clip_from_staged_source(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, _video, _annotations = _approved(ctx)
+    job = _export(ctx, project, headers)
+    assert job["status"] == "succeeded"
+    input_path, start, frames, _output = ctx.processor.clip_calls[-1]
+    assert ".submission-media-job-" in input_path and input_path.endswith(".staging")
+    assert start == 0
+    assert frames == 5
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -368,7 +420,7 @@ def test_missing_submission_clip_entity_is_regenerated_before_packaging(media_ct
     calls = len(ctx.processor.clip_calls)
     job = _export(ctx, project, headers)
     assert job["status"] == "succeeded"
-    assert len(ctx.processor.clip_calls) == calls + 1
+    assert len(ctx.processor.clip_calls) == calls + 2
     with ctx.session_factory() as db:
         clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
         assert clip.status == "ready"
@@ -480,7 +532,7 @@ def test_exhausted_submission_media_recovery_allows_export_to_reclaim_clip(media
     calls = len(ctx.processor.clip_calls)
     replacement = _export(ctx, project, headers)
     assert replacement["status"] == "succeeded"
-    assert len(ctx.processor.clip_calls) == calls + 1
+    assert len(ctx.processor.clip_calls) == calls + 2
     with ctx.session_factory() as db:
         clip = db.get(Clip, clip_id)
         assert clip.status == "ready"

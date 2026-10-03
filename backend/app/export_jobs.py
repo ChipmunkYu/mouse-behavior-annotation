@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import secrets
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -327,7 +328,8 @@ class ExportWorker:
             raise MediaCommandError("ready Submission Clip path is unsafe or missing")
         return path
 
-    def _write_tracks(self, db, annotation, submission, plan, path: Path):
+    def _write_tracks_range(self, db, annotation, submission, plan, path: Path,
+                            start_frame: int, end_frame: int):
         snapshot = submission.detection_snapshot
         valid_ids = {int(row[0]) for row in db.query(func.coalesce(
             DetectionSnapshotState.display_track_id, RawDetection.raw_track_id))
@@ -338,14 +340,14 @@ class ExportWorker:
             .filter(RawDetection.detection_import_id == snapshot.detection_import_id,
                     func.coalesce(DetectionSnapshotState.suppressed, False) == False).distinct()}
         query = effective_detection_query(db, snapshot.detection_import_id,
-            start_frame=annotation.start_frame, end_frame=annotation.end_frame,
+            start_frame=start_frame, end_frame=end_frame,
             snapshot_id=snapshot.id).order_by(RawDetection.frame_index, RawDetection.frame_detection_index,
                                                RawDetection.id).yield_per(500)
         iterator = iter(query); current = next(iterator, None)
         with path.open("w", encoding="utf-8") as fh:
             fh.write("[")
-            for relative in range(annotation.end_frame - annotation.start_frame + 1):
-                absolute = annotation.start_frame + relative; detections = []
+            for relative in range(end_frame - start_frame + 1):
+                absolute = start_frame + relative; detections = []
                 while current is not None and current[0].frame_index == absolute:
                     item = transform_detection(current[0], current.display_track_id, plan.crop,
                                                plan.output_width, plan.output_height)
@@ -359,21 +361,50 @@ class ExportWorker:
                 json.dump(frame, fh, ensure_ascii=False, separators=(",", ":"))
             fh.write("]")
         from .export_contract import TracksSummary
-        return TracksSummary(annotation.end_frame - annotation.start_frame + 1, frozenset(valid_ids))
+        return TracksSummary(end_frame - start_frame + 1, frozenset(valid_ids))
 
-    def _write_item(self, db, annotation, submission, clip_path: Path, target: Path) -> None:
+    @staticmethod
+    def _export_range(db, annotation, submission) -> tuple[int, int]:
         snapshot = submission.detection_snapshot
-        plan = build_submission_media_plan(start_time=annotation.start_time, end_time=annotation.end_time,
-            start_frame=annotation.start_frame, end_frame=annotation.end_frame, fps=snapshot.fps,
+        padding = round(snapshot.fps)
+        start = max(0, annotation.start_frame - padding)
+        end = min(snapshot.frame_count - 1, annotation.end_frame + padding)
+        mouse_ids = set(annotation.mouse_ids)
+        neighbors = (db.query(SubmissionAnnotation)
+                     .filter(SubmissionAnnotation.submission_id == submission.id,
+                             SubmissionAnnotation.category_id == annotation.category_id,
+                             SubmissionAnnotation.id != annotation.id).all())
+        for neighbor in neighbors:
+            if not mouse_ids.intersection(neighbor.mouse_ids):
+                continue
+            if neighbor.end_frame < annotation.start_frame and neighbor.end_frame >= start:
+                start = max(start, neighbor.end_frame + 1)
+            if neighbor.start_frame > annotation.end_frame and neighbor.start_frame <= end:
+                end = min(end, neighbor.start_frame - 1)
+        return start, end
+
+    def _write_item(self, db, annotation, submission, staged_source: Path, target: Path) -> None:
+        snapshot = submission.detection_snapshot
+        start_frame, end_frame = self._export_range(db, annotation, submission)
+        plan = build_submission_media_plan(start_time=start_frame / snapshot.fps,
+            end_time=(end_frame + 1) / snapshot.fps,
+            start_frame=start_frame, end_frame=end_frame, fps=snapshot.fps,
             frame_count=snapshot.frame_count, width=snapshot.width, height=snapshot.height,
             crop_region=annotation.crop_region)
         target.mkdir(parents=True)
-        try: os.link(clip_path, target / "clip.mp4")
-        except OSError: shutil.copy2(clip_path, target / "clip.mp4")
+        temp_clip = target / f".clip_{annotation.id}_revexport_{uuid.uuid4().hex}.mp4.part"
+        try:
+            self.processor.render_clip(input_path=str(staged_source), start=plan.start,
+                                       frames=plan.frame_count, output_path=str(temp_clip),
+                                       fps=snapshot.fps, crop=plan.crop)
+            os.replace(temp_clip, target / "clip.mp4")
+        finally:
+            temp_clip.unlink(missing_ok=True)
         expected = {"fps": snapshot.fps, "width": plan.output_width, "height": plan.output_height,
-                    "frame_count": annotation.end_frame - annotation.start_frame + 1}
+                    "frame_count": end_frame - start_frame + 1}
         probe = self.processor.probe_clip(str(target / "clip.mp4"), expected=expected)
-        tracks_summary = self._write_tracks(db, annotation, submission, plan, target / "tracks.json")
+        tracks_summary = self._write_tracks_range(db, annotation, submission, plan, target / "tracks.json",
+                                                  start_frame, end_frame)
         participants = []
         if annotation.category_participant_mode == "role_based":
             assignments = annotation.participant_roles_snapshot or {}
@@ -383,17 +414,22 @@ class ExportWorker:
                 for definition in sorted(annotation.role_definitions_snapshot or [],
                                          key=lambda item: item["role_sort_order"])
             ]
+        relative_start = annotation.start_frame - start_frame
+        relative_end = annotation.end_frame - start_frame
         annotation_doc = {"behavior": annotation.category_name, "mouse_ids": annotation.mouse_ids,
             "participants": participants,
             "confidence": annotation.confidence,
-            "frame_range": {"start": 0, "end": expected["frame_count"] - 1},
-            "time_range": {"start": 0.0, "end": expected["frame_count"] / snapshot.fps}}
-        metadata = {"schema_version": "1.0", "clip": {"filename": "clip.mp4", **expected},
+            "frame_range": {"start": relative_start, "end": relative_end},
+            "time_range": {"start": relative_start / snapshot.fps,
+                           "end": (relative_end + 1) / snapshot.fps}}
+        metadata = {"schema_version": "2.0", "clip": {"filename": "clip.mp4", **expected},
             "tracks": {"frame_origin": 0, "time_origin": 0.0, "coordinate_system": "clip_pixels"},
             "pose": {"keypoint_names": snapshot.keypoint_names, "skeleton_edges": snapshot.skeleton_edges},
             "source": {"video_filename": submission.source_video_filename,
-                "start_frame": annotation.start_frame, "end_frame": annotation.end_frame,
-                "start_time": plan.start, "end_time": plan.end,
+                "clip": {"start_frame": start_frame, "end_frame": end_frame,
+                         "start_time": plan.start, "end_time": plan.end},
+                "annotation": {"start_frame": annotation.start_frame, "end_frame": annotation.end_frame,
+                               "start_time": annotation.start_time, "end_time": annotation.end_time},
                 "crop_region": ({"x": plan.crop[0], "y": plan.crop[1], "w": plan.crop[2], "h": plan.crop[3]}
                                 if plan.crop else {"x": 0, "y": 0, "w": snapshot.width, "h": snapshot.height})}}
         for name, value in (("annotation.json", annotation_doc), ("metadata.json", metadata)):
@@ -435,7 +471,7 @@ class ExportWorker:
                 if source is None:
                     source = stage_submission_input(self.settings, submission, job.id)
                     staged_sources[submission.id] = source
-                clip_path = self._ensure_clip(db, job, annotation, submission, clip, source)
+                self._ensure_clip(db, job, annotation, submission, clip, source)
                 category_count = len((job.payload or {}).get("category_ids") or [])
                 parent = (job.payload.get("category_directories", {}).get(str(annotation.category_id), "")
                           if category_count > 1 else "")
@@ -449,7 +485,7 @@ class ExportWorker:
                     name = safe_part(f"{base}_{tail}", limit=120)
                     relative = f"{parent}/{name}".strip("/")
                 used.add(relative.casefold()); expected_dirs.add(relative)
-                self._write_item(db, annotation, submission, clip_path, staging / relative)
+                self._write_item(db, annotation, submission, source, staging / relative)
                 current = db.get(BackgroundJob, job.id); current.progress = int(index * 90 / len(rows)) if rows else 90
                 db.commit()
             with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:

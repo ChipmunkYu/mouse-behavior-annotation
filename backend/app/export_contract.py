@@ -141,8 +141,15 @@ def validate_clip_directory(directory: Path, probe: dict, summary: TracksSummary
     if abs(probe_duration - count / canonical_fps) > tolerance:
         raise MediaCommandError("ffprobe duration mismatch")
     fps, width, height = canonical_fps, clip["width"], clip["height"]
-    if summary.frame_count != count or annotation.get("frame_range") != {"start": 0, "end": max(0, count - 1)}:
+    frame_range = annotation.get("frame_range", {})
+    if (summary.frame_count != count or not isinstance(frame_range, dict)
+            or not (0 <= frame_range.get("start", -1) <= frame_range.get("end", -1) < count)):
         raise MediaCommandError("frame count/range mismatch")
+    expected_time = {"start": frame_range["start"] / fps, "end": (frame_range["end"] + 1) / fps}
+    time_range = annotation.get("time_range", {})
+    if (not isinstance(time_range, dict) or any(not math.isclose(float(time_range.get(key, -1)), value,
+            rel_tol=1e-9, abs_tol=1e-9) for key, value in expected_time.items())):
+        raise MediaCommandError("annotation time/frame range mismatch")
     if not set(annotation.get("mouse_ids", [])).issubset(summary.valid_track_ids):
         raise MediaCommandError("annotation mouse_ids are not snapshot track IDs")
     mouse_ids = annotation.get("mouse_ids")
