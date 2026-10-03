@@ -429,11 +429,34 @@ function JobPanel({
     );
   }
 
+  if (job.status === "failed") {
+    return (
+      <>
+        <div className="media-error" role="alert">
+          <div>⚠ 导出失败：{job.error ?? "后端未返回详细错误"}</div>
+          <div className="media-meta">
+            <span>任务 <span className="mono">#{job.id}</span></span>
+            <span>状态 <span className="mono">{job.status}</span></span>
+            <span>进度 <span className="mono">{job.progress}%</span></span>
+            <span>创建于 {formatDate(job.created_at)}</span>
+            {job.started_at ? <span>开始于 {formatDate(job.started_at)}</span> : null}
+            {job.finished_at ? <span>结束于 {formatDate(job.finished_at)}</span> : null}
+          </div>
+          <div>请将任务 ID 和错误信息提供给管理员排查。</div>
+        </div>
+        {downloadError ? (
+          <div className="error-box" style={{ marginTop: 8 }} role="alert">
+            ⚠ {downloadError}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <>
       <div className="media-error" role="alert">
-        ⚠ 导出{job.status === "failed" ? "失败" : "已取消"}
-        {job.error ? `：${job.error}` : "，请稍后重试"}
+        ⚠ 导出已取消{job.error ? `：${job.error}` : ""}
       </div>
       {downloadError ? (
         <div className="error-box" style={{ marginTop: 8 }} role="alert">
