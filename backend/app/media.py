@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -56,10 +57,10 @@ class MediaProcessor(Protocol):
     """媒体执行器协议：测试可注入 FakeMediaProcessor / 其它替换实现。"""
 
     def render_clip(
-        self, *, input_path: str, start: float, frames: int, output_path: str,
+        self, *, input_path: str, start_frame: int, frames: int, output_path: str,
         fps: float, crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        """把 input_path 从 start 秒起、共 frames 帧重编码为 H.264 MP4 写至 output_path（临时文件）。
+        """把 input_path 从 start_frame 帧起、共 frames 帧重编码为 H.264 MP4 写至 output_path（临时文件）。
 
         `fps` 为调用方声明的源帧率，输出必须显式声明该帧率且不补帧/丢帧（VFR 源）。
         """
@@ -231,11 +232,56 @@ class FfmpegMediaProcessor:
             raise MediaCommandError("ffprobe returned incomplete video properties") from exc
 
     def render_clip(
-        self, *, input_path: str, start: float, frames: int, output_path: str,
+        self, *, input_path: str, start_frame: int, frames: int, output_path: str,
         fps: float, crop: tuple[int, int, int, int] | None = None,
     ) -> None:
+        if isinstance(start_frame, bool) or not isinstance(start_frame, int) or start_frame < 0:
+            raise ValueError("clip start_frame must be a non-negative integer")
+        start = self._frame_timestamp(str(input_path), start_frame)
         self._run(self.build_clip_command(str(input_path), start, frames, str(output_path),
                                           fps, crop))
+
+    def _frame_timestamp(self, input_path: str, start_frame: int) -> float:
+        try:
+            path = Path(input_path).resolve()
+            stat = path.stat()
+        except OSError as exc:
+            raise MediaCommandError(f"cannot stat media input {input_path!r}: {exc}") from exc
+        timestamps = self._probe_frame_timestamps(str(path), stat.st_size, stat.st_mtime_ns)
+        if start_frame >= len(timestamps):
+            raise MediaCommandError(
+                f"ffprobe returned {len(timestamps)} video frames; start_frame {start_frame} is out of range"
+            )
+        return timestamps[start_frame]
+
+    @lru_cache(maxsize=32)
+    def _probe_frame_timestamps(
+        self, input_path: str, _size: int, _mtime_ns: int,
+    ) -> tuple[float, ...]:
+        cmd = [self.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_frames",
+               "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", input_path]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=self.timeout, shell=False)
+        except subprocess.TimeoutExpired as exc:
+            raise MediaCommandError(f"ffprobe timed out after {self.timeout}s") from exc
+        except FileNotFoundError as exc:
+            raise MediaCommandError(f"Media executable not found: {cmd[0]!r} (check FFMPEG_PATH / FFPROBE_PATH)") from exc
+        except OSError as exc:
+            raise MediaCommandError(f"ffprobe failed: {exc}") from exc
+        if proc.returncode != 0:
+            raise MediaCommandError(f"ffprobe failed: {truncate_text(proc.stderr)}")
+        try:
+            frames = json.loads(proc.stdout)["frames"]
+            if not isinstance(frames, list) or not frames:
+                raise ValueError
+            timestamps = tuple(float(frame["best_effort_timestamp_time"]) for frame in frames)
+            if (any(not math.isfinite(value) for value in timestamps)
+                    or any(later <= earlier for earlier, later in zip(timestamps, timestamps[1:]))):
+                raise ValueError
+            return timestamps
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MediaCommandError("ffprobe returned invalid frame timestamps") from exc
 
     def render_thumbnail(self, *, input_path: str, at: float, output_path: str,
                          crop: tuple[int, int, int, int] | None = None) -> None:

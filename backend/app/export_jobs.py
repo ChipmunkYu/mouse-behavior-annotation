@@ -394,7 +394,7 @@ class ExportWorker:
         target.mkdir(parents=True)
         temp_clip = target / f".clip_{annotation.id}_revexport_{uuid.uuid4().hex}.mp4.part"
         try:
-            self.processor.render_clip(input_path=str(staged_source), start=plan.start,
+            self.processor.render_clip(input_path=str(staged_source), start_frame=start_frame,
                                        frames=plan.frame_count, output_path=str(temp_clip),
                                        fps=snapshot.fps, crop=plan.crop)
             os.replace(temp_clip, target / "clip.mp4")

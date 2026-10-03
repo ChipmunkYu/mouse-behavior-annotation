@@ -312,9 +312,9 @@ def test_export_renders_extended_clip_from_staged_source(media_ctx):
     headers, project, _categories, _video, _annotations = _approved(ctx)
     job = _export(ctx, project, headers)
     assert job["status"] == "succeeded"
-    input_path, start, frames, _output = ctx.processor.clip_calls[-1]
+    input_path, start_frame, frames, _output = ctx.processor.clip_calls[-1]
     assert ".submission-media-job-" in input_path and input_path.endswith(".staging")
-    assert start == 0
+    assert start_frame == 0
     assert frames == 5
 
 

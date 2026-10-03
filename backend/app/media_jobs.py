@@ -236,7 +236,7 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
         end = (annotation.end_frame + 1) / video.fps
         processor.render_clip(
             input_path=str(input_path),
-            start=start,
+            start_frame=annotation.start_frame,
             frames=annotation.end_frame - annotation.start_frame + 1,
             output_path=str(temp_clip),
             fps=video.fps,
@@ -294,7 +294,7 @@ def render_submission_clip_files(processor, settings, submission: Submission,
             start_frame=annotation.start_frame, end_frame=annotation.end_frame,
             fps=snapshot.fps, frame_count=snapshot.frame_count,
             width=snapshot.width, height=snapshot.height, crop_region=annotation.crop_region)
-        processor.render_clip(input_path=str(input_path), start=plan.start,
+        processor.render_clip(input_path=str(input_path), start_frame=annotation.start_frame,
                               frames=plan.frame_count, output_path=str(temp_clip),
                               crop=plan.crop, fps=snapshot.fps)
         processor.render_thumbnail(input_path=str(input_path), at=plan.thumbnail_at,

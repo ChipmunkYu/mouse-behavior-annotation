@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -215,7 +216,7 @@ def test_format_time():
     assert format_time(3.0) == "3"
 
 
-def test_clip_command_is_argument_list_no_shell(monkeypatch):
+def test_clip_command_is_argument_list_no_shell(monkeypatch, tmp_path):
     proc = _proc(crf=23, preset="veryfast", timeout_seconds=45)
     cmd = proc.build_clip_command("C:/in.mp4", 1.5, 45, "C:/out.mp4", fps=25.0)
     assert cmd[0] == "ffmpeg"
@@ -240,14 +241,81 @@ def test_clip_command_is_argument_list_no_shell(monkeypatch):
         captured["kwargs"] = kwargs
         import subprocess as sp
 
-        return sp.CompletedProcess(cmd, 0, "", "")
+        stdout = '{"frames":[{"best_effort_timestamp_time":"0"}]}' if cmd[0] == "ffprobe" else ""
+        return sp.CompletedProcess(cmd, 0, stdout, "")
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
-    proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
+    source = tmp_path / "in.mp4"; source.write_bytes(b"x")
+    proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["timeout"] == 45
     assert isinstance(captured["cmd"], list)
     assert all(isinstance(x, str) for x in captured["cmd"])
+
+
+def test_frame_timestamp_probe_selection_cache_and_file_identity(monkeypatch, tmp_path):
+    proc = _proc()
+    source = tmp_path / "vfr.mp4"
+    source.write_bytes(b"one")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        import subprocess as sp
+
+        calls.append(cmd)
+        assert cmd[:6] == ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames"]
+        assert cmd[cmd.index("-show_entries") + 1] == "frame=best_effort_timestamp_time"
+        return sp.CompletedProcess(cmd, 0, json.dumps({"frames": [
+            {"best_effort_timestamp_time": "0.000000"},
+            {"best_effort_timestamp_time": "0.041700"},
+            {"best_effort_timestamp_time": "0.083100"},
+        ]}), "")
+
+    monkeypatch.setattr("app.media.subprocess.run", fake_run)
+    assert proc._frame_timestamp(str(source), 1) == pytest.approx(0.0417)
+    assert proc._frame_timestamp(str(source), 2) == pytest.approx(0.0831)
+    assert len(calls) == 1
+
+    source.write_bytes(b"changed-size")
+    assert proc._frame_timestamp(str(source), 1) == pytest.approx(0.0417)
+    assert len(calls) == 2
+
+
+def test_render_clip_seeks_to_exact_probed_frame_pts(monkeypatch, tmp_path):
+    import subprocess as sp
+
+    source = tmp_path / "vfr.mp4"; source.write_bytes(b"x")
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        document = {"frames": [
+            {"best_effort_timestamp_time": "0.000000"},
+            {"best_effort_timestamp_time": "0.041700"},
+            {"best_effort_timestamp_time": "0.083100"},
+        ]}
+        return sp.CompletedProcess(cmd, 0, json.dumps(document) if cmd[0] == "ffprobe" else "", "")
+
+    monkeypatch.setattr("app.media.subprocess.run", fake_run)
+    _proc().render_clip(input_path=str(source), start_frame=2, frames=1,
+                        output_path="out.mp4", fps=25.0)
+    ffmpeg_command = commands[-1]
+    assert ffmpeg_command[0] == "ffmpeg"
+    assert ffmpeg_command[ffmpeg_command.index("-ss") + 1] == "0.0831"
+
+
+@pytest.mark.parametrize("document", [{}, {"frames": []}, {"frames": [{}]},
+                                       {"frames": [{"best_effort_timestamp_time": "nan"}]},
+                                       {"frames": [{"best_effort_timestamp_time": "0.1"},
+                                                   {"best_effort_timestamp_time": "0.1"}]}])
+def test_frame_timestamp_probe_rejects_invalid_data(monkeypatch, tmp_path, document):
+    import subprocess as sp
+
+    source = tmp_path / "bad.mp4"; source.write_bytes(b"x")
+    monkeypatch.setattr("app.media.subprocess.run", lambda cmd, **kwargs:
+                        sp.CompletedProcess(cmd, 0, json.dumps(document), ""))
+    with pytest.raises(MediaCommandError, match="invalid frame timestamps"):
+        _proc()._frame_timestamp(str(source), 0)
 
 
 def test_thumbnail_command_is_argument_list():
@@ -332,24 +400,27 @@ def test_sqlite_engine_enables_wal_and_busy_timeout(tmp_path):
         assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 15000
 
 
-def test_media_error_truncates_stderr(monkeypatch):
+def test_media_error_truncates_stderr(monkeypatch, tmp_path):
     proc = _proc()
 
     def fake_run(cmd, **kwargs):
         import subprocess as sp
 
+        if cmd[0] == "ffprobe":
+            return sp.CompletedProcess(cmd, 0, '{"frames":[{"best_effort_timestamp_time":"0"}]}', "")
         return sp.CompletedProcess(cmd, 1, "", "E" * 10000)
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
+    source = tmp_path / "in.mp4"; source.write_bytes(b"x")
     with pytest.raises(MediaCommandError) as exc:
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
+        proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
     msg = str(exc.value)
     assert "Media command failed (exit 1)" in msg
     assert "truncated" in msg
     assert len(msg) < 5000
 
 
-def test_media_command_timeout(monkeypatch):
+def test_media_command_timeout(monkeypatch, tmp_path):
     proc = _proc(timeout_seconds=5)
 
     def fake_run(cmd, **kwargs):
@@ -358,14 +429,17 @@ def test_media_command_timeout(monkeypatch):
         raise sp.TimeoutExpired(cmd, timeout=kwargs["timeout"])
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
+    source = tmp_path / "in.mp4"; source.write_bytes(b"x")
     with pytest.raises(MediaCommandError, match="timed out after 5s"):
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
+        proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
 
 
-def test_missing_executable_reports_clearly():
+def test_missing_executable_reports_clearly(tmp_path):
     proc = _proc(ffmpeg_path="definitely-not-a-real-ffmpeg-binary-xyz123")
+    proc.ffprobe = proc.ffmpeg
+    source = tmp_path / "in.mp4"; source.write_bytes(b"x")
     with pytest.raises(MediaCommandError, match="Media executable not found"):
-        proc.render_clip(input_path="in.mp4", start=0.0, frames=25, output_path="out.mp4", fps=25.0)
+        proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
 
 
 # ---------- 自动入队 / 生成 / 状态 ----------
@@ -679,11 +753,11 @@ def test_processor_receives_resolved_input_and_times(media_ctx):
     project, _categories, video, anns = _setup(ctx, headers, annotations=1, start_times=[1.0])
     _approve(ctx, project, video)
 
-    input_path, start, frames, _out = ctx.processor.clip_calls[0]
+    input_path, start_frame, frames, _out = ctx.processor.clip_calls[0]
     videos_dir = ctx.app.state.settings.videos_dir.resolve()
     assert Path(input_path).is_relative_to(videos_dir)  # 输入限制在 videos_dir 内
     assert Path(input_path) == (videos_dir / "src.mp4").resolve()
-    assert start == pytest.approx(anns[0]["start_frame"] / video["fps"])
+    assert start_frame == anns[0]["start_frame"]
     assert frames == anns[0]["end_frame"] - anns[0]["start_frame"] + 1
     assert ctx.processor.clip_fps[0] == video["fps"]  # 普通视频路径钉住 video.fps
 
@@ -707,8 +781,8 @@ def test_render_submission_clip_files_passes_inclusive_frame_count(tmp_path):
     created = render_submission_clip_files(processor, settings, submission, annotation, clip,
                                            input_path=tmp_path / "in.mp4")
 
-    _input, start, frames, _output = processor.clip_calls[0]
-    assert start == pytest.approx(25 / snapshot_fps)
+    _input, start_frame, frames, _output = processor.clip_calls[0]
+    assert start_frame == 25
     assert frames == 74 - 25 + 1  # inclusive frame range
     assert processor.clip_fps[0] == snapshot_fps  # submission 路径钉住 snapshot.fps
     assert clip.status == "ready" and len(created) == 2
