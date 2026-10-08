@@ -266,10 +266,8 @@ def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = Fal
             raise Stop(f"applied taxonomy audit/version/hash does not match current categories: {after!r} != {scheme_snapshot(project[0], categories)!r}")
     submitted = rows(db, "SELECT s.id FROM submissions s JOIN videos v ON v.id=s.video_id "
                          "WHERE v.project_id=? AND s.status='submitted'", (PROJECT_ID,))
-    if submitted:
-        raise Stop(f"active submitted attempts are unsafe: {[r['id'] for r in submitted]}")
     bad_workflow = rows(db, "SELECT id,workflow_status FROM videos WHERE project_id=? "
-                           "AND workflow_status NOT IN ('draft','approved','rejected')", (PROJECT_ID,))
+                           "AND workflow_status NOT IN ('draft','submitted','approved','rejected')", (PROJECT_ID,))
     if bad_workflow:
         raise Stop(f"unsupported video workflow state: {bad_workflow}")
     annotations = rows(db, "SELECT a.* FROM annotations a JOIN videos v ON v.id=a.video_id "
@@ -292,7 +290,8 @@ def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = Fal
     plan = {"project_id": PROJECT_ID, "from": "initial" if initial else "applied",
             "annotation_counts": counts, "actions": {"rename": "13 Running -> Moving",
             "merge": f"{counts[14]} live Walking -> 13", "delete": {"19": counts[19], "25": counts[25]},
-            "add": [n for n, _, _ in NEW_CATEGORIES], "review_reset": len(annotations)},
+            "add": [n for n, _, _ in NEW_CATEGORIES], "review_reset": len(annotations),
+            "withdraw_submissions": [r["id"] for r in submitted]},
             "retire_clips": len(clips)}
     return {"state": plan["from"], "fingerprint": fp, "plan": plan, "plan_hash": sha(plan),
             "project": project[0], "owner": owners[0]["user_id"], "categories": categories,
@@ -436,7 +435,9 @@ def apply_offline(db_path: Path, backend: Path, fingerprint: str, plan_hash: str
                 "SELECT 1 FROM reviews WHERE submission_id=? AND result='approved' LIMIT 1", (sid,)).fetchone()
             has_reopen = db.execute(
                 "SELECT 1 FROM behavior_review_reopens WHERE submission_id=? LIMIT 1", (sid,)).fetchone()
-            if submission["status"] == "approved":
+            if submission["status"] == "submitted":
+                db.execute("UPDATE submissions SET status='withdrawn' WHERE id=?", (sid,))
+            elif submission["status"] == "approved":
                 db.execute("UPDATE submissions SET status='superseded' WHERE id=?", (sid,))
             if (submission["status"] == "approved" or
                     (submission["status"] == "superseded" and approved_review)) and not has_reopen:

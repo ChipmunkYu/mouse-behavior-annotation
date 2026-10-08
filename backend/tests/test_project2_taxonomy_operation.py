@@ -82,7 +82,7 @@ def lifecycle_fixture(tmp_path):
     """Normal multi-video lifecycle matrix; fixture() remains the hostile legacy case."""
     db = fixture(tmp_path); stamp = "2026-01-01 00:00:00"
     with sqlite3.connect(db) as con:
-        for video_id, workflow in ((2, "approved"), (3, "rejected"), (4, "draft")):
+        for video_id, workflow in ((2, "approved"), (3, "rejected"), (4, "submitted")):
             con.execute("INSERT INTO videos(id,project_id,filename,status,uploaded_by,created_at,workflow_status,annotation_revision,submitted_at,approved_at,approved_by) VALUES(?,2,?,'ready',1,?,?,1,?,?,?)",
                         (video_id, f"v{video_id}.mp4", stamp, workflow,
                          stamp if workflow != "draft" else None,
@@ -92,6 +92,8 @@ def lifecycle_fixture(tmp_path):
             con.execute("INSERT INTO submissions(id,video_id,detection_snapshot_id,attempt_no,source_annotation_version,source_media_revision,source_video_filename,source_storage_key,source_video_sha256,status,submitted_by,submitted_at,decided_at,decision_revision) VALUES(?,?,1,1,1,1,?,?,?, ?,1,?,?,1)",
                         (sid, video_id, f"v{video_id}.mp4", f"v{video_id}.mp4", "b"*64, status,
                          stamp, stamp if status in ("approved","rejected") else None))
+        con.execute("INSERT INTO submissions(id,video_id,detection_snapshot_id,attempt_no,source_annotation_version,source_media_revision,source_video_filename,source_storage_key,source_video_sha256,status,submitted_by,submitted_at,decision_revision) VALUES(13,4,1,1,1,1,'v4.mp4','v4.mp4',?,'submitted',1,?,1)",
+                    ("d"*64, stamp))
         con.execute("INSERT INTO reviews(project_id,video_id,reviewer_id,result,annotation_revision,created_at,submission_id) VALUES(2,2,1,'approved',1,?,10)", (stamp,))
         con.execute("INSERT INTO submissions(id,video_id,detection_snapshot_id,attempt_no,source_annotation_version,source_media_revision,source_video_filename,source_storage_key,source_video_sha256,status,submitted_by,submitted_at,decided_at,decision_revision) VALUES(12,2,1,2,1,1,'v2.mp4','v2.mp4',?,'superseded',1,?,?,1)",
                     ("c"*64, stamp, stamp))
@@ -149,6 +151,7 @@ def test_normal_multi_video_lifecycles_reset_and_reopen(tmp_path):
         assert con.execute("SELECT status FROM submissions WHERE id=10").fetchone()[0] == "superseded"
         assert con.execute("SELECT count(*) FROM behavior_review_reopens WHERE submission_id=10").fetchone()[0] == 1
         assert con.execute("SELECT count(*) FROM behavior_review_reopens WHERE submission_id=12").fetchone()[0] == 1
+        assert con.execute("SELECT status FROM submissions WHERE id=13").fetchone()[0] == "withdrawn"
         assert con.execute("SELECT count(*) FROM videos WHERE project_id=2 AND workflow_status='draft'").fetchone()[0] == 4
 
 
