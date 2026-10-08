@@ -243,6 +243,7 @@ class Video(Base):
     fps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    distance_calibration: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     storage_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="metadata", nullable=False)
     display_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)

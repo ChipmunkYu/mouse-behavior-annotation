@@ -1166,7 +1166,49 @@ a:focus-visible,
 .batch-indicator.ready::before, .batch-indicator.completed::before, .batch-indicator.success::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #54d67a; }
 .batch-indicator.error::before, .batch-indicator.validation_failed::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #ff7168; }
 
+/* 视频参考标定与距离测量 */
+.measurement-overlay { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.measurement-overlay.active { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.measurement-segment { color: #60e7ff; pointer-events: none; }
+.measurement-segment.calibration { color: #ffd166; }
+.measurement-segment.draft { color: #fff; }
+.measurement-segment > line:not(.measurement-hit-line) { stroke: currentColor; stroke-width: 2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 1px 2px #000); }
+.measurement-segment.draft > line:not(.measurement-hit-line) { stroke-dasharray: 5 4; }
+.measurement-segment > circle { fill: #111820; stroke: currentColor; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.measurement-hit-line { stroke: transparent; stroke-width: 16; }
+.measurement-label rect { fill: rgba(8, 13, 19, .9); stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.measurement-label text { fill: #fff; font: 700 11px var(--mono); }
+.measurement-snap { fill: rgba(255, 209, 102, .18); stroke: #ffd166; stroke-width: 2; vector-effect: non-scaling-stroke; pointer-events: none; }
+
+.measurement-mode-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px 12px; padding: 9px 10px; border: 1px solid var(--border); border-top: 0; background: color-mix(in srgb, var(--bg-elev) 92%, #0b3340); box-shadow: inset 3px 0 0 #2fc9df; }
+.measurement-mode-panel.calibrate { box-shadow: inset 3px 0 0 #ffd166; }
+.measurement-status { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-2); font-size: 11px; }
+.measurement-status-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 3px var(--warn-weak); }
+.measurement-status.ready .measurement-status-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+.measurement-count { padding-left: 7px; border-left: 1px solid var(--border); color: var(--text-3); font-family: var(--mono); }
+.measurement-tool-actions { display: flex; justify-content: flex-end; gap: 10px; white-space: nowrap; }
+.measurement-tool-actions .danger { color: var(--danger); }
+.measurement-help { grid-column: 1 / -1; margin: -1px 0 0; color: var(--text-3); font-size: 10px; }
+.calibration-editor { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; padding: 8px; border: 1px solid color-mix(in srgb, #ffd166 45%, var(--border)); border-radius: var(--radius); background: color-mix(in srgb, #ffd166 8%, var(--bg-inset)); }
+.calibration-instruction { margin-right: auto; color: var(--text-2); font-size: 11px; }
+.calibration-editor label { display: flex; align-items: center; gap: 6px; }
+.calibration-editor .input { width: 128px; height: 30px; }
+.calibration-editor label b { color: var(--text-2); font: 700 11px var(--mono); }
+
+@media (max-width: 820px) {
+  .calibration-editor { flex-wrap: wrap; }
+  .calibration-instruction { flex: 1 1 100%; }
+}
+
+@media (max-width: 520px) {
+  .measurement-mode-panel { grid-template-columns: 1fr; }
+  .measurement-tool-actions, .measurement-status { grid-column: 1; grid-row: auto; justify-content: flex-start; }
+  .calibration-editor label { flex: 1 1 auto; }
+  .calibration-editor .input { width: 100%; }
+}
+
 .workspace-tabs, .segmented, .upload-mode-tabs { display: inline-flex; padding: 2px; border-radius: var(--radius); background: var(--bg-inset); border: 1px solid var(--border); }
+.workspace-tabs { flex-wrap: wrap; }
 .workspace-tabs button, .segmented button, .upload-mode-tabs button { border: 0; border-radius: 4px; padding: 3px 8px; background: transparent; color: var(--text-2); font-size: 12px; }
 .workspace-tabs button.active, .segmented button.active, .upload-mode-tabs button.active { background: var(--bg-elev); color: var(--accent); box-shadow: var(--shadow); font-weight: 700; }
 

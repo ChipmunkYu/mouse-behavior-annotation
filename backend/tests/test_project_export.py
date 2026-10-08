@@ -285,6 +285,24 @@ def test_independent_consumer_relative_frames_empty_frames_and_no_forbidden_fiel
                                                     "annotator", "storage_key", "sha256"))
 
 
+def test_export_metadata_includes_distance_scale_only_when_calibrated(media_ctx):
+    ctx = media_ctx
+    headers, project, _categories, video, _annotations = _approved(ctx)
+    with ctx.session_factory() as db:
+        row = db.get(__import__("app.models", fromlist=["Video"]).Video, video["id"])
+        row.distance_calibration = {
+            "point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 3.0, "y": 4.0},
+            "distance_cm": 10.0, "cm_per_pixel": 2.0,
+        }
+        db.commit()
+    job = _export(ctx, project, headers)
+    with zipfile.ZipFile(_archive(ctx, job)) as archive:
+        metadata = json.loads(archive.read(next(
+            name for name in archive.namelist() if name.endswith("metadata.json")
+        )))
+    assert metadata["distance_scale"] == {"cm_per_pixel": 2.0, "unit": "cm"}
+
+
 class _NeighborQuery:
     def __init__(self, neighbors): self.neighbors = neighbors
     def filter(self, *args): return self

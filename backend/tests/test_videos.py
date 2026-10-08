@@ -1,8 +1,12 @@
 """验收：视频元数据创建 / 列表 / 流。"""
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from app.models import ProjectMembership, Video
 from app.routers import videos as videos_module
+from app.schemas import DistanceCalibrationPut
 
 
 def _set_storage_path(ctx, video_id: int, path: str) -> None:
@@ -48,6 +52,42 @@ def test_create_and_list_video(ctx, login_headers):
     assert (
         ctx.client.get(f"/api/projects/{pid}/videos", headers=alice_headers).status_code == 403
     )
+
+
+def test_put_and_delete_distance_calibration(ctx, login_headers):
+    headers = login_headers()
+    project = ctx.client.post("/api/projects", json={"name": "标定项目"}, headers=headers).json()
+    video = ctx.client.post(
+        f"/api/projects/{project['id']}/videos",
+        json={"filename": "calibration.mp4", "width": 100, "height": 80},
+        headers=headers,
+    ).json()
+    url = f"/api/projects/{project['id']}/videos/{video['id']}/distance-calibration"
+    body = {"point_a": {"x": 10, "y": 10}, "point_b": {"x": 40, "y": 50}, "distance_cm": 25}
+
+    response = ctx.client.put(url, json=body, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["distance_calibration"] == {**body, "cm_per_pixel": 0.5}
+    assert ctx.client.put(url, json={**body, "point_b": body["point_a"]}, headers=headers).status_code == 422
+    assert ctx.client.put(url, json={**body, "point_b": {"x": 101, "y": 50}}, headers=headers).status_code == 422
+    assert ctx.client.put(url, json={**body, "distance_cm": "25"}, headers=headers).status_code == 422
+
+    response = ctx.client.delete(url, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["distance_calibration"] is None
+
+
+@pytest.mark.parametrize("invalid", [True, "25", float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["x", "distance_cm"])
+def test_distance_calibration_rejects_non_json_or_nonfinite_numbers(field, invalid):
+    body = {"point_a": {"x": 10, "y": 10}, "point_b": {"x": 40, "y": 50}, "distance_cm": 25}
+    if field == "x":
+        body["point_a"]["x"] = invalid
+    else:
+        body[field] = invalid
+
+    with pytest.raises(ValidationError):
+        DistanceCalibrationPut.model_validate(body)
 
 
 def test_unassigned_view_only_lists_drafts_and_combines_workflow_filter(ctx, login_headers):

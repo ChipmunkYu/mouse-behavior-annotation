@@ -33,7 +33,19 @@ export type CategorySchemeAudit = Schemas["CategorySchemeAuditOut"];
 export type ProjectCreateInput = Schemas["ProjectCreate"];
 
 export type SubmissionAnnotationSnapshot = Schemas["SubmissionAnnotationSnapshotOut"];
-export type Video = Schemas["VideoOut"];
+export interface DistancePoint { x: number; y: number }
+export interface DistanceCalibration {
+  point_a: DistancePoint;
+  point_b: DistancePoint;
+  distance_cm: number;
+  cm_per_pixel: number;
+}
+export interface DistanceCalibrationInput {
+  point_a: DistancePoint;
+  point_b: DistancePoint;
+  distance_cm: number;
+}
+export type Video = Schemas["VideoOut"] & { distance_calibration?: DistanceCalibration | null };
 export type VideoCreateInput = Schemas["VideoCreate"];
 export type WorkflowStatus = "draft" | "submitted" | "approved" | "rejected";
 export type VideoView = "mine" | "unassigned" | "all";

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { getCurrentDetectionImport, getDetections } from "../api";
 import { ApiError } from "../api/client";
 import type { DetectionImport, DetectionWithTrack } from "../api/types";
+import { clientToSource, getVideoOverlayGeometry } from "../utils/videoOverlayGeometry";
 
 export interface OverlayOptions {
   boxes: boolean;
@@ -10,7 +11,7 @@ export interface OverlayOptions {
   skeleton: boolean;
 }
 
-const DEFAULT_OPTIONS: OverlayOptions = { boxes: true, ids: true, keypoints: false, skeleton: false };
+export const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = { boxes: true, ids: true, keypoints: false, skeleton: false };
 const BLOCK_SIZE = 31;
 const EMPTY_DETECTIONS: DetectionWithTrack[] = [];
 
@@ -80,7 +81,7 @@ export default function DetectionOverlay({
   const [detectionImport, setDetectionImport] = useState<DetectionImport | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "none" | "error">("loading");
   const [cacheVersion, setCacheVersion] = useState(0);
-  const [localOptions, setLocalOptions] = useState(DEFAULT_OPTIONS);
+  const [localOptions, setLocalOptions] = useState(DEFAULT_OVERLAY_OPTIONS);
   const [truncatedAt, setTruncatedAt] = useState<number | null>(null);
   const options = controlledOptions ?? localOptions;
 
@@ -168,15 +169,7 @@ export default function DetectionOverlay({
   }, [frame, cacheVersion, detectionImport, onFrameData, detections, frameStatus]);
 
   const geometry = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !video) return null;
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
-    const sourceW = detectionImport?.width || video.videoWidth;
-    const sourceH = detectionImport?.height || video.videoHeight;
-    if (!cssW || !cssH || !sourceW || !sourceH) return null;
-    const scale = Math.min(cssW / sourceW, cssH / sourceH);
-    return { cssW, cssH, sourceW, sourceH, scale, ox: (cssW - sourceW * scale) / 2, oy: (cssH - sourceH * scale) / 2 };
+    return getVideoOverlayGeometry(canvasRef.current, video, detectionImport?.width, detectionImport?.height);
   }, [detectionImport, video]);
 
   const draw = useCallback(() => {
@@ -265,8 +258,7 @@ export default function DetectionOverlay({
     const geo = geometry();
     if (!geo) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const sx = (e.clientX - rect.left - geo.ox) / geo.scale;
-    const sy = (e.clientY - rect.top - geo.oy) / geo.scale;
+    const { x: sx, y: sy } = clientToSource(e.clientX, e.clientY, rect, geo);
     const candidates = hits.filter((d) => {
       const b = d.box_xyxy_px!;
       return sx >= b[0] && sx <= b[2] && sy >= b[1] && sy <= b[3];

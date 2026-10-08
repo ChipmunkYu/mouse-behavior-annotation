@@ -818,6 +818,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/videos/{video_id}/distance-calibration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Distance Calibration */
+        put: operations["put_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_put"];
+        post?: never;
+        /** Delete Distance Calibration */
+        delete: operations["delete_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/videos/{video_id}/identity-edits": {
         parameters: {
             query?: never;
@@ -1875,6 +1893,29 @@ export interface components {
             /** Unordered Force Reselection Count */
             unordered_force_reselection_count: number;
         };
+        /** DistanceCalibrationOut */
+        DistanceCalibrationOut: {
+            /** Cm Per Pixel */
+            cm_per_pixel: number;
+            /** Distance Cm */
+            distance_cm: number;
+            point_a: components["schemas"]["DistanceCalibrationPoint"];
+            point_b: components["schemas"]["DistanceCalibrationPoint"];
+        };
+        /** DistanceCalibrationPoint */
+        DistanceCalibrationPoint: {
+            /** X */
+            x: number;
+            /** Y */
+            y: number;
+        };
+        /** DistanceCalibrationPut */
+        DistanceCalibrationPut: {
+            /** Distance Cm */
+            distance_cm: number;
+            point_a: components["schemas"]["DistanceCalibrationPoint"];
+            point_b: components["schemas"]["DistanceCalibrationPoint"];
+        };
         /**
          * ExportRequest
          * @description 导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。
@@ -2416,6 +2457,7 @@ export interface components {
              * @default 0
              */
             detection_import_revision: number;
+            distance_calibration?: components["schemas"]["DistanceCalibrationOut"] | null;
             /** Duration */
             duration?: number | null;
             /** Filename */
@@ -4168,6 +4210,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DistanceCalibrationPut"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoOut"];
                 };
             };
             /** @description Validation Error */

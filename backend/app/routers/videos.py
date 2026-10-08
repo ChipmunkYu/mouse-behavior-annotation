@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import math
 import os
 import shutil
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ from ..models import BackgroundJob, ProjectMembership, Submission, SubmissionAnn
 from ..media_auth import (
     MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
 )
-from ..permissions import is_manager, require_manager
+from ..permissions import is_manager, require_editor, require_manager
 from ..video_delete_db import (
     VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
     VideoDeleteNotFoundError,
@@ -52,6 +53,7 @@ from ..schemas import (
     AssignmentStatsOut,
     BehaviorStatsItem,
     BehaviorStatsOut,
+    DistanceCalibrationPut,
     VideoClaimsRequest,
     VideoClaimsResponse,
     VideoCreate,
@@ -305,6 +307,65 @@ def create_video(
         db.commit()
     except IntegrityError as exc:
         _raise_if_assignee_conflict(db, exc)
+    db.refresh(video)
+    return public_video(video, request.app.state.settings)
+
+
+def _calibration_video(db: Session, project_id: int, video_id: int, *, require_dimensions: bool = True) -> Video:
+    video = db.query(Video).filter_by(id=video_id, project_id=project_id).one_or_none()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found in this project")
+    if require_dimensions and (video.width is None or video.height is None
+                               or video.width <= 0 or video.height <= 0):
+        raise HTTPException(status_code=409, detail="Video dimensions are required for calibration")
+    return video
+
+
+@router.put(
+    "/api/projects/{project_id}/videos/{video_id}/distance-calibration",
+    response_model=VideoOut,
+)
+def put_distance_calibration(
+    project_id: int,
+    video_id: int,
+    body: DistanceCalibrationPut,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_editor(access[1])
+    video = _calibration_video(db, project_id, video_id)
+    points = (body.point_a, body.point_b)
+    if any(point.x < 0 or point.x > video.width or point.y < 0 or point.y > video.height
+           for point in points):
+        raise HTTPException(status_code=422, detail="Calibration coordinates must be within video dimensions")
+    pixel_distance = math.hypot(body.point_b.x - body.point_a.x, body.point_b.y - body.point_a.y)
+    if pixel_distance == 0:
+        raise HTTPException(status_code=422, detail="Calibration points must not overlap")
+    video.distance_calibration = {
+        **body.model_dump(),
+        "cm_per_pixel": body.distance_cm / pixel_distance,
+    }
+    db.commit()
+    db.refresh(video)
+    return public_video(video, request.app.state.settings)
+
+
+@router.delete(
+    "/api/projects/{project_id}/videos/{video_id}/distance-calibration",
+    response_model=VideoOut,
+)
+def delete_distance_calibration(
+    project_id: int,
+    video_id: int,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_editor(access[1])
+    video = _calibration_video(db, project_id, video_id, require_dimensions=False)
+    video.distance_calibration = None
+    db.commit()
     db.refresh(video)
     return public_video(video, request.app.state.settings)
 

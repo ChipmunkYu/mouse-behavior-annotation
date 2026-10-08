@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type Ref } from "react";
 import { Link, useBlocker, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   createAnnotation,
@@ -14,10 +14,12 @@ import {
   checkIdentityEdit,
   commitIdentityEdit,
   createSuppression,
+  deleteDistanceCalibration,
   getCorrectedTracks,
   getBehaviorReviewState,
   revertIdentityEdit,
   revertSuppression,
+  putDistanceCalibration,
 } from "../api";
 import { ApiError, apiErrorDetail } from "../api/client";
 import type {
@@ -40,7 +42,8 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { MediaStatusPanel } from "../components/MediaStatusPanel";
 import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
-import DetectionOverlay, { type OverlayFrameData } from "../components/DetectionOverlay";
+import DetectionOverlay, { DEFAULT_OVERLAY_OPTIONS, type OverlayFrameData, type OverlayOptions } from "../components/DetectionOverlay";
+import MeasurementOverlay, { type MeasurementSegment, type MeasurementToolMode, type VideoCalibration } from "../components/MeasurementOverlay";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, frameToStartTime } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
@@ -50,6 +53,7 @@ import { isFeedbackMarked, latestVisibleRejection, rejectionComment, resolveFeed
 import { markFeedbackModified } from "./feedbackMarkApi";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type WorkspaceMode = "behavior" | "identity" | "calibrate" | "measure";
 type Point = { frame: number };
 type UndoEntry = { kind: "identity" | "suppression"; id: number; createdAt: number };
 type IdentityEditFeedback = { text: string; key: number; routeKey: string };
@@ -66,6 +70,16 @@ type DraftSnapshot = {
 };
 
 const CATEGORY_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+const WORKSPACE_MODES: WorkspaceMode[] = ["behavior", "identity", "calibrate", "measure"];
+
+function videoCalibration(value: Video["distance_calibration"]): VideoCalibration | null {
+  if (!value) return null;
+  return {
+    reference: { id: "saved-calibration", frame: -1, start: value.point_a, end: value.point_b },
+    realLength: value.distance_cm,
+    unit: "cm",
+  };
+}
 
 export const REVIEW_COMPARISON_LABELS: Record<string, string> = {
   unchanged: "未修改",
@@ -944,7 +958,7 @@ function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppres
 }
 
 function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
-  mode: "behavior" | "identity";
+  mode: WorkspaceMode;
   categoryShortcuts: Array<{ key: string; category: Category }>;
   onClose: () => void;
 }) {
@@ -952,7 +966,7 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
     <div className="modal shortcut-help" role="dialog" aria-modal="true" aria-labelledby="shortcut-help-title" onClick={(e) => e.stopPropagation()}>
       <div className="modal-title" id="shortcut-help-title">键盘快捷键</div>
       <div className="shortcut-help-grid">
-        <kbd>Space</kbd><span>仅播放 / 暂停视频</span>
+        <kbd>Space</kbd><span>{mode === "calibrate" || mode === "measure" ? "参考标定 / 距离测量模式下禁用播放" : "仅播放 / 暂停视频"}</span>
         <kbd>Tab</kbd><span>切换行为标注 / track 修正模式</span>
         <kbd>Shift+Tab</kbd><span>已消费，不执行操作</span>
         <kbd>T</kbd><span>进入 / 退出当前模式的 track 列表键盘导航</span>
@@ -969,11 +983,11 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
           <kbd>1–9 / 0</kbd><span>{categoryShortcuts.length ? `按面板顺序选择前 ${categoryShortcuts.length} 个启用行为类别` : "当前没有可映射的启用行为类别"}</span>
           <kbd>↑ / ↓</kbd><span>参与对象列表导航时移动高亮</span>
           <kbd>Delete</kbd><span>为当前选中的行为标注打开删除确认框</span>
-        </> : <>
+        </> : mode === "identity" ? <>
           <kbd>↑ / ↓</kbd><span>track 列表导航时移动高亮</span>
           <kbd>Delete</kbd><span>为单一选中的整个 track 打开忽略确认框</span>
           <kbd>Ctrl+Z</kbd><span>仅撤销当前页面会话内最近一次可追踪的 track 修正；刷新后历史不完整</span>
-        </>}
+        </> : null}
       </div>
       <div className="modal-actions"><button type="button" className="btn" onClick={onClose}>关闭 [? / Esc]</button></div>
     </div>
@@ -1008,7 +1022,13 @@ export default function AnnotatePage() {
   const [startPoint, setStartPoint] = useState<Point | null>(null);
   const [endPoint, setEndPoint] = useState<Point | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [workspaceMode, setWorkspaceMode] = useState<"behavior" | "identity">("behavior");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("behavior");
+  const measurementTool: MeasurementToolMode = workspaceMode === "calibrate" || workspaceMode === "measure" ? workspaceMode : "select";
+  const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>(DEFAULT_OVERLAY_OPTIONS);
+  const [calibration, setCalibration] = useState<VideoCalibration | null>(null);
+  const [calibrationLength, setCalibrationLength] = useState("");
+  const [calibrationBusy, setCalibrationBusy] = useState(false);
+  const [measurementSegments, setMeasurementSegments] = useState<MeasurementSegment[]>([]);
   const [selectedMouseIds, setSelectedMouseIds] = useState<number[]>([]);
   const [identitySelectedMouseIds, setIdentitySelectedMouseIds] = useState<number[]>([]);
   const [participantRoles, setParticipantRoles] = useState<Record<string, number[]>>({});
@@ -1046,6 +1066,7 @@ export default function AnnotatePage() {
   const endButtonRef = useRef<HTMLButtonElement>(null);
   const draftBeforeEditRef = useRef<DraftSnapshot | null>(null);
   const editSaveInFlightRef = useRef(false);
+  const calibrationBeforeEditRef = useRef<VideoCalibration | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [annotationMutationBusy, setAnnotationMutationBusy] = useState(false);
@@ -1108,6 +1129,12 @@ export default function AnnotatePage() {
     setEndPoint(null);
     setSaveState("idle");
     setWorkspaceMode("behavior");
+    setOverlayOptions(DEFAULT_OVERLAY_OPTIONS);
+    setCalibration(null);
+    setCalibrationLength("");
+    setCalibrationBusy(false);
+    setMeasurementSegments([]);
+    calibrationBeforeEditRef.current = null;
     setSelectedMouseIds([]);
     setIdentitySelectedMouseIds([]);
     setParticipantRoles({}); setActiveRoleKey(null); setUnlockedRoleKeys(new Set()); setRoleMessage(null);
@@ -1199,11 +1226,13 @@ export default function AnnotatePage() {
   }, [categoryShortcuts, displayCategories]);
 
   const toggleMouseId = useCallback((id: number) => {
+    if (measurementTool !== "select") { setHint("参考标定或距离测量模式下不能选择 Track"); return; }
     setSelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].sort((a, b) => a - b));
-  }, []);
+  }, [measurementTool]);
   const toggleIdentityMouseId = useCallback((id: number) => {
+    if (measurementTool !== "select") { setHint("参考标定或距离测量模式下不能选择 Track"); return; }
     setIdentitySelectedMouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
-  }, []);
+  }, [measurementTool]);
 
   const roleDefinitions = useMemo(() => activeCategory?.participant_mode === "role_based" ? [...activeCategory.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order) : [], [activeCategory]);
   const roleSelectedIds = useMemo(() => [...new Set(Object.values(participantRoles).flat())].sort((a, b) => a - b), [participantRoles]);
@@ -1224,6 +1253,7 @@ export default function AnnotatePage() {
   }, [participantRoles, roleDefinitions, unlockedRoleKeys]);
 
   const toggleRoleTrack = useCallback(async (id: number) => {
+    if (measurementTool !== "select") { setHint("参考标定或距离测量模式下不能选择 Track"); return; }
     const role = roleDefinitions.find((r) => r.key === activeRoleKey);
     if (!role) { setRoleMessage("请先选择一个角色槽位。"); return; }
     const currentKey = roleDefinitions.find((r) => (participantRoles[r.key] ?? []).includes(id))?.key;
@@ -1237,7 +1267,7 @@ export default function AnnotatePage() {
     setParticipantRoles((prev) => { const next: Record<string, number[]> = {}; roleDefinitions.forEach((r) => { next[r.key] = (prev[r.key] ?? []).filter((x) => x !== id); }); next[role.key] = [...next[role.key], id].sort((a, b) => a - b); return next; });
     setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id));
     setRoleMessage(`Track ${id} 已分配给“${role.name}”。`);
-  }, [activeRoleKey, confirm, participantRoles, roleDefinitions]);
+  }, [activeRoleKey, confirm, measurementTool, participantRoles, roleDefinitions]);
 
   const selectCategory = useCallback(async (category: Category) => {
     if (video?.workflow_status === "approved") { setHint("视频已最终通过；请先由审核人重新打开审核"); return; }
@@ -1433,7 +1463,7 @@ export default function AnnotatePage() {
         };
       }
       const category = categoryById.get(annotation.category_id) ?? null;
-      setWorkspaceMode("behavior");
+      selectWorkspaceMode("behavior");
       setActiveCategory(category);
       setStartPoint({ frame: annotation.start_frame });
       setEndPoint({ frame: annotation.end_frame });
@@ -1531,6 +1561,10 @@ export default function AnnotatePage() {
       const loadedVideo = vids.find((v) => v.id === vid) ?? null;
       setProject(projs.find((p) => p.id === pid) ?? null);
       setVideo(loadedVideo);
+      const loadedCalibration = videoCalibration(loadedVideo?.distance_calibration);
+      setCalibration(loadedCalibration);
+      calibrationBeforeEditRef.current = loadedCalibration;
+      setCalibrationLength(loadedCalibration ? String(loadedCalibration.realLength) : "");
       setProjectVideos(vids);
       setIdentityRevision(loadedVideo?.identity_revision ?? 0);
       setCategories(cats);
@@ -1678,10 +1712,101 @@ export default function AnnotatePage() {
 
   /* ---------- 播放控制 ---------- */
   function togglePlay() {
+    if (measurementTool !== "select") { setHint("请先切换到行为标注或 track 修正模式再播放视频"); return; }
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) void v.play();
     else v.pause();
+  }
+
+  function selectWorkspaceMode(mode: WorkspaceMode) {
+    if (workspaceMode === mode) return;
+    if (editingAnnotationId != null && mode !== "behavior") {
+      setHint("请先保存或取消当前行为编辑，再切换工作模式");
+      return;
+    }
+    if (measurementTool !== "select" || mode === "calibrate" || mode === "measure") videoRef.current?.pause();
+    if (workspaceMode === "calibrate" && mode !== "calibrate" && calibration?.realLength === 0) {
+      setCalibration(calibrationBeforeEditRef.current);
+      setCalibrationLength(calibrationBeforeEditRef.current?.realLength ? String(calibrationBeforeEditRef.current.realLength) : "");
+    }
+    if (mode === "calibrate" && workspaceMode !== "calibrate") {
+      calibrationBeforeEditRef.current = calibration;
+      setCalibrationLength(calibration?.realLength ? String(calibration.realLength) : "");
+    }
+    setWorkspaceMode(mode);
+    setHint(mode === "calibrate" ? "标定模式：在画面上拖出一条已知长度" : mode === "measure" ? "测量模式：拖拽绘制，可连续添加多条线段" : mode === "identity" ? "已切换到 track 修正模式" : "已切换到行为标注模式");
+  }
+
+  function handleWorkspaceTabKey(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const modes = WORKSPACE_MODES.filter((mode) => (mode !== "identity" || detectionImport) && (editingAnnotationId == null || mode === "behavior"));
+    const index = modes.indexOf(workspaceMode);
+    const next = modes[(index + (event.key === "ArrowRight" ? 1 : modes.length - 1)) % modes.length];
+    selectWorkspaceMode(next);
+    document.getElementById(`${next}-tab`)?.focus();
+  }
+
+  async function updateCalibrationLine(line: MeasurementSegment | null) {
+    setCalibration(line ? { reference: line, realLength: 0, unit: "cm" } : null);
+    setCalibrationLength("");
+  }
+
+  async function updateMeasurements(segments: MeasurementSegment[]) {
+    setMeasurementSegments(segments);
+  }
+
+  async function applyCalibration() {
+    const realLength = Number(calibrationLength);
+    if (!calibration || !Number.isFinite(realLength) || realLength <= 0) {
+      setHint("请先画参考线，并输入大于 0 的真实长度");
+      return;
+    }
+    setCalibrationBusy(true);
+    try {
+      const saved = await putDistanceCalibration(pid, vid, {
+        point_a: calibration.reference.start,
+        point_b: calibration.reference.end,
+        distance_cm: realLength,
+      });
+      const next = videoCalibration(saved);
+      setCalibration(next);
+      calibrationBeforeEditRef.current = next;
+      setVideo((value) => value ? { ...value, distance_calibration: saved } : value);
+      setHint(`标定已保存：${saved.distance_cm} cm；现在可显示真实距离`);
+      setWorkspaceMode("measure");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? `保存距离标定失败：${err.message}` : "保存距离标定失败");
+    } finally {
+      setCalibrationBusy(false);
+    }
+  }
+
+  function cancelCalibration() {
+    setCalibration(calibrationBeforeEditRef.current);
+    setCalibrationLength(calibrationBeforeEditRef.current?.realLength ? String(calibrationBeforeEditRef.current.realLength) : "");
+    setWorkspaceMode("behavior");
+    setHint("已取消本次标定修改");
+  }
+
+  async function clearCalibration() {
+    const ok = await confirm({ title: "删除距离标定？", message: "删除后，已有测量线将不再显示真实距离。", confirmLabel: "删除标定", danger: true });
+    if (!ok) return;
+    setCalibrationBusy(true);
+    try {
+      await deleteDistanceCalibration(pid, vid);
+      setCalibration(null);
+      calibrationBeforeEditRef.current = null;
+      setCalibrationLength("");
+      setVideo((value) => value ? { ...value, distance_calibration: null } : value);
+      setHint("距离标定已删除；测量线仍保留，但不显示真实值");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? `删除距离标定失败：${err.message}` : "删除距离标定失败");
+    } finally {
+      setCalibrationBusy(false);
+    }
   }
 
   function step(dir: 1 | -1, frames = 1) {
@@ -2240,11 +2365,9 @@ export default function AnnotatePage() {
           setHint("track 修正需要有效的检测导入，当前仍停留在行为标注模式");
           return;
         }
-        setWorkspaceMode("identity");
-        setHint("已切换到 track 修正模式");
+        selectWorkspaceMode("identity");
       } else {
-        setWorkspaceMode("behavior");
-        setHint("已切换到行为标注模式");
+        selectWorkspaceMode("behavior");
       }
       return;
     }
@@ -2315,7 +2438,7 @@ export default function AnnotatePage() {
         setParticipantFocusIndex(0);
         setParticipantNavigationActive(true);
         setHint("参与对象键盘选择中：↑/↓ 移动，Enter 选择，T 或 Esc 退出");
-      } else {
+      } else if (workspaceMode === "identity") {
         if (identityNavigationActive) {
           setIdentityNavigationActive(false);
           setHint("已退出 track 列表键盘导航；已选 track 保持不变");
@@ -2403,9 +2526,9 @@ export default function AnnotatePage() {
           return;
         }
         void handleDelete(annotation);
-      } else if (!detectionImport || identitySelectedMouseIds.length !== 1 || identityBusy) {
+      } else if (workspaceMode === "identity" && (!detectionImport || identitySelectedMouseIds.length !== 1 || identityBusy)) {
         setHint("忽略整个 track 需要恰好选择 1 个有效 track ID");
-      } else {
+      } else if (workspaceMode === "identity") {
         void suppressTrack();
       }
       return;
@@ -2473,6 +2596,7 @@ export default function AnnotatePage() {
     () => sortFeedbackItems(behaviorReviewState?.feedback_items ?? [], markedFeedbackIds),
     [behaviorReviewState, markedFeedbackIds],
   );
+  const calibrationReady = calibration != null && calibration.realLength > 0;
 
   return (
     <div className="annotate-page">
@@ -2567,7 +2691,7 @@ export default function AnnotatePage() {
                 ref={videoRef}
                 className={videoReady && !loading ? "" : "media-player-pending"}
                 onClick={togglePlay}
-                title="点击播放 / 暂停 [Space]"
+                title={measurementTool === "select" ? "点击播放 / 暂停 [Space]" : "当前模式下视频保持暂停"}
                 onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
@@ -2582,8 +2706,11 @@ export default function AnnotatePage() {
                     fallbackFps={video?.fps}
                     selectedIds={overlaySelectedIds}
                     trackRoleLabels={trackRoleLabels}
-                    interactive
+                    interactive={measurementTool === "select"}
+                    options={overlayOptions}
+                    onOptionsChange={setOverlayOptions}
                     onToggleTrack={(id) => {
+                      if (measurementTool !== "select") return;
                       if (workspaceMode === "identity") toggleIdentityMouseId(id);
                       else if (video?.workflow_status === "approved") setHint("视频已最终通过；行为编辑已锁定");
                       else if (activeCategory?.participant_mode === "role_based") void toggleRoleTrack(id);
@@ -2592,16 +2719,29 @@ export default function AnnotatePage() {
                     onFrameData={handleFrameData}
                     refreshKey={overlayRefresh}
               /> : null}
+              {videoReady && !loading ? <MeasurementOverlay
+                video={videoRef.current}
+                sourceWidth={detectionImport?.width}
+                sourceHeight={detectionImport?.height}
+                frame={currentFrame}
+                mode={measurementTool}
+                detections={overlayFrameData.detections}
+                keypointsVisible={overlayOptions.keypoints}
+                calibration={calibration}
+                measurements={measurementSegments}
+                onCalibrationLineChange={updateCalibrationLine}
+                onMeasurementsChange={updateMeasurements}
+              /> : null}
               {loading ? <div className="media-status-overlay"><Loading text="加载标注数据…" /></div> : <MediaLoadProgress state={media} onCancel={media.cancel} />}
               {!loading && (media.status === "pending" || media.status === "failed" || media.status === "cancelled") ? <div className="media-status-overlay"><EmptyState compact title={media.status === "pending" ? "播放资源处理中" : media.status === "cancelled" ? "下载已取消" : "视频下载失败"} hint={media.message} /><button type="button" className="btn btn-sm" onClick={media.reload}>{media.status === "cancelled" ? "重新下载" : "重试"}</button></div> : null}
             </div>
             {!loading && videoReady ? (
               <>
-
                 <div className="player-controls">
                   <button
                     type="button"
                     className="btn btn-sm"
+                    disabled={measurementTool !== "select"}
                     onClick={(e) => {
                       e.currentTarget.blur();
                       togglePlay();
@@ -2631,14 +2771,16 @@ export default function AnnotatePage() {
                   </button>
                   <span className="flex-spacer" />
                   <div className="workspace-tabs" role="tablist" aria-label="标注工作模式">
-                    <button id="behavior-tab" type="button" role="tab" aria-selected={workspaceMode === "behavior"} aria-controls="behavior-panel" tabIndex={workspaceMode === "behavior" ? 0 : -1} className={workspaceMode === "behavior" ? "active" : ""} onClick={() => setWorkspaceMode("behavior")} onKeyDown={(e) => { if (e.key === "ArrowRight" && detectionImport) { e.preventDefault(); e.stopPropagation(); setWorkspaceMode("identity"); document.getElementById("identity-tab")?.focus(); } }}>行为标注</button>
-                    <button id="identity-tab" type="button" role="tab" aria-selected={workspaceMode === "identity"} aria-controls="identity-panel" tabIndex={workspaceMode === "identity" ? 0 : -1} className={workspaceMode === "identity" ? "active" : ""} disabled={!detectionImport} onClick={() => setWorkspaceMode("identity")} onKeyDown={(e) => { if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); setWorkspaceMode("behavior"); document.getElementById("behavior-tab")?.focus(); } }}>track 修正</button>
+                    <button id="behavior-tab" type="button" role="tab" aria-selected={workspaceMode === "behavior"} aria-controls="behavior-panel" tabIndex={workspaceMode === "behavior" ? 0 : -1} className={workspaceMode === "behavior" ? "active" : ""} onClick={() => selectWorkspaceMode("behavior")} onKeyDown={handleWorkspaceTabKey}>行为标注</button>
+                    <button id="identity-tab" type="button" role="tab" aria-selected={workspaceMode === "identity"} aria-controls="identity-panel" tabIndex={workspaceMode === "identity" ? 0 : -1} className={workspaceMode === "identity" ? "active" : ""} disabled={!detectionImport || editingAnnotationId != null} onClick={() => selectWorkspaceMode("identity")} onKeyDown={handleWorkspaceTabKey}>track 修正</button>
+                    <button id="calibrate-tab" type="button" role="tab" aria-selected={workspaceMode === "calibrate"} aria-controls="measurement-panel" tabIndex={workspaceMode === "calibrate" ? 0 : -1} className={workspaceMode === "calibrate" ? "active" : ""} disabled={editingAnnotationId != null} onClick={() => selectWorkspaceMode("calibrate")} onKeyDown={handleWorkspaceTabKey}>参考标定</button>
+                    <button id="measure-tab" type="button" role="tab" aria-selected={workspaceMode === "measure"} aria-controls="measurement-panel" tabIndex={workspaceMode === "measure" ? 0 : -1} className={workspaceMode === "measure" ? "active" : ""} disabled={editingAnnotationId != null} onClick={() => selectWorkspaceMode("measure")} onKeyDown={handleWorkspaceTabKey}>距离测量</button>
                   </div>
                   <button
                     ref={startButtonRef}
                     type="button"
                     className={`${startPoint ? "btn btn-sm btn-point armed" : "btn btn-sm btn-point"}${draftErrorFields.has("start") ? " draft-field-error" : ""}`}
-                    disabled={workspaceMode === "identity" || video?.workflow_status === "approved"}
+                    disabled={workspaceMode !== "behavior" || video?.workflow_status === "approved"}
                     aria-invalid={draftErrorFields.has("start") || undefined}
                     aria-describedby={draftErrorFields.has("start") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
@@ -2653,7 +2795,7 @@ export default function AnnotatePage() {
                     ref={endButtonRef}
                     type="button"
                     className={`btn btn-sm btn-point${draftErrorFields.has("end") ? " draft-field-error" : ""}`}
-                    disabled={workspaceMode === "identity" || video?.workflow_status === "approved"}
+                    disabled={workspaceMode !== "behavior" || video?.workflow_status === "approved"}
                     aria-invalid={draftErrorFields.has("end") || undefined}
                     aria-describedby={draftErrorFields.has("end") ? "draft-error-summary" : undefined}
                     onClick={(e) => {
@@ -2664,13 +2806,36 @@ export default function AnnotatePage() {
                   >
                     设结束 [D]
                   </button>
-                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode === "identity" || video?.workflow_status === "approved" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveCurrentBehavior()}>
+                  <button type="button" className="btn btn-sm btn-primary" disabled={workspaceMode !== "behavior" || video?.workflow_status === "approved" || saveState === "saving" || annotationMutationBusy} onClick={() => void saveCurrentBehavior()}>
                     {saveState === "saving" ? "保存中…" : editingAnnotationId != null ? "保存编辑 [Ctrl+Enter]" : "保存此行为 [Ctrl+Enter]"}
                   </button>
-                  <button type="button" className="btn btn-sm" disabled={workspaceMode === "identity" || editingAnnotationId != null || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
+                  <button type="button" className="btn btn-sm" disabled={workspaceMode !== "behavior" || editingAnnotationId != null || !hasDraft || saveState === "saving" || annotationMutationBusy} onClick={() => void requestResetDraft()}>
                     重置标注
                   </button>
                 </div>
+
+                {measurementTool !== "select" ? <section id="measurement-panel" className={`measurement-mode-panel ${measurementTool}`} role="tabpanel" aria-labelledby={`${workspaceMode}-tab`}>
+                  <div className={`measurement-status ${calibrationReady ? "ready" : "uncalibrated"}`} role="status" aria-live="polite">
+                    <span className="measurement-status-dot" aria-hidden="true" />
+                    <span>{calibrationReady ? `已标定 · ${calibration.realLength} cm` : "未标定 · 不显示真实距离"}</span>
+                    <span className="measurement-count">本页 {measurementSegments.length} 条</span>
+                  </div>
+                  {workspaceMode === "calibrate" ? <>
+                    <div className="measurement-tool-actions">{calibrationReady ? <button type="button" className="btn-link danger" disabled={calibrationBusy} onClick={() => void clearCalibration()}>删除标定</button> : null}</div>
+                    <div className="calibration-editor">
+                      <span className="calibration-instruction">① 在画面拖出参考线　② 输入真实长度</span>
+                      <label>
+                        <span className="visually-hidden">参考线真实长度（厘米）</span>
+                        <input className="input" type="number" min="0" step="any" inputMode="decimal" value={calibrationLength} onChange={(event) => setCalibrationLength(event.target.value)} placeholder="真实长度" disabled={calibrationBusy} />
+                        <b>cm</b>
+                      </label>
+                      <button type="button" className="btn btn-sm btn-primary" disabled={calibrationBusy || !calibration || calibration.realLength > 0 || !(Number(calibrationLength) > 0)} onClick={() => void applyCalibration()}>{calibrationBusy ? "保存中…" : "保存标定"}</button>
+                      <button type="button" className="btn btn-sm" disabled={calibrationBusy} onClick={cancelCalibration}>取消</button>
+                    </div>
+                  </> : <>
+                    <div className="measurement-tool-actions">{measurementSegments.length ? <button type="button" className="btn-link" onClick={() => void updateMeasurements([])}>清除全部测量</button> : null}</div>
+                  </>}
+                </section> : null}
 
                 <div className="draft-summary">
                   <div className="draft-summary-row">
@@ -2739,7 +2904,7 @@ export default function AnnotatePage() {
             <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
               {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport || video?.workflow_status === "approved"} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport || video?.workflow_status === "approved"} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
-          </div> : <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div>}
+          </div> : workspaceMode === "identity" ? <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div> : null}
           <AnnotationList
             annotations={annotations}
             categories={displayCategories}
@@ -2747,7 +2912,7 @@ export default function AnnotatePage() {
             fps={effectiveFps}
             frameCount={authoritativeFrameCount}
             currentTime={currentTime}
-            readOnly={workspaceMode === "identity"}
+            readOnly={workspaceMode !== "behavior"}
             lockedIds={lockedAnnotationIds}
             selectedId={selectedAnnotationId}
             editingId={editingAnnotationId}

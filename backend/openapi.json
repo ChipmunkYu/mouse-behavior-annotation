@@ -2084,6 +2084,76 @@
         "title": "DetectionImportReplacementPreviewOut",
         "type": "object"
       },
+      "DistanceCalibrationOut": {
+        "additionalProperties": false,
+        "properties": {
+          "cm_per_pixel": {
+            "title": "Cm Per Pixel",
+            "type": "number"
+          },
+          "distance_cm": {
+            "exclusiveMinimum": 0.0,
+            "title": "Distance Cm",
+            "type": "number"
+          },
+          "point_a": {
+            "$ref": "#/components/schemas/DistanceCalibrationPoint"
+          },
+          "point_b": {
+            "$ref": "#/components/schemas/DistanceCalibrationPoint"
+          }
+        },
+        "required": [
+          "point_a",
+          "point_b",
+          "distance_cm",
+          "cm_per_pixel"
+        ],
+        "title": "DistanceCalibrationOut",
+        "type": "object"
+      },
+      "DistanceCalibrationPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "DistanceCalibrationPoint",
+        "type": "object"
+      },
+      "DistanceCalibrationPut": {
+        "additionalProperties": false,
+        "properties": {
+          "distance_cm": {
+            "exclusiveMinimum": 0.0,
+            "title": "Distance Cm",
+            "type": "number"
+          },
+          "point_a": {
+            "$ref": "#/components/schemas/DistanceCalibrationPoint"
+          },
+          "point_b": {
+            "$ref": "#/components/schemas/DistanceCalibrationPoint"
+          }
+        },
+        "required": [
+          "point_a",
+          "point_b",
+          "distance_cm"
+        ],
+        "title": "DistanceCalibrationPut",
+        "type": "object"
+      },
       "ExportRequest": {
         "description": "导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。",
         "properties": {
@@ -3617,6 +3687,16 @@
             "default": 0,
             "title": "Detection Import Revision",
             "type": "integer"
+          },
+          "distance_calibration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DistanceCalibrationOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "duration": {
             "anyOf": [
@@ -6822,6 +6902,126 @@
         "summary": "Export Corrected Detections",
         "tags": [
           "detection-imports"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/videos/{video_id}/distance-calibration": {
+      "delete": {
+        "operationId": "delete_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Distance Calibration",
+        "tags": [
+          "videos"
+        ]
+      },
+      "put": {
+        "operationId": "put_distance_calibration_api_projects__project_id__videos__video_id__distance_calibration_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DistanceCalibrationPut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Distance Calibration",
+        "tags": [
+          "videos"
         ]
       }
     },

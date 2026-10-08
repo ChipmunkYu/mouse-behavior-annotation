@@ -59,6 +59,8 @@ import type {
   BehaviorDecisionInput,
   ReviewReopenInput,
   ReviewSubmissionContext,
+  DistanceCalibration,
+  DistanceCalibrationInput,
 } from "./types";
 
 type JsonContent<T> = T extends { content: { "application/json": infer Body } } ? Body : never;
@@ -152,6 +154,23 @@ export function listVideos(projectId: number | string, params: VideoListParams =
 /** 同步硬删除单个视频；成功时后端返回 204，所有权限与状态门禁以后端为准。 */
 export function deleteVideo(projectId: number | string, videoId: number | string): Promise<void> {
   return apiFetch<void>(`/projects/${projectId}/videos/${videoId}`, { method: "DELETE" });
+}
+
+export async function putDistanceCalibration(
+  projectId: number | string,
+  videoId: number | string,
+  input: DistanceCalibrationInput,
+): Promise<DistanceCalibration> {
+  const video = await apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/distance-calibration`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+  if (!video.distance_calibration) throw new Error("距离标定保存成功，但响应中缺少 distance_calibration");
+  return video.distance_calibration;
+}
+
+export function deleteDistanceCalibration(projectId: number | string, videoId: number | string): Promise<void> {
+  return apiFetch<void>(`/projects/${projectId}/videos/${videoId}/distance-calibration`, { method: "DELETE" });
 }
 
 export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {

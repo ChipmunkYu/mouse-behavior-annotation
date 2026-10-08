@@ -5,12 +5,25 @@ from datetime import datetime
 import re
 from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 
 StrictBusinessInt = Annotated[int, Field(strict=True)]
 StrictPositiveBusinessInt = Annotated[int, Field(strict=True, gt=0)]
 StrictNonNegativeBusinessInt = Annotated[int, Field(strict=True, ge=0)]
+
+
+def _json_number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("Input must be a JSON number")
+    return float(value)
+
+
+FiniteJsonNumber = Annotated[
+    float,
+    BeforeValidator(_json_number),
+    Field(strict=True, allow_inf_nan=False),
+]
 _ABSOLUTE_PATH = re.compile(
     r"(?<![\w.])(?:\\\\[^\\/'\";\r\n]+[\\/][^'\";\r\n]+|[A-Za-z]:[\\/][^'\";\r\n]+|/[^'\";\r\n]+)"
 )
@@ -200,6 +213,25 @@ class CategorySchemeAuditOut(BaseModel):
 
 
 # ---------- 视频 ----------
+class DistanceCalibrationPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: FiniteJsonNumber
+    y: FiniteJsonNumber
+
+
+class DistanceCalibrationPut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    point_a: DistanceCalibrationPoint
+    point_b: DistanceCalibrationPoint
+    distance_cm: FiniteJsonNumber = Field(gt=0)
+
+
+class DistanceCalibrationOut(DistanceCalibrationPut):
+    cm_per_pixel: float
+
+
 class SubmissionAnnotationSnapshotOut(BaseModel):
     id: int
     source_annotation_id: Optional[int] = None
@@ -238,6 +270,7 @@ class VideoOut(BaseModel):
     fps: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    distance_calibration: Optional[DistanceCalibrationOut] = None
     playback_status: Literal["ready", "pending", "failed", "unavailable"]
     status: str
     # 审核工作流字段（新增；旧数据迁移后由 DB 默认值填充）

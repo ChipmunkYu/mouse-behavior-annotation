@@ -432,7 +432,12 @@ class ExportWorker:
                 "annotation": {"start_frame": annotation.start_frame, "end_frame": annotation.end_frame,
                                "start_time": annotation.start_time, "end_time": annotation.end_time},
                 "crop_region": ({"x": plan.crop[0], "y": plan.crop[1], "w": plan.crop[2], "h": plan.crop[3]}
-                                if plan.crop else {"x": 0, "y": 0, "w": snapshot.width, "h": snapshot.height})}}
+                                 if plan.crop else {"x": 0, "y": 0, "w": snapshot.width, "h": snapshot.height})}}
+        calibration = db.get(Video, submission.video_id).distance_calibration
+        if calibration is not None:
+            metadata["distance_scale"] = {
+                "cm_per_pixel": calibration["cm_per_pixel"], "unit": "cm"
+            }
         for name, value in (("annotation.json", annotation_doc), ("metadata.json", metadata)):
             with (target / name).open("w", encoding="utf-8") as fh:
                 json.dump(value, fh, ensure_ascii=False, indent=2)
