@@ -446,6 +446,8 @@ class Clip(Base):
     thumbnail_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    retired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    retired_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

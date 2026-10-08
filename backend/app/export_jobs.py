@@ -63,7 +63,7 @@ def asset_rows(db: Session, project_id: int, category_ids: list[int] | None,
              .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
              .join(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
              .join(Video, Video.id == Submission.video_id)
-             .filter(Video.project_id == project_id))
+             .filter(Video.project_id == project_id, Clip.retired_at.is_(None)))
     if category_ids:
         query = query.filter(SubmissionAnnotation.category_id.in_(category_ids))
     if submission_annotation_ids is not None:
@@ -290,7 +290,8 @@ class ExportWorker:
                 .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
                 .join(Clip, Clip.submission_annotation_id == SubmissionAnnotation.id)
                 .join(Video, Video.id == Submission.video_id)
-                .filter(Video.project_id == job.project_id, SubmissionAnnotation.id.in_(ids))
+                .filter(Video.project_id == job.project_id, SubmissionAnnotation.id.in_(ids),
+                        Clip.retired_at.is_(None))
                 .order_by(SubmissionAnnotation.id).all()) if ids else []
         by_id = {annotation.id: (annotation, submission, clip) for annotation, submission, clip in rows}
         if set(by_id) != set(ids):

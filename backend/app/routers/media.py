@@ -78,10 +78,11 @@ def media_status(
     clips = (
         db.query(Clip)
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
-        .filter(SubmissionAnnotation.submission_id == submission.id)
+        .filter(SubmissionAnnotation.submission_id == submission.id, Clip.retired_at.is_(None))
         .all()
     ) if submission else db.query(Clip).join(Annotation, Annotation.id == Clip.annotation_id).filter(
-        Annotation.video_id == video.id, Clip.source_revision == revision).all()
+        Annotation.video_id == video.id, Clip.source_revision == revision,
+        Clip.retired_at.is_(None)).all()
     counts = {"total": len(clips), "ready": 0, "processing": 0, "failed": 0, "pending": 0}
     for clip in clips:
         status = clip.status

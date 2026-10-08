@@ -55,12 +55,19 @@ def _submission_bound_asset_exists():
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .where(
             Clip.submission_annotation_id.is_not(None),
+            Clip.retired_at.is_(None),
             SubmissionAnnotation.source_annotation_key == Annotation.id,
             Submission.video_id == Annotation.video_id,
         )
         .correlate(Annotation)
         .exists()
     )
+
+
+def _retired_legacy_asset_exists():
+    return select(literal(1)).select_from(Clip).where(
+        Clip.annotation_id == Annotation.id, Clip.retired_at.is_not(None)
+    ).correlate(Annotation).exists()
 
 
 def _base_filters(
@@ -175,13 +182,14 @@ def list_clips(
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
         .outerjoin(User, User.id == Submission.submitted_by)
-        .where(*conds)
+        .where(Clip.retired_at.is_(None), *conds)
     )
     legacy_conds = _base_filters(project_id, category_id=category_id, video_id=video_id,
                                  annotator_id=annotator_id, search=search)
     legacy_conds.append(~_submission_bound_asset_exists())
+    legacy_conds.append(~_retired_legacy_asset_exists())
     latest_legacy_clip_id = select(func.max(Clip.id)).where(
-        Clip.annotation_id == Annotation.id
+        Clip.annotation_id == Annotation.id, Clip.retired_at.is_(None)
     ).correlate(Annotation).scalar_subquery()
     legacy_query = select(
         literal("legacy").label("authority_type"),
@@ -242,7 +250,7 @@ def get_clip_thumbnail(
     clip = db.get(Clip, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
-    if clip.status != "ready":
+    if clip.status != "ready" or clip.retired_at is not None:
         raise HTTPException(status_code=404, detail="Thumbnail not ready")
     if clip.annotation_id is not None:
         # Legacy asset: still served, but a per-row anti-join hides it once a
@@ -303,7 +311,7 @@ def clip_categories(
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
-        .filter(Video.project_id == project_id)
+        .filter(Video.project_id == project_id, Clip.retired_at.is_(None))
         .group_by(SubmissionAnnotation.category_id, SubmissionAnnotation.category_name)
         .order_by(SubmissionAnnotation.category_id)
         .all()
@@ -314,6 +322,7 @@ def clip_categories(
     ).join(Annotation).join(Video).filter(
         Annotation.review_status == APPROVED, Video.workflow_status == APPROVED,
         Video.project_id == project_id, ~_submission_bound_asset_exists(),
+        ~_retired_legacy_asset_exists(),
     ).group_by(BehaviorCategory.id, BehaviorCategory.name).all()
     counts: dict[tuple[int, str], int] = {}
     for row in [*new_rows, *legacy_rows]:

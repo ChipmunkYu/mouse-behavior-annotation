@@ -138,7 +138,8 @@ def find_canonical_clip(db: Session, snapshot: SubmissionAnnotation) -> Clip | N
     """
     origin = _carried_origin(db, snapshot)
     if origin is not None:
-        origin_clip = db.query(Clip).filter_by(submission_annotation_id=origin.id).first()
+        origin_clip = db.query(Clip).filter_by(
+            submission_annotation_id=origin.id, retired_at=None).first()
         if origin_clip is not None and asset_equivalent(snapshot, origin):
             return origin_clip
     candidates = (
@@ -146,6 +147,7 @@ def find_canonical_clip(db: Session, snapshot: SubmissionAnnotation) -> Clip | N
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .filter(
             Clip.submission_annotation_id.is_not(None),
+            Clip.retired_at.is_(None),
             SubmissionAnnotation.source_annotation_key == snapshot.source_annotation_key,
             SubmissionAnnotation.source_material_revision == snapshot.source_material_revision,
             SubmissionAnnotation.material_digest == snapshot.material_digest,

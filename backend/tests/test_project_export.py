@@ -15,7 +15,7 @@ from app.export_contract import (FILES, TracksSummary, safe_part, transform_dete
                                  validate_clip_directory)
 from app.media import MediaCommandError
 from app.media_jobs import CLEANUP_INCOMPLETE_PREFIX, reset_interrupted_job_clips
-from app.export_jobs import ExportWorker, export_dedupe_key
+from app.export_jobs import ExportWorker, enqueue_export_job, export_dedupe_key
 from app.models import (Annotation, BackgroundJob, BehaviorCategory, Clip, Project, Submission,
                         SubmissionAnnotation)
 from tests.conftest import auth_headers
@@ -84,6 +84,17 @@ def _remove_submission_clip_files(ctx):
                     (root / stored).unlink(missing_ok=True)
         db.commit()
     return ids
+
+
+def test_export_worker_rejects_retired_frozen_clip(media_ctx):
+    ctx = media_ctx
+    _headers, project, _categories, _video, _annotations = _approved(ctx)
+    with ctx.session_factory() as db:
+        job = enqueue_export_job(db, db.get(Project, project["id"]), None)
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        clip.retired_at = datetime.utcnow(); clip.retired_reason = "taxonomy migration"; db.commit()
+        with pytest.raises(MediaCommandError, match="no longer exists"):
+            ctx.app.state.export_worker._frozen_rows(db, db.get(BackgroundJob, job.id), require_ready=False)
 
 
 def test_export_schedule_exception_fails_job_releases_key_and_allows_retry(media_ctx, monkeypatch):

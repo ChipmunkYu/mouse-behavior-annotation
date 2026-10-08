@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from datetime import datetime
 
 EXPECTED_FIELDS = {
     "annotation_id",
@@ -135,6 +136,10 @@ def test_asset_rows_ignore_submission_status_and_require_clip(media_ctx):
         db.query(Submission).one().status = "superseded"
         db.commit()
         assert len(asset_rows(db, project["id"], None)) == 1
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        clip.retired_at = datetime.utcnow(); clip.retired_reason = "taxonomy migration"; db.commit()
+        assert asset_rows(db, project["id"], None) == []
+        clip.retired_at = None; clip.retired_reason = None; db.commit()
         db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).delete()
         db.commit()
         assert asset_rows(db, project["id"], None) == []

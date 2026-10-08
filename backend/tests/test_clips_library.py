@@ -100,6 +100,20 @@ def _add_clip(ctx, project_id, annotation_id, status="ready", rev=None) -> None:
         db.commit()
 
 
+def test_retired_clip_is_hidden_from_library_and_category_count(ctx):
+    setup = ctx.make_project_with_video()
+    headers, project, category, video = setup["headers"], setup["project"], setup["categories"][0], setup["video"]
+    annotation = _annotate(ctx, headers, project, video, category["id"])
+    _set_annotation_status(ctx, annotation["id"], "approved")
+    _set_video_approved(ctx, video["id"])
+    _add_clip(ctx, project["id"], annotation["id"])
+    with ctx.session_factory() as db:
+        clip = db.query(Clip).filter_by(annotation_id=annotation["id"]).one()
+        clip.retired_at = datetime.utcnow(); clip.retired_reason = "taxonomy migration"; db.commit()
+    assert _library(ctx, project["id"], headers).json()["total"] == 0
+    assert _categories(ctx, project["id"], headers).json() == []
+
+
 def _approve(ctx, project, video) -> None:
     """直接设置 approved 并入队媒体任务；本测试不覆盖 YOLO 提交前置条件。"""
     with ctx.session_factory() as db:
