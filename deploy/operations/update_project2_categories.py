@@ -48,16 +48,15 @@ def category_spec(categories: list[dict]) -> list[dict]:
     return result
 
 
-def target_spec_from(baseline: list[dict]) -> list[dict]:
+def target_spec_from(baseline: list[dict], new_ids: tuple[int, int]) -> list[dict]:
     target = json.loads(json.dumps(baseline, ensure_ascii=False))
     by_id = {row["id"]: row for row in target}
     by_id[13]["name"] = "Moving"
     for category_id in (14, 19, 25): by_id[category_id]["is_active"] = False
     active = [row for row in target if row["is_active"]]
     for order, row in enumerate(active): row["sort_order"] = order
-    next_id = max(by_id) + 1
-    for offset, (name, group, color) in enumerate(NEW_CATEGORIES):
-        target.append({"id": next_id + offset, "project_id": PROJECT_ID, "name": name,
+    for offset, (category_id, (name, group, color)) in enumerate(zip(new_ids, NEW_CATEGORIES)):
+        target.append({"id": category_id, "project_id": PROJECT_ID, "name": name,
                        "group": group, "color": color, "sort_order": len(active) + offset,
                        "is_active": True, "mouse_count_min": 1, "mouse_count_max": 1,
                        "participant_mode": "unordered", "role_definitions": []})
@@ -218,6 +217,8 @@ def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = Fal
     actual_spec = category_spec(categories)
     if len(categories) == 16:
         canonical_baseline = actual_spec
+        next_id = db.execute("SELECT coalesce(max(id),0)+1 FROM behavior_categories").fetchone()[0]
+        new_category_ids = (next_id, next_id + 1)
     elif len(categories) == 18:
         previous = rows(db, "SELECT before_json FROM category_scheme_audits WHERE project_id=? AND action='replace' "
                             "AND scheme_version=? ORDER BY id DESC LIMIT 1",
@@ -225,9 +226,16 @@ def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = Fal
         if not previous:
             raise Stop("production baseline gate: migration baseline audit is missing")
         canonical_baseline = category_spec(json.loads(previous[0]["before_json"])["categories"])
+        added = {name: [c["id"] for c in categories if c["name"] == name]
+                 for name, _group, _color in NEW_CATEGORIES}
+        if any(len(ids) != 1 for ids in added.values()):
+            raise Stop("applied taxonomy must contain exactly one Grooming and one Rearing")
+        new_category_ids = tuple(added[name][0] for name, _group, _color in NEW_CATEGORIES)
+    else:
+        raise Stop("taxonomy is neither the exact initial nor exact applied state")
     if baseline_spec is not None and canonical_baseline != baseline_spec:
         raise Stop("production baseline gate: canonical baseline changed")
-    expected_target = target_spec_from(canonical_baseline)
+    expected_target = target_spec_from(canonical_baseline, new_category_ids)
     initial = len(canonical_baseline) == 16 and actual_spec == canonical_baseline and all(
         i in by_id and by_id[i]["name"] == names[0] for i, names in FIXED.items())
     applied = actual_spec == expected_target
@@ -290,13 +298,16 @@ def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = Fal
     plan = {"project_id": PROJECT_ID, "from": "initial" if initial else "applied",
             "annotation_counts": counts, "actions": {"rename": "13 Running -> Moving",
             "merge": f"{counts[14]} live Walking -> 13", "delete": {"19": counts[19], "25": counts[25]},
-            "add": [n for n, _, _ in NEW_CATEGORIES], "review_reset": len(annotations),
+            "add": [{"id": category_id, "name": spec[0]}
+                    for category_id, spec in zip(new_category_ids, NEW_CATEGORIES)],
+            "review_reset": len(annotations),
             "withdraw_submissions": [r["id"] for r in submitted]},
             "retire_clips": len(clips)}
     return {"state": plan["from"], "fingerprint": fp, "plan": plan, "plan_hash": sha(plan),
             "project": project[0], "owner": owners[0]["user_id"], "categories": categories,
             "annotations": annotations, "triggers": triggers, "trigger_snapshot": trigger_snapshot,
-            "baseline_spec": canonical_baseline, "target_spec": expected_target}
+            "baseline_spec": canonical_baseline, "target_spec": expected_target,
+            "new_category_ids": new_category_ids}
 
 
 def plan(db_path: Path, backend: Path, *, expect_applied=False, production_counts=False) -> dict:
@@ -420,12 +431,12 @@ def apply_offline(db_path: Path, backend: Path, fingerprint: str, plan_hash: str
         active = rows(db, "SELECT id FROM behavior_categories WHERE project_id=? AND is_active=1 ORDER BY sort_order,id", (PROJECT_ID,))
         for order, category in enumerate(active):
             db.execute("UPDATE behavior_categories SET sort_order=? WHERE id=?", (order, category["id"]))
-        next_category_id = max(category["id"] for category in current["categories"]) + 1
-        for new_offset, (name_, group, color) in enumerate(NEW_CATEGORIES):
+        for new_offset, ((name_, group, color), category_id) in enumerate(
+                zip(NEW_CATEGORIES, current["new_category_ids"])):
             db.execute("INSERT INTO behavior_categories(id,project_id,name,\"group\",color,sort_order,is_active,"
                        "mouse_count_min,mouse_count_max,participant_mode,role_definitions,created_at) "
                        "VALUES(?,?,?,?,?,?,1,1,1,'unordered','[]',?)",
-                       (next_category_id + new_offset, PROJECT_ID, name_, group, color,
+                       (category_id, PROJECT_ID, name_, group, color,
                         len(active) + new_offset, stamp))
         for offset, category_id in enumerate((14, 19, 25), 15):
             db.execute("UPDATE behavior_categories SET sort_order=? WHERE id=?", (offset, category_id))

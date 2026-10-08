@@ -116,6 +116,7 @@ def test_plan_backup_apply_verify_and_repeat_are_safe(tmp_path):
         con.execute("INSERT INTO behavior_categories(id,project_id,name,\"group\",color,sort_order,is_active,created_at,mouse_count_min,mouse_count_max,participant_mode,role_definitions) VALUES(100,3,'Other','个体行为','#ffffff',0,1,?,1,1,'unordered','[]')", (stamp,))
     before = db.read_bytes(); info = op.plan(db, BACKEND)
     assert db.read_bytes() == before and info["plan"]["annotation_counts"] == {13:1,14:1,19:1,25:1}
+    assert info["plan"]["actions"]["add"] == [{"id": 101, "name": "Grooming"}, {"id": 102, "name": "Rearing"}]
     backup = tmp_path / "api-backup.db"; evidence = op.backup(db, backup, BACKEND)
     immutable_before = None
     with closing(op.connect_ro(db)) as con:
@@ -129,8 +130,8 @@ def test_plan_backup_apply_verify_and_repeat_are_safe(tmp_path):
         categories = list(con.execute("SELECT id,name,is_active,sort_order FROM behavior_categories WHERE project_id=2 ORDER BY sort_order,id"))
         assert len(categories) == 18 and [r[3] for r in categories] == list(range(18))
         assert [(r[0], r[1]) for r in categories[-3:]] == [(14,"Walking"),(19,"Avoiding"),(25,"Following")]
-        assert con.execute("SELECT id FROM behavior_categories WHERE name='Grooming'").fetchone()[0] == 29
-        assert con.execute("SELECT id FROM behavior_categories WHERE name='Rearing'").fetchone()[0] == 30
+        assert con.execute("SELECT id FROM behavior_categories WHERE name='Grooming'").fetchone()[0] == 101
+        assert con.execute("SELECT id FROM behavior_categories WHERE name='Rearing'").fetchone()[0] == 102
         assert con.execute("SELECT count(*) FROM annotations WHERE category_id=13").fetchone()[0] == 2
         assert con.execute("SELECT count(*) FROM annotations WHERE category_id IN (14,19,25)").fetchone()[0] == 0
         assert con.execute("SELECT count(*) FROM annotations WHERE review_status='pending' AND reviewer_id IS NULL AND material_revision=2 AND material_digest IS NOT NULL").fetchone()[0] == 3
