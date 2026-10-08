@@ -420,10 +420,13 @@ def apply_offline(db_path: Path, backend: Path, fingerprint: str, plan_hash: str
         active = rows(db, "SELECT id FROM behavior_categories WHERE project_id=? AND is_active=1 ORDER BY sort_order,id", (PROJECT_ID,))
         for order, category in enumerate(active):
             db.execute("UPDATE behavior_categories SET sort_order=? WHERE id=?", (order, category["id"]))
-        for offset, (name_, group, color) in enumerate(NEW_CATEGORIES, len(active)):
-            db.execute("INSERT INTO behavior_categories(project_id,name,\"group\",color,sort_order,is_active,"
+        next_category_id = max(category["id"] for category in current["categories"]) + 1
+        for new_offset, (name_, group, color) in enumerate(NEW_CATEGORIES):
+            db.execute("INSERT INTO behavior_categories(id,project_id,name,\"group\",color,sort_order,is_active,"
                        "mouse_count_min,mouse_count_max,participant_mode,role_definitions,created_at) "
-                       "VALUES(?,?,?,?,?,1,1,1,'unordered','[]',?)", (PROJECT_ID, name_, group, color, offset, stamp))
+                       "VALUES(?,?,?,?,?,?,1,1,1,'unordered','[]',?)",
+                       (next_category_id + new_offset, PROJECT_ID, name_, group, color,
+                        len(active) + new_offset, stamp))
         for offset, category_id in enumerate((14, 19, 25), 15):
             db.execute("UPDATE behavior_categories SET sort_order=? WHERE id=?", (offset, category_id))
         # Administratively neutralize every attempt while preserving append-only history.

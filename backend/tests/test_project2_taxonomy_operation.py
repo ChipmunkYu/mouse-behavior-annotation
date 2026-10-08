@@ -32,8 +32,13 @@ def fixture(tmp_path):
     con.execute("INSERT INTO users(id,username,password_hash,created_at) VALUES(1,'owner','x',?)", (stamp,))
     con.execute("INSERT INTO projects(id,name,status,created_by,created_at,updated_at,invite_code,category_scheme_version) VALUES(2,'p2','active',1,?,?, 'p2',7)", (stamp, stamp))
     con.execute("INSERT INTO project_memberships(id,project_id,user_id,role,status,created_at,can_review) VALUES(1,2,1,'owner','active',?,1)", (stamp,))
-    ids = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,19,25]
-    names = {13:"Running",14:"Walking",19:"Avoiding",25:"Following"}
+    ids = [13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28]
+    names = dict(zip(ids, (
+        "Running", "Walking", "Static", "Together", "Approach", "Chasing",
+        "Avoiding", "Attack", "Snout-head_contact", "Snout-rear_contact",
+        "Huddling", "Isolation", "Following", "Group locomotion",
+        "Social clustering", "Dispersal",
+    )))
     for order, category_id in enumerate(ids):
         con.execute('INSERT INTO behavior_categories(id,project_id,name,"group",color,sort_order,is_active,created_at,mouse_count_min,mouse_count_max,participant_mode,role_definitions) VALUES(?,?,?,\'个体行为\',?,?,1,?,1,1,\'unordered\',\'[]\')',
                     (category_id, 2, names.get(category_id, f"C{category_id}"), f"#{category_id:06x}", order, stamp))
@@ -47,7 +52,7 @@ def fixture(tmp_path):
     con.execute("INSERT INTO videos(id,project_id,filename,status,uploaded_by,created_at,workflow_status,annotation_revision,submitted_at,approved_at,approved_by) VALUES(1,2,'v.mp4','ready',1,?,'approved',3,?,?,1)", (stamp, stamp, stamp))
     con.execute("INSERT INTO detection_imports(id,video_id,revision,schema_version,status,active,created_by,created_at) VALUES(1,1,1,'1','ready',1,1,?)", (stamp,))
     con.execute("INSERT INTO detection_snapshots(id,detection_import_id,source_edit_version,raw_detection_count,override_count,schema_version,fps,width,height,frame_count,keypoint_names,skeleton_edges,created_at,raw_digest,state_digest,metadata_digest) VALUES(1,1,0,0,0,'1',25,100,100,100,'[]','[]',?,'r','s','m')", (stamp,))
-    for annotation_id, category_id in enumerate((13,14,19,25,1), 1):
+    for annotation_id, category_id in enumerate((13,14,19,25,15), 1):
         con.execute("INSERT INTO annotations(id,video_id,annotator_id,category_id,reviewer_id,start_time,end_time,start_frame,end_frame,confidence,review_status,created_at,updated_at,mouse_ids,mouse_id_status,detection_import_revision,identity_revision,participant_roles,participant_status,material_revision) VALUES(?,1,1,?,1,0,1,0,2,'certain','approved',?,?,'[1]','valid',1,1,'{}','valid',1)", (annotation_id, category_id, stamp, stamp))
     attempts = ((1, "approved"), (2, "rejected"), (3, "withdrawn"), (4, "rejected"))
     snapshot_id = 0
@@ -57,7 +62,7 @@ def fixture(tmp_path):
         source_ids = range(1, 6) if attempt_no == 1 else (attempt_no - 1,)
         for source_id in source_ids:
             snapshot_id += 1
-            category_id = (13,14,19,25,1)[source_id - 1]
+            category_id = (13,14,19,25,15)[source_id - 1]
             con.execute("INSERT INTO submission_annotations(id,submission_id,source_annotation_id,category_id,category_name,start_time,end_time,start_frame,end_frame,confidence,mouse_ids,source_annotation_key,source_material_revision,material_digest) VALUES(?,?,?,?,?,0,1,0,2,'certain','[1]',?,1,'legacy')",
                         (snapshot_id, attempt_no, source_id, category_id, names.get(category_id, f"C{category_id}"), source_id))
             decision = "approved" if (attempt_no == 1 or attempt_no == 3) else "rejected"
@@ -102,7 +107,14 @@ def lifecycle_fixture(tmp_path):
 
 
 def test_plan_backup_apply_verify_and_repeat_are_safe(tmp_path):
-    db = fixture(tmp_path); before = db.read_bytes(); info = op.plan(db, BACKEND)
+    db = fixture(tmp_path)
+    with sqlite3.connect(db) as con:
+        # IDs are global across projects. Another project's higher category ID
+        # must not make Project 2's deterministic target IDs jump from 29/30.
+        stamp = "2026-01-01 00:00:00"
+        con.execute("INSERT INTO projects(id,name,status,created_by,created_at,updated_at,invite_code,category_scheme_version) VALUES(3,'other','active',1,?,?, 'other',0)", (stamp, stamp))
+        con.execute("INSERT INTO behavior_categories(id,project_id,name,\"group\",color,sort_order,is_active,created_at,mouse_count_min,mouse_count_max,participant_mode,role_definitions) VALUES(100,3,'Other','个体行为','#ffffff',0,1,?,1,1,'unordered','[]')", (stamp,))
+    before = db.read_bytes(); info = op.plan(db, BACKEND)
     assert db.read_bytes() == before and info["plan"]["annotation_counts"] == {13:1,14:1,19:1,25:1}
     backup = tmp_path / "api-backup.db"; evidence = op.backup(db, backup, BACKEND)
     immutable_before = None
@@ -117,6 +129,8 @@ def test_plan_backup_apply_verify_and_repeat_are_safe(tmp_path):
         categories = list(con.execute("SELECT id,name,is_active,sort_order FROM behavior_categories WHERE project_id=2 ORDER BY sort_order,id"))
         assert len(categories) == 18 and [r[3] for r in categories] == list(range(18))
         assert [(r[0], r[1]) for r in categories[-3:]] == [(14,"Walking"),(19,"Avoiding"),(25,"Following")]
+        assert con.execute("SELECT id FROM behavior_categories WHERE name='Grooming'").fetchone()[0] == 29
+        assert con.execute("SELECT id FROM behavior_categories WHERE name='Rearing'").fetchone()[0] == 30
         assert con.execute("SELECT count(*) FROM annotations WHERE category_id=13").fetchone()[0] == 2
         assert con.execute("SELECT count(*) FROM annotations WHERE category_id IN (14,19,25)").fetchone()[0] == 0
         assert con.execute("SELECT count(*) FROM annotations WHERE review_status='pending' AND reviewer_id IS NULL AND material_revision=2 AND material_digest IS NOT NULL").fetchone()[0] == 3
