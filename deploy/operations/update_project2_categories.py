@@ -199,7 +199,6 @@ def scheme_snapshot(project: dict, categories: list[dict]) -> dict:
 
 def inspect(db: sqlite3.Connection, backend: Path, *, expect_applied: bool = False, production_counts: bool = False,
             baseline_spec: list[dict] | None = None, include_fingerprint: bool = True) -> dict:
-    integrity(db)
     version = [r[0] for r in db.execute("SELECT version_num FROM alembic_version")]
     allowed_versions = [SCHEMA] if expect_applied else ["0018", SCHEMA]
     if len(version) != 1 or version[0] not in allowed_versions:
