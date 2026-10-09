@@ -138,7 +138,7 @@ def test_plan_backup_apply_verify_and_repeat_are_safe(tmp_path):
         clips = list(con.execute("SELECT annotation_id,clip_path,thumbnail_path,retired_at,retired_reason FROM clips ORDER BY id"))
         assert [tuple(row[:3]) for row in clips] == [(1,"clip-1.mp4","clip-1.jpg"),(None,"clip-2.mp4","clip-2.jpg"),(None,"clip-3.mp4","clip-3.jpg")]
         assert all(row[3] is not None and row[4] == op.RETIRE_REASON for row in clips)
-        assert con.execute("SELECT workflow_status FROM videos").fetchone()[0] == "draft"
+        assert con.execute("SELECT workflow_status FROM videos").fetchone()[0] == "rejected"
         assert con.execute("SELECT status FROM submissions WHERE id=1").fetchone()[0] == "superseded"
         latest = list(con.execute("SELECT d.status,d.feedback,d.reviewer_id,d.carried_from_decision_id FROM behavior_review_decisions d JOIN (SELECT submission_annotation_id,max(sequence) sequence FROM behavior_review_decisions GROUP BY submission_annotation_id) x ON x.submission_annotation_id=d.submission_annotation_id AND x.sequence=d.sequence"))
         assert latest and all(tuple(r) == ("pending", None, None, None) for r in latest)
@@ -167,7 +167,8 @@ def test_normal_multi_video_lifecycles_reset_and_reopen(tmp_path):
         assert con.execute("SELECT count(*) FROM behavior_review_reopens WHERE submission_id=10").fetchone()[0] == 1
         assert con.execute("SELECT count(*) FROM behavior_review_reopens WHERE submission_id=12").fetchone()[0] == 1
         assert con.execute("SELECT status FROM submissions WHERE id=13").fetchone()[0] == "withdrawn"
-        assert con.execute("SELECT count(*) FROM videos WHERE project_id=2 AND workflow_status='draft'").fetchone()[0] == 4
+        assert con.execute("SELECT count(*) FROM videos WHERE project_id=2 AND workflow_status='draft'").fetchone()[0] == 3
+        assert con.execute("SELECT workflow_status FROM videos WHERE id=1").fetchone()[0] == "rejected"
 
 
 def test_exact_baseline_rejected_and_transaction_rollback(tmp_path):

@@ -327,8 +327,15 @@ def verify_connection(db: sqlite3.Connection, backend: Path, *, production_count
            a["material_state"] is None or json.loads(a["material_state"]) != material_state(a) or
            a["material_digest"] != sha(material_state(a)) for a in annotations):
         raise Stop("annotation reset/material verification failed")
-    if db.execute("SELECT count(*) FROM videos WHERE project_id=? AND (workflow_status!='draft' OR submitted_at IS NOT NULL OR approved_at IS NOT NULL OR approved_by IS NOT NULL)", (PROJECT_ID,)).fetchone()[0]:
-        raise Stop("video draft reset verification failed")
+    if db.execute("SELECT count(*) FROM videos WHERE project_id=? AND (submitted_at IS NOT NULL OR approved_at IS NOT NULL OR approved_by IS NOT NULL)", (PROJECT_ID,)).fetchone()[0]:
+        raise Stop("video review timestamps were not cleared")
+    if db.execute("SELECT count(*) FROM videos v WHERE v.project_id=? AND EXISTS ("
+                  "SELECT 1 FROM clips c LEFT JOIN annotations a ON a.id=c.annotation_id "
+                  "LEFT JOIN submission_annotations sa ON sa.id=c.submission_annotation_id "
+                  "LEFT JOIN submissions s ON s.id=sa.submission_id "
+                  "WHERE c.project_id=? AND c.retired_reason=? AND coalesce(a.video_id,s.video_id)=v.id) "
+                  "AND v.workflow_status!='rejected'", (PROJECT_ID, PROJECT_ID, RETIRE_REASON)).fetchone()[0]:
+        raise Stop("retired Clip videos were not rejected")
     if rows(db, "SELECT d.id FROM behavior_review_decisions d JOIN submission_annotations a ON a.id=d.submission_annotation_id JOIN submissions s ON s.id=a.submission_id JOIN videos v ON v.id=s.video_id WHERE v.project_id=? AND d.sequence=(SELECT max(x.sequence) FROM behavior_review_decisions x WHERE x.submission_annotation_id=d.submission_annotation_id) AND (d.status!='pending' OR d.feedback IS NOT NULL OR d.reviewer_id IS NOT NULL OR d.carried_from_decision_id IS NOT NULL)", (PROJECT_ID,)):
         raise Stop("latest decision authority was not reset")
     if rows(db, "SELECT s.id FROM submissions s JOIN videos v ON v.id=s.video_id WHERE v.project_id=? AND s.status IN ('submitted','approved')", (PROJECT_ID,)):
@@ -414,6 +421,10 @@ def apply_offline(db_path: Path, backend: Path, fingerprint: str, plan_hash: str
         }
         before = scheme_snapshot(current["project"], current["categories"])
         clip_rows = rows(db, "SELECT id,clip_path,thumbnail_path FROM clips WHERE project_id=? ORDER BY id", (PROJECT_ID,))
+        clip_video_ids = [r["video_id"] for r in rows(db, "SELECT DISTINCT coalesce(a.video_id,s.video_id) video_id "
+            "FROM clips c LEFT JOIN annotations a ON a.id=c.annotation_id "
+            "LEFT JOIN submission_annotations sa ON sa.id=c.submission_annotation_id "
+            "LEFT JOIN submissions s ON s.id=sa.submission_id WHERE c.project_id=?", (PROJECT_ID,)) if r["video_id"] is not None]
         for name in DROP_TRIGGERS: db.execute(f'DROP TRIGGER "{name}"')
         stamp = now()
         db.execute("UPDATE clips SET retired_at=?,retired_reason=? WHERE project_id=? AND retired_at IS NULL",
@@ -478,6 +489,9 @@ def apply_offline(db_path: Path, backend: Path, fingerprint: str, plan_hash: str
                        (canonical(state), digest, stamp, annotation["id"]))
         db.execute("UPDATE videos SET workflow_status='draft',annotation_revision=annotation_revision+1,"
                    "submitted_at=NULL,approved_at=NULL,approved_by=NULL WHERE project_id=?", (PROJECT_ID,))
+        if clip_video_ids:
+            db.execute(f"UPDATE videos SET workflow_status='rejected' WHERE id IN ({','.join('?' for _ in clip_video_ids)})",
+                       clip_video_ids)
         project = current["project"]
         db.execute("UPDATE projects SET category_scheme_version=category_scheme_version+1 WHERE id=?", (PROJECT_ID,))
         for name in DROP_TRIGGERS:
