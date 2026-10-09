@@ -1,12 +1,12 @@
 """Add optional video distance calibration.
 
-Revision ID: 0019; Revises: 0018.
+Revision ID: 0020; Revises: 0019.
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0019"
-down_revision = "0018"
+revision = "0020"
+down_revision = "0019"
 branch_labels = depends_on = None
 
 
