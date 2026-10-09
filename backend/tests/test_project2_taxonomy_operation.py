@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from app.migration import downgrade_to, upgrade_to
+from app.migration import downgrade_to, inspect_state, upgrade_to
 from app import database as db_mod
 from app.behavior_review import approved_snapshots, locked_annotation_ids, rejected_blockers
 from app.models import BehaviorCategory, Project, Submission
@@ -198,6 +198,7 @@ def test_0019_adds_clip_retirement_fields(tmp_path):
     upgrade_to(f"sqlite:///{db.as_posix()}", "0019")
     with sqlite3.connect(db) as con:
         assert {"retired_at", "retired_reason"} <= {row[1] for row in con.execute("PRAGMA table_info(clips)")}
+    assert inspect_state(f"sqlite:///{db.as_posix()}") == "versioned"
 
 
 def test_plan_and_backup_on_0018_remain_valid_after_0019_upgrade(tmp_path):
