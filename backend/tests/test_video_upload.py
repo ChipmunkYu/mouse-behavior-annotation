@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import io
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,78 @@ from sqlalchemy.orm import Session
 from app import models
 from app.models import ProjectMembership
 from app.routers import videos as videos_module
+from app import upload_io
+
+
+def test_shared_upload_write_does_not_block_event_loop(tmp_path, monkeypatch):
+    real_open = open
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowFile:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+        def write(self, chunk):
+            entered.set()
+            assert release.wait(2)
+            return self._wrapped.write(chunk)
+
+    monkeypatch.setattr(upload_io, "open", lambda *a, **k: SlowFile(real_open(*a, **k)), raising=False)
+
+    async def exercise():
+        upload = sd.UploadFile(file=io.BytesIO(b"payload"), filename="x.bin")
+        task = asyncio.create_task(upload_io.atomic_save_upload(
+            upload, tmp_path, "target.bin", 1024, lambda _extra: None,
+            lambda: ValueError("empty"),
+        ))
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        ticked = False
+        await asyncio.sleep(0.01)
+        ticked = True
+        release.set()
+        path, _ = await task
+        return ticked, path
+
+    ticked, path = asyncio.run(exercise())
+    assert ticked and path.read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("phase", ["fsync", "replace"])
+def test_shared_upload_publish_failure_cleans_part_and_final(tmp_path, monkeypatch, phase):
+    def fail(*_args):
+        raise OSError(phase)
+    monkeypatch.setattr(upload_io.os, phase, fail)
+    upload = sd.UploadFile(file=io.BytesIO(b"payload"), filename="x.bin")
+    with pytest.raises(OSError, match=phase):
+        asyncio.run(upload_io.atomic_save_upload(
+            upload, tmp_path, "target.bin", 1024, lambda _extra: None,
+            lambda: ValueError("empty"),
+        ))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_shared_upload_flush_failure_cleans_part(tmp_path, monkeypatch):
+    real_open = open
+    class FlushFailure:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+        def flush(self):
+            raise OSError("flush")
+    monkeypatch.setattr(
+        upload_io, "open", lambda *a, **k: FlushFailure(real_open(*a, **k)), raising=False
+    )
+    upload = sd.UploadFile(file=io.BytesIO(b"payload"), filename="x.bin")
+    with pytest.raises(OSError, match="flush"):
+        asyncio.run(upload_io.atomic_save_upload(
+            upload, tmp_path, "target.bin", 1024, lambda _extra: None,
+            lambda: ValueError("empty"),
+        ))
+    assert list(tmp_path.iterdir()) == []
 
 
 class _RecordingDisplayWorker:
@@ -156,10 +229,10 @@ def test_upload_hash_wait_abort_after_rename_cleans_final(
     pid = _make_project(ctx, login_headers)
     ctx.client.app.state.settings.display_proxies_enabled = True
 
-    async def abort_hash(*_args, **_kwargs):
+    def abort_hash(*_args, **_kwargs):
         raise abort
 
-    monkeypatch.setattr(videos_module.to_thread, "run_sync", abort_hash)
+    monkeypatch.setattr(videos_module, "hash_display_proxy_source", abort_hash)
     with ctx.session_factory() as db:
         project = db.get(models.Project, pid)
         membership = db.query(ProjectMembership).filter_by(project_id=pid).one()

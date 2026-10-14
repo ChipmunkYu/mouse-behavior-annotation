@@ -10,6 +10,7 @@ import json
 import math
 import os
 import shutil
+import anyio
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -45,6 +46,7 @@ from ..models import (
     VideoImportBatch,
 )
 from ..permissions import is_manager
+from ..upload_io import atomic_save_upload, cleanup_upload
 from ..schemas import (
     BatchStatusOut,
     DetectionImportCurrentOut,
@@ -609,6 +611,19 @@ def _streaming_sha256(file_path: Path) -> str:
     return h.hexdigest()
 
 
+def _prepare_replacement_files(
+    tracks_rel: str, metadata_rel: str, directory: Path, settings
+) -> tuple[dict, set[int], list[tuple[int, int, dict]], str, str]:
+    meta, frames, detections = _run_validation_pipeline(
+        tracks_rel, metadata_rel, directory, settings
+    )
+    return (
+        meta, frames, detections,
+        _streaming_sha256(directory / tracks_rel),
+        _streaming_sha256(directory / metadata_rel),
+    )
+
+
 def _insert_detection_import_data(
     db: Session,
     video_id: int,
@@ -620,12 +635,14 @@ def _insert_detection_import_data(
     flat_detections: list[tuple[int, int, dict]],
     user_id: int,
     detection_imports_dir: Path,
+    tracks_sha: str | None = None,
+    metadata_sha: str | None = None,
 ) -> DetectionImport:
     """在同一事务内创建 DetectionImport 与 immutable RawDetection baseline。"""
     tracks_full = detection_imports_dir / tracks_rel_path
     metadata_full = detection_imports_dir / metadata_rel_path
-    tracks_sha = _streaming_sha256(tracks_full)
-    metadata_sha = _streaming_sha256(metadata_full)
+    tracks_sha = tracks_sha or _streaming_sha256(tracks_full)
+    metadata_sha = metadata_sha or _streaming_sha256(metadata_full)
 
     # frame_range 来自 JSONL 中出现的所有帧（含 zero-detection 帧）
     if seen_frames:
@@ -879,8 +896,7 @@ async def upload_batch_file(
             raise HTTPException(status_code=409, detail="Import batch state changed concurrently")
         db.commit()
     except BaseException as exc:
-        if final_path is not None:
-            _remove_if_exists(final_path)
+        await cleanup_upload(final_path)
         release_slot()
         if isinstance(exc, HTTPException):
             raise
@@ -888,7 +904,8 @@ async def upload_batch_file(
             raise HTTPException(status_code=500, detail="Failed to save uploaded file") from exc
         raise
     finally:
-        await file.close()
+        with anyio.CancelScope(shield=True):
+            await file.close()
 
     batch = _require_batch(db, batch_id, project_id)
     cleanup_replaced_batch_file(db, batch, role, old_path, settings)
@@ -904,43 +921,14 @@ def _check_upload_disk_space(dir_path: Path, reserve: int, extra: int = 0) -> No
 async def _atomic_save_async(
     file: UploadFile, dir_path: Path, suffix: str, chunk_size: int, reserve: int
 ) -> tuple[Path, int]:
-    """按块检查容量并原子保存上传。"""
-    dir_path.mkdir(parents=True, exist_ok=True)
+    """按块检查容量并原子保存上传；保留供测试 patch 的 async 边界。"""
     uid = uuid4().hex
-    temp_path = dir_path / f"{uid}.part"
     final_name = f"{uid}{suffix}"
-    final_path = dir_path / final_name
-    written = 0
-    temp_file = None
-    try:
-        _check_upload_disk_space(dir_path, reserve)
-        temp_file = open(temp_path, "wb")
-        while True:
-            chunk = await file.read(chunk_size)
-            if not chunk:
-                break
-            _check_upload_disk_space(dir_path, reserve, len(chunk))
-            temp_file.write(chunk)
-            written += len(chunk)
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
-        temp_file.close()
-        temp_file = None
-        if written == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-        os.replace(temp_path, final_path)
-        return final_path, written
-    finally:
-        if temp_file is not None:
-            try:
-                temp_file.close()
-            except OSError:
-                pass
-        if temp_path is not None and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except OSError:
-                pass
+    return await atomic_save_upload(
+        file, dir_path, final_name, chunk_size,
+        lambda extra: _check_upload_disk_space(dir_path, reserve, extra),
+        lambda: HTTPException(status_code=400, detail="Uploaded file is empty"),
+    )
 
 
 def _media_status_for_ext(ext: str) -> str:
@@ -1331,32 +1319,30 @@ async def replace_detection_import(
             metadata_file, detection_imports_dir, ALLOWED_METADATA_EXT,
             settings.upload_chunk_size, settings.upload_disk_reserve_bytes,
         )
-    except HTTPException:
-        if tracks_final is not None:
-            _remove_if_exists(tracks_final)
-        if metadata_final is not None:
-            _remove_if_exists(metadata_final)
-        raise
-    except Exception:
-        if tracks_final is not None:
-            _remove_if_exists(tracks_final)
-        if metadata_final is not None:
-            _remove_if_exists(metadata_final)
-        raise HTTPException(status_code=500, detail="Failed to save detection files")
+    except BaseException as exc:
+        await cleanup_upload(tracks_final, metadata_final)
+        if isinstance(exc, HTTPException) or not isinstance(exc, Exception):
+            raise
+        raise HTTPException(status_code=500, detail="Failed to save detection files") from exc
     finally:
-        await tracks_file.close()
-        await metadata_file.close()
+        with anyio.CancelScope(shield=True):
+            await tracks_file.close()
+            await metadata_file.close()
 
     tracks_rel = tracks_final.name
     metadata_rel = metadata_final.name
 
     # 校验
     try:
-        meta_info, seen_frames, flat_detections = _run_validation_pipeline(tracks_rel, metadata_rel, detection_imports_dir, settings)
+        meta_info, seen_frames, flat_detections, tracks_sha, metadata_sha = (
+            await anyio.to_thread.run_sync(
+                _prepare_replacement_files,
+                tracks_rel, metadata_rel, detection_imports_dir, settings,
+            )
+        )
         _validate_replacement_compatibility(db, video, meta_info)
-    except Exception:
-        _remove_if_exists(tracks_final)
-        _remove_if_exists(metadata_final)
+    except BaseException:
+        await cleanup_upload(tracks_final, metadata_final)
         raise
 
     # Fix 4: 确认步骤 — 不确认时返回受影响摘要预览
@@ -1394,8 +1380,7 @@ async def replace_detection_import(
             "detection_count": len(flat_detections),
             "unique_track_count": len({d[2].get("track_id", 0) for d in flat_detections}),
         }
-        _remove_if_exists(tracks_final)
-        _remove_if_exists(metadata_final)
+        await cleanup_upload(tracks_final, metadata_final)
         return preview
 
     try:
@@ -1424,6 +1409,7 @@ async def replace_detection_import(
                 tracks_rel_path=tracks_rel, metadata_rel_path=metadata_rel,
                 seen_frames=seen_frames, flat_detections=flat_detections,
                 user_id=membership.user_id, detection_imports_dir=detection_imports_dir,
+                tracks_sha=tracks_sha, metadata_sha=metadata_sha,
             )
             video.detection_import_revision = new_revision
             video.identity_revision = 0

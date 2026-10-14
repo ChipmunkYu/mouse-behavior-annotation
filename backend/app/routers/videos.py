@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hmac
 import math
-import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +13,7 @@ from collections.abc import Iterator
 from typing import Literal
 
 import jwt
+import anyio
 from anyio import to_thread
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -33,6 +33,7 @@ from ..media_auth import (
     MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
 )
 from ..permissions import is_manager, require_editor, require_manager
+from ..upload_io import atomic_save_upload, cleanup_upload
 from ..video_delete_db import (
     VideoDeleteConflictError, VideoDeleteForbiddenError, VideoDeleteIntegrityError,
     VideoDeleteNotFoundError,
@@ -408,7 +409,6 @@ async def upload_video(
         raise HTTPException(status_code=400, detail=ERR_EXTENSION_NOT_ALLOWED)
 
     videos_dir = settings.videos_dir.resolve()
-    videos_dir.mkdir(parents=True, exist_ok=True)
     reserve = settings.upload_disk_reserve_bytes
     chunk_size = max(1, settings.upload_chunk_size)
 
@@ -418,31 +418,13 @@ async def upload_video(
     temp_path = videos_dir / f"{uid}.part"
     final_path = videos_dir / final_name
 
-    written = 0
-    temp_file = None
     final_owned_by_database = False
     try:
-        # 写入前检查一次可用空间
-        _check_disk_space(videos_dir, reserve)
-        temp_file = open(temp_path, "wb")
-        while True:
-            chunk = await file.read(chunk_size)  # 分块读取，绝不一次 read 全部
-            if not chunk:
-                break
-            # 每块写入前检查：写入本块后仍须保留安全余量
-            _check_disk_space(videos_dir, reserve, len(chunk))
-            temp_file.write(chunk)
-            written += len(chunk)
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
-        temp_file.close()
-        temp_file = None
-
-        if written == 0:
-            raise _EmptyUpload()
-
-        # 原子 rename：成功后 temp_path 不再存在
-        os.replace(temp_path, final_path)
+        final_path, _written = await atomic_save_upload(
+            file, videos_dir, final_name, chunk_size,
+            lambda extra: _check_disk_space(videos_dir, reserve, extra),
+            _EmptyUpload,
+        )
         temp_path = None
 
         source_sha256 = None
@@ -516,16 +498,9 @@ async def upload_video(
     except _EmptyUpload:
         raise HTTPException(status_code=400, detail=ERR_EMPTY_FILE)
     finally:
-        if temp_file is not None:
-            try:
-                temp_file.close()
-            except OSError:
-                pass
-        if temp_path is not None:
-            _remove_file(temp_path)
-        if not final_owned_by_database:
-            _remove_file(final_path)
-        await file.close()
+        await cleanup_upload(temp_path, None if final_owned_by_database else final_path)
+        with anyio.CancelScope(shield=True):
+            await file.close()
 
 
 @router.post(
