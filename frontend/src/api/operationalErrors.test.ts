@@ -1,24 +1,55 @@
-import { describe, expect, it } from "vitest";
-import { ApiError, operationalErrorDetail } from "./client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, apiFetch, operationalErrorDetail } from "./client";
 import { actionError, deleteError } from "../pages/VideosPage";
 import { friendlyError } from "../pages/ProjectManagementPage";
 
 const structured = (code: string, message = "server message") =>
-  new ApiError(409, message, message, code, { video_id: 7 });
+  new ApiError(409, message, { detail: message, code, context: { video_id: 7 } }, code, { video_id: 7 });
 const nested = (code: string, message = "server message") =>
   new ApiError(409, message, { detail: { code, message, context: { video_id: 7 } } });
 
 describe("stable operational errors", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("reads structured details and rejects legacy/non-ApiError values", () => {
     expect(operationalErrorDetail(structured("video_release_not_allowed"))).toEqual({
       code: "video_release_not_allowed", message: "server message", context: { video_id: 7 },
     });
-    expect(structured("video_release_not_allowed").detail).toBe("server message");
+    expect(structured("video_release_not_allowed").detail).toEqual({
+      detail: "server message", code: "video_release_not_allowed", context: { video_id: 7 },
+    });
     expect(operationalErrorDetail(nested("video_release_not_allowed"))).toEqual({
       code: "video_release_not_allowed", message: "server message", context: { video_id: 7 },
     });
     expect(operationalErrorDetail(new ApiError(409, "legacy", { detail: "legacy" }))).toBeNull();
     expect(operationalErrorDetail(new Error("plain"))).toBeNull();
+  });
+
+  it("preserves response details while exposing top-level operational metadata", async () => {
+    const detail = { message: "validation failed", items: [1], errors: ["bad row"], conflicts: [{ id: 2 }] };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail }), { status: 422 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        detail: "release denied", code: "video_release_not_allowed", context: { video_id: 7 },
+      }), { status: 409 }));
+    vi.stubGlobal("localStorage", { getItem: () => null });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const validationError = await apiFetch("/validation").catch((error: unknown) => error);
+    expect(validationError).toBeInstanceOf(ApiError);
+    expect((validationError as ApiError).detail).toEqual({ detail });
+    expect((validationError as ApiError).detail).toMatchObject({
+      detail: { items: [1], errors: ["bad row"], conflicts: [{ id: 2 }] },
+    });
+
+    const operationalError = await apiFetch("/release").catch((error: unknown) => error);
+    expect(operationalError).toBeInstanceOf(ApiError);
+    expect((operationalError as ApiError).detail).toEqual({
+      detail: "release denied", code: "video_release_not_allowed", context: { video_id: 7 },
+    });
+    expect(operationalErrorDetail(operationalError)).toEqual({
+      code: "video_release_not_allowed", message: "release denied", context: { video_id: 7 },
+    });
   });
 
   it("maps only known page codes and preserves unknown/string fallback", () => {

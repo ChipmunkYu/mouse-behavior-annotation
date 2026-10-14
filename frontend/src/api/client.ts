@@ -46,7 +46,8 @@ export interface OperationalErrorDetail {
 export function operationalErrorDetail(error: unknown): OperationalErrorDetail | null {
   if (!(error instanceof ApiError)) return null;
   if (typeof error.code === "string") {
-    return { code: error.code, message: typeof error.detail === "string" ? error.detail : error.message,
+    const detail = apiErrorDetail(error);
+    return { code: error.code, message: typeof detail === "string" ? detail : error.message,
       context: error.context ?? {} };
   }
   const detail = apiErrorDetail(error);
@@ -152,7 +153,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
     const metadata = rawDetail && typeof rawDetail === "object"
       ? rawDetail as Record<string, unknown> : {};
     throw new ApiError(
-      res.status, friendlyDetail(res.status, detail), detail,
+      res.status, friendlyDetail(res.status, detail), rawDetail,
       typeof metadata.code === "string" ? metadata.code : undefined,
       metadata.context && typeof metadata.context === "object" && !Array.isArray(metadata.context)
         ? metadata.context as Record<string, unknown> : undefined,
