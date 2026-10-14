@@ -16,7 +16,10 @@ from ..draft_detection_edits import (
 from ..models import DetectionImport, DraftIdentityEdit, Video
 from ..permissions import require_editor as require_edit_permission
 from ..participant_role_conflicts import conflict_payload, role_track_conflicts
-from ..schemas import IdentityEditCheckRequest, IdentityEditCommitRequest, IdentityEditRevertRequest
+from ..schemas import (
+    IdentityEditCheckOut, IdentityEditCheckRequest, IdentityEditCommitRequest,
+    IdentityEditHistoryOut, IdentityEditResultOut, IdentityEditRevertRequest,
+)
 from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["identity-edits"])
@@ -42,7 +45,7 @@ def _get_active_import(db: Session, video_id: int) -> DetectionImport:
     return detection_import
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits/check")
+@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits/check", response_model=IdentityEditCheckOut, response_model_exclude_unset=True)
 def check_identity_edit(
     project_id: int,
     video_id: int,
@@ -72,7 +75,7 @@ def check_identity_edit(
     return result
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits")
+@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits", response_model=IdentityEditResultOut, response_model_exclude_unset=True)
 def commit_identity_edit(
     project_id: int,
     video_id: int,
@@ -105,7 +108,7 @@ def commit_identity_edit(
         )
 
 
-@router.get("/api/projects/{project_id}/videos/{video_id}/identity-edits/history")
+@router.get("/api/projects/{project_id}/videos/{video_id}/identity-edits/history", response_model=list[IdentityEditHistoryOut])
 def get_identity_edit_history(
     project_id: int,
     video_id: int,
@@ -141,7 +144,7 @@ def get_identity_edit_history(
     ]
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert")
+@router.post("/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert", response_model=IdentityEditResultOut, response_model_exclude_unset=True)
 def revert_identity_edit(
     project_id: int,
     video_id: int,

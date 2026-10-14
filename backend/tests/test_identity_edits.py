@@ -232,8 +232,10 @@ def test_split_writes_only_sparse_affected_rows_and_history(ctx, login_headers):
         f"{_identity_url(project_id, video_id)}/check", json=_split_payload(), headers=headers
     )
     assert preview.status_code == 200
-    assert preview.json()["detections_before"] == 2
-    assert preview.json()["detections_after"] == 2
+    assert preview.json() == {
+        "operation": "split", "old_display_track_id": 1, "new_display_track_id": 4,
+        "split_frame": 2, "detections_before": 2, "detections_after": 2,
+    }
     response = ctx.client.post(
         _identity_url(project_id, video_id), json=_split_payload(), headers=headers
     )

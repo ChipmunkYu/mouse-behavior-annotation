@@ -2036,7 +2036,7 @@ export default function AnnotatePage() {
       if (check.conflict_frames?.length) { setErrorMsg(`Merge 冲突：帧 ${check.conflict_frames.slice(0, 12).join("、")} 同一 track ID 将对应多个框，请先忽略误检框`); return; }
       const ok = await confirm({
         title: operation === "split" ? `Split track ID ${identitySelectedMouseIds[0]}？` : `Merge ${identitySelectedMouseIds.length} 个 track？`,
-        message: <>{operation === "split" ? <>从帧 <b>{currentFrame}</b> 起生成新 track ID，前后分别有 {check.detections_before} / {check.detections_after} 个检测。</> : <>保留 track ID <b>{check.retained_display_track_id}</b>，影响 {check.affected_detection_count} 个检测。</>}<br />受影响行为标注：<b>{check.affected_annotation_count}</b> 条。</>,
+        message: <>{operation === "split" ? <>从帧 <b>{currentFrame}</b> 起生成新 track ID，前后分别有 {check.detections_before} / {check.detections_after} 个检测。</> : <>保留 track ID <b>{check.retained_display_track_id}</b>，影响 {check.affected_detection_count} 个检测。</>}</>,
         confirmLabel: operation === "split" ? "确认 Split" : "确认 Merge",
       });
       if (!ok) return;

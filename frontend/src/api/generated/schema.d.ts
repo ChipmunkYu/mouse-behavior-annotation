@@ -1804,6 +1804,44 @@ export interface components {
             total: number;
         };
         /**
+         * CorrectedTrackSummaryOut
+         * @description corrected-tracks 端点：轨迹摘要与当前帧可见性。
+         */
+        CorrectedTrackSummaryOut: {
+            /** Detection Count */
+            detection_count: number;
+            /** Display Track Id */
+            display_track_id: number;
+            /** First Frame */
+            first_frame?: number | null;
+            /** Last Frame */
+            last_frame?: number | null;
+            /** Visible In Current Frame */
+            visible_in_current_frame?: boolean | null;
+        };
+        /** CorrectedTracksExportOut */
+        CorrectedTracksExportOut: {
+            /** Manifest */
+            manifest: {
+                [key: string]: unknown;
+            };
+            /** Tracks Corrected */
+            tracks_corrected: string[];
+        };
+        /** CorrectedTracksOut */
+        CorrectedTracksOut: {
+            /** Items */
+            items: components["schemas"]["CorrectedTrackSummaryOut"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Pages */
+            pages: number;
+            /** Total */
+            total: number;
+        };
+        /**
          * DetectionImportCurrentOut
          * @description 当前活动 DetectionImport 摘要。
          */
@@ -1893,6 +1931,56 @@ export interface components {
             /** Unordered Force Reselection Count */
             unordered_force_reselection_count: number;
         };
+        /** DetectionSuppressionSummaryOut */
+        DetectionSuppressionSummaryOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Frozen Detection Count */
+            frozen_detection_count: number;
+            /** Id */
+            id: number;
+            /** Result Identity Revision */
+            result_identity_revision: number;
+            /**
+             * Scope
+             * @constant
+             */
+            scope: "corrected_track";
+        };
+        /**
+         * DetectionWithTrackOut
+         * @description detections 端点：带 display_track_id 与修订号的检测条目。
+         */
+        DetectionWithTrackOut: {
+            /** Box Xyxy Px */
+            box_xyxy_px?: (number)[] | null;
+            /** Confidence */
+            confidence?: number | null;
+            /** Detection Id */
+            detection_id: number;
+            /** Display Track Id */
+            display_track_id: number;
+            /** Frame Index */
+            frame_index: number;
+            /** Identity Revision */
+            identity_revision: number;
+            /** Import Revision */
+            import_revision: number;
+            /** Keypoints */
+            keypoints?: unknown[] | null;
+            /** Raw Track Id */
+            raw_track_id: number;
+        };
+        /** DetectionsOut */
+        DetectionsOut: {
+            /** Detections */
+            detections: components["schemas"]["DetectionWithTrackOut"][];
+            /** Total */
+            total: number;
+        };
         /** DistanceCalibrationOut */
         DistanceCalibrationOut: {
             /** Cm Per Pixel */
@@ -1944,6 +2032,36 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** IdentityEditCheckOut */
+        IdentityEditCheckOut: {
+            /** Affected Detection Count */
+            affected_detection_count?: number | null;
+            /** Conflict Frames */
+            conflict_frames?: number[] | null;
+            /** Conflicts */
+            conflicts?: components["schemas"]["TrackRoleConflictOut"][] | null;
+            /** Detections After */
+            detections_after?: number | null;
+            /** Detections Before */
+            detections_before?: number | null;
+            /** Merged Display Track Ids */
+            merged_display_track_ids?: number[] | null;
+            /** Message */
+            message?: string | null;
+            /** New Display Track Id */
+            new_display_track_id?: number | null;
+            /** Old Display Track Id */
+            old_display_track_id?: number | null;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            operation: "split" | "merge";
+            /** Retained Display Track Id */
+            retained_display_track_id?: number | null;
+            /** Split Frame */
+            split_frame?: number | null;
+        };
         /** IdentityEditCheckRequest */
         IdentityEditCheckRequest: {
             /** Base Detection Import Revision */
@@ -1975,6 +2093,71 @@ export interface components {
             operation: "split" | "merge";
             /** Track Ids */
             track_ids: number[];
+        };
+        /** IdentityEditHistoryOut */
+        IdentityEditHistoryOut: {
+            /** Affected Annotations */
+            affected_annotations?: unknown[] | null;
+            /** Affected Detections */
+            affected_detections?: unknown[] | null;
+            /** Base Identity Revision */
+            base_identity_revision: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Detection Import Id */
+            detection_import_id: number;
+            /** Id */
+            id: number;
+            /** Operation */
+            operation: string;
+            /** Operator Id */
+            operator_id?: number | null;
+            /** Params */
+            params?: {
+                [key: string]: unknown;
+            } | null;
+            /** Result Identity Revision */
+            result_identity_revision: number;
+            /** Reverted Edit Id */
+            reverted_edit_id?: number | null;
+            /** Video Id */
+            video_id: number;
+        };
+        /** IdentityEditResultOut */
+        IdentityEditResultOut: {
+            /** Affected Annotation Count */
+            affected_annotation_count?: number | null;
+            /** Affected Detection Count */
+            affected_detection_count?: number | null;
+            /** Affected Track Ids */
+            affected_track_ids?: number[] | null;
+            /** Edit Id */
+            edit_id?: number | null;
+            /** Freed Detection Count */
+            freed_detection_count?: number | null;
+            /** Frozen Detection Count */
+            frozen_detection_count?: number | null;
+            /** Identity Revision */
+            identity_revision: number;
+            /** Merged Display Track Ids */
+            merged_display_track_ids?: number[] | null;
+            /** Message */
+            message?: string | null;
+            /** Needs Mouse Ids Annotation Ids */
+            needs_mouse_ids_annotation_ids?: number[] | null;
+            /** New Display Track Id */
+            new_display_track_id?: number | null;
+            /** Old Display Track Id */
+            old_display_track_id?: number | null;
+            /** Retained Display Track Id */
+            retained_display_track_id?: number | null;
+            /** Reverted Edit Id */
+            reverted_edit_id?: number | null;
+            /** Suppression Id */
+            suppression_id?: number | null;
         };
         /** IdentityEditRevertRequest */
         IdentityEditRevertRequest: {
@@ -2321,6 +2504,25 @@ export interface components {
             base_detection_import_revision: number;
             /** Base Identity Revision */
             base_identity_revision: number;
+        };
+        /** TrackRoleConflictOut */
+        TrackRoleConflictOut: {
+            /** Annotation Id */
+            annotation_id: number;
+            /** End Frame */
+            end_frame: number;
+            /** End Time */
+            end_time: number;
+            /** Role Key */
+            role_key: string;
+            /** Role Name */
+            role_name?: string | null;
+            /** Start Frame */
+            start_frame: number;
+            /** Start Time */
+            start_time: number;
+            /** Track Id */
+            track_id: number;
         };
         /** UserOut */
         UserOut: {
@@ -3956,7 +4158,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CorrectedTracksOut"];
                 };
             };
             /** @description Validation Error */
@@ -4059,9 +4261,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["DetectionSuppressionSummaryOut"][];
                 };
             };
             /** @description Validation Error */
@@ -4097,9 +4297,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IdentityEditResultOut"];
                 };
             };
             /** @description Validation Error */
@@ -4136,9 +4334,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IdentityEditResultOut"];
                 };
             };
             /** @description Validation Error */
@@ -4173,7 +4369,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DetectionsOut"];
                 };
             };
             /** @description Validation Error */
@@ -4209,7 +4405,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CorrectedTracksExportOut"];
                 };
             };
             /** @description Validation Error */
@@ -4313,9 +4509,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IdentityEditResultOut"];
                 };
             };
             /** @description Validation Error */
@@ -4351,9 +4545,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IdentityEditCheckOut"];
                 };
             };
             /** @description Validation Error */
@@ -4387,9 +4579,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["IdentityEditHistoryOut"][];
                 };
             };
             /** @description Validation Error */
@@ -4426,9 +4616,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IdentityEditResultOut"];
                 };
             };
             /** @description Validation Error */

@@ -1861,6 +1861,116 @@
         "title": "ClipPageOut",
         "type": "object"
       },
+      "CorrectedTrackSummaryOut": {
+        "description": "corrected-tracks 端点：轨迹摘要与当前帧可见性。",
+        "properties": {
+          "detection_count": {
+            "title": "Detection Count",
+            "type": "integer"
+          },
+          "display_track_id": {
+            "title": "Display Track Id",
+            "type": "integer"
+          },
+          "first_frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Frame"
+          },
+          "last_frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Frame"
+          },
+          "visible_in_current_frame": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visible In Current Frame"
+          }
+        },
+        "required": [
+          "display_track_id",
+          "detection_count"
+        ],
+        "title": "CorrectedTrackSummaryOut",
+        "type": "object"
+      },
+      "CorrectedTracksExportOut": {
+        "properties": {
+          "manifest": {
+            "additionalProperties": true,
+            "title": "Manifest",
+            "type": "object"
+          },
+          "tracks_corrected": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tracks Corrected",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tracks_corrected",
+          "manifest"
+        ],
+        "title": "CorrectedTracksExportOut",
+        "type": "object"
+      },
+      "CorrectedTracksOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CorrectedTrackSummaryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "pages": {
+            "title": "Pages",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "pages"
+        ],
+        "title": "CorrectedTracksOut",
+        "type": "object"
+      },
       "DetectionImportCurrentOut": {
         "description": "当前活动 DetectionImport 摘要。",
         "properties": {
@@ -2084,6 +2194,145 @@
         "title": "DetectionImportReplacementPreviewOut",
         "type": "object"
       },
+      "DetectionSuppressionSummaryOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "frozen_detection_count": {
+            "title": "Frozen Detection Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "result_identity_revision": {
+            "title": "Result Identity Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "const": "corrected_track",
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "result_identity_revision",
+          "created_at",
+          "frozen_detection_count"
+        ],
+        "title": "DetectionSuppressionSummaryOut",
+        "type": "object"
+      },
+      "DetectionWithTrackOut": {
+        "description": "detections 端点：带 display_track_id 与修订号的检测条目。",
+        "properties": {
+          "box_xyxy_px": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Box Xyxy Px"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "detection_id": {
+            "title": "Detection Id",
+            "type": "integer"
+          },
+          "display_track_id": {
+            "title": "Display Track Id",
+            "type": "integer"
+          },
+          "frame_index": {
+            "title": "Frame Index",
+            "type": "integer"
+          },
+          "identity_revision": {
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "import_revision": {
+            "title": "Import Revision",
+            "type": "integer"
+          },
+          "keypoints": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keypoints"
+          },
+          "raw_track_id": {
+            "title": "Raw Track Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detection_id",
+          "frame_index",
+          "raw_track_id",
+          "display_track_id",
+          "import_revision",
+          "identity_revision"
+        ],
+        "title": "DetectionWithTrackOut",
+        "type": "object"
+      },
+      "DetectionsOut": {
+        "properties": {
+          "detections": {
+            "items": {
+              "$ref": "#/components/schemas/DetectionWithTrackOut"
+            },
+            "title": "Detections",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detections",
+          "total"
+        ],
+        "title": "DetectionsOut",
+        "type": "object"
+      },
       "DistanceCalibrationOut": {
         "additionalProperties": false,
         "properties": {
@@ -2230,6 +2479,153 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "IdentityEditCheckOut": {
+        "properties": {
+          "affected_detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Detection Count"
+          },
+          "conflict_frames": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Frames"
+          },
+          "conflicts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/TrackRoleConflictOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflicts"
+          },
+          "detections_after": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detections After"
+          },
+          "detections_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detections Before"
+          },
+          "merged_display_track_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Display Track Ids"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "new_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Display Track Id"
+          },
+          "old_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Display Track Id"
+          },
+          "operation": {
+            "enum": [
+              "split",
+              "merge"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "retained_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retained Display Track Id"
+          },
+          "split_frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Frame"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "IdentityEditCheckOut",
+        "type": "object"
+      },
       "IdentityEditCheckRequest": {
         "properties": {
           "base_detection_import_revision": {
@@ -2326,6 +2722,284 @@
           "base_detection_import_revision"
         ],
         "title": "IdentityEditCommitRequest",
+        "type": "object"
+      },
+      "IdentityEditHistoryOut": {
+        "properties": {
+          "affected_annotations": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Annotations"
+          },
+          "affected_detections": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Detections"
+          },
+          "base_identity_revision": {
+            "title": "Base Identity Revision",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "detection_import_id": {
+            "title": "Detection Import Id",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "operator_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Id"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          },
+          "result_identity_revision": {
+            "title": "Result Identity Revision",
+            "type": "integer"
+          },
+          "reverted_edit_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverted Edit Id"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "video_id",
+          "detection_import_id",
+          "operation",
+          "base_identity_revision",
+          "result_identity_revision",
+          "created_at"
+        ],
+        "title": "IdentityEditHistoryOut",
+        "type": "object"
+      },
+      "IdentityEditResultOut": {
+        "properties": {
+          "affected_annotation_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Annotation Count"
+          },
+          "affected_detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Detection Count"
+          },
+          "affected_track_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affected Track Ids"
+          },
+          "edit_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edit Id"
+          },
+          "freed_detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freed Detection Count"
+          },
+          "frozen_detection_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frozen Detection Count"
+          },
+          "identity_revision": {
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "merged_display_track_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Display Track Ids"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "needs_mouse_ids_annotation_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Mouse Ids Annotation Ids"
+          },
+          "new_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Display Track Id"
+          },
+          "old_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Display Track Id"
+          },
+          "retained_display_track_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retained Display Track Id"
+          },
+          "reverted_edit_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverted Edit Id"
+          },
+          "suppression_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppression Id"
+          }
+        },
+        "required": [
+          "identity_revision"
+        ],
+        "title": "IdentityEditResultOut",
         "type": "object"
       },
       "IdentityEditRevertRequest": {
@@ -3262,6 +3936,60 @@
           "base_detection_import_revision"
         ],
         "title": "SuppressionRevertRequest",
+        "type": "object"
+      },
+      "TrackRoleConflictOut": {
+        "properties": {
+          "annotation_id": {
+            "title": "Annotation Id",
+            "type": "integer"
+          },
+          "end_frame": {
+            "title": "End Frame",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "number"
+          },
+          "role_key": {
+            "title": "Role Key",
+            "type": "string"
+          },
+          "role_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Name"
+          },
+          "start_frame": {
+            "title": "Start Frame",
+            "type": "integer"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "number"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "annotation_id",
+          "start_time",
+          "end_time",
+          "start_frame",
+          "end_frame",
+          "role_key",
+          "track_id"
+        ],
+        "title": "TrackRoleConflictOut",
         "type": "object"
       },
       "UserOut": {
@@ -6356,7 +7084,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CorrectedTracksOut"
+                }
               }
             },
             "description": "Successful Response"
@@ -6554,8 +7284,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/DetectionSuppressionSummaryOut"
                   },
                   "title": "Response List Active Suppressions Api Projects  Project Id  Videos  Video Id  Detection Suppressions Get",
                   "type": "array"
@@ -6622,9 +7351,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Suppression Api Projects  Project Id  Videos  Video Id  Detection Suppressions Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdentityEditResultOut"
                 }
               }
             },
@@ -6699,9 +7426,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Revert Suppression Api Projects  Project Id  Videos  Video Id  Detection Suppressions  Suppression Id  Revert Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdentityEditResultOut"
                 }
               }
             },
@@ -6782,7 +7507,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionsOut"
+                }
               }
             },
             "description": "Successful Response"
@@ -6878,7 +7605,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CorrectedTracksExportOut"
+                }
               }
             },
             "description": "Successful Response"
@@ -7063,9 +7792,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Commit Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdentityEditResultOut"
                 }
               }
             },
@@ -7131,9 +7858,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Check Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits Check Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdentityEditCheckOut"
                 }
               }
             },
@@ -7200,8 +7925,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/IdentityEditHistoryOut"
                   },
                   "title": "Response Get Identity Edit History Api Projects  Project Id  Videos  Video Id  Identity Edits History Get",
                   "type": "array"
@@ -7279,9 +8003,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Revert Identity Edit Api Projects  Project Id  Videos  Video Id  Identity Edits  Edit Id  Revert Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdentityEditResultOut"
                 }
               }
             },

@@ -94,46 +94,21 @@ export type DetectionReplacementConfirmed = Schemas["DetectionImportReplacementC
 export type DetectionReplacementResponse = DetectionReplacementPreview | DetectionReplacementConfirmed;
 
 export interface Keypoint { x_px?: number; y_px?: number; x?: number; y?: number; confidence?: number }
-export interface DetectionWithTrack {
-  detection_id: number; frame_index: number; raw_track_id: number; display_track_id: number;
-  box_xyxy_px: number[] | null; keypoints: Keypoint[] | null; confidence?: number | null;
-  import_revision: number; identity_revision: number;
-}
-export interface DetectionsResponse { detections: DetectionWithTrack[]; total: number }
-export interface CorrectedTrackSummary {
-  display_track_id: number; first_frame: number | null; last_frame: number | null;
-  detection_count: number; visible_in_current_frame: boolean | null;
-}
-export interface CorrectedTracksResponse { items: CorrectedTrackSummary[]; total: number; page: number; page_size: number; pages: number }
+export type DetectionWithTrack = Schemas["DetectionWithTrackOut"];
+export type DetectionsResponse = Schemas["DetectionsOut"];
+export type CorrectedTrackSummary = Schemas["CorrectedTrackSummaryOut"];
+export type CorrectedTracksResponse = Schemas["CorrectedTracksOut"];
 export interface CorrectedTracksParams { current_frame?: number; search?: string; page?: number; page_size?: number }
 export type IdentityEditCheckRequest = Schemas["IdentityEditCheckRequest"];
-export interface TrackRoleConflict {
-  annotation_id: number; start_time: number; end_time: number; start_frame: number; end_frame: number;
-  role_key: string; role_name: string | null; track_id: number;
-}
-export interface IdentityEditCheckResponse {
-  operation: "split" | "merge"; old_display_track_id?: number; new_display_track_id?: number;
-  split_frame?: number; detections_before?: number; detections_after?: number;
-  retained_display_track_id?: number; merged_display_track_ids?: number[];
-  affected_detection_count?: number; affected_annotation_count: number; conflict_frames?: number[];
-  message?: string; conflicts?: TrackRoleConflict[];
-}
+export type TrackRoleConflict = Schemas["TrackRoleConflictOut"];
+export type IdentityEditCheckResponse = Schemas["IdentityEditCheckOut"];
 export type IdentityEditCommitRequest = Schemas["IdentityEditCommitRequest"];
-export interface IdentityEditResult {
-  edit_id?: number; identity_revision: number; new_display_track_id?: number;
-  retained_display_track_id?: number; affected_detection_count?: number;
-  affected_annotation_count?: number; needs_mouse_ids_annotation_ids?: number[];
-}
-export interface IdentityEdit {
-  id: number; video_id: number; detection_import_id: number; operation: string;
-  base_identity_revision: number; result_identity_revision: number; params: Record<string, unknown> | null;
-  affected_detections: unknown[] | null; affected_annotations: unknown[] | null;
-  operator_id: number | null; created_at: string; reverted_edit_id: number | null;
-}
+export type IdentityEditResult = Schemas["IdentityEditResultOut"];
+export type IdentityEdit = Schemas["IdentityEditHistoryOut"];
 export type SuppressionCreateRequest = Schemas["SuppressionCreateRequest"];
-export interface SuppressionResult { suppression_id?: number; identity_revision: number; frozen_detection_count?: number; freed_detection_count?: number; affected_track_ids?: number[] }
-export interface DetectionSuppression { id: number; scope: string; result_identity_revision: number; created_at: string; frozen_detection_count: number }
-export interface CorrectedTracksExport { tracks_corrected: string[]; manifest: Record<string, unknown> }
+export type SuppressionResult = Schemas["IdentityEditResultOut"];
+export type DetectionSuppression = Schemas["DetectionSuppressionSummaryOut"];
+export type CorrectedTracksExport = Schemas["CorrectedTracksExportOut"];
 
 export type ExportRequestInput = Schemas["ExportRequest"];
 export type MissingClip = Schemas["MissingClipOut"];

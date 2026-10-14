@@ -12,7 +12,7 @@ from ..draft_detection_edits import (
 )
 from ..models import DetectionImport, DraftIdentityEdit, Video
 from ..permissions import require_editor as require_edit_permission
-from ..schemas import SuppressionCreateRequest, SuppressionRevertRequest
+from ..schemas import DetectionSuppressionSummaryOut, IdentityEditResultOut, SuppressionCreateRequest, SuppressionRevertRequest
 from ..video_write_gate import video_write_gate
 
 router = APIRouter(tags=["detection-suppressions"])
@@ -35,7 +35,7 @@ def _get_active_import(db: Session, video_id: int) -> DetectionImport | None:
     )
 
 
-@router.get("/api/projects/{project_id}/videos/{video_id}/detection-suppressions")
+@router.get("/api/projects/{project_id}/videos/{video_id}/detection-suppressions", response_model=list[DetectionSuppressionSummaryOut])
 def list_active_suppressions(
     project_id: int,
     video_id: int,
@@ -67,7 +67,7 @@ def list_active_suppressions(
     ]
 
 
-@router.post("/api/projects/{project_id}/videos/{video_id}/detection-suppressions")
+@router.post("/api/projects/{project_id}/videos/{video_id}/detection-suppressions", response_model=IdentityEditResultOut, response_model_exclude_unset=True)
 def create_suppression(
     project_id: int,
     video_id: int,
@@ -91,6 +91,8 @@ def create_suppression(
 
 @router.post(
     "/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert",
+    response_model=IdentityEditResultOut,
+    response_model_exclude_unset=True,
 )
 def revert_suppression(
     project_id: int,

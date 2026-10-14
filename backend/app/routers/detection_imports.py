@@ -51,7 +51,9 @@ from ..schemas import (
     DetectionImportReplacementConfirmedOut,
     DetectionImportReplacementPreviewOut,
     DetectionWithTrackOut,
-    PageOut,
+    DetectionsOut,
+    CorrectedTracksOut,
+    CorrectedTracksExportOut,
     VideoImportCompletionOut,
     VideoImportBatchOut,
 )
@@ -1507,7 +1509,7 @@ def get_current_detection_import(
     return imp
 
 
-@router.get("/api/projects/{project_id}/videos/{video_id}/detections")
+@router.get("/api/projects/{project_id}/videos/{video_id}/detections", response_model=DetectionsOut)
 def get_detections(
     project_id: int,
     video_id: int,
@@ -1559,7 +1561,7 @@ def get_detections(
     return {"detections": results, "total": total}
 
 
-@router.get("/api/projects/{project_id}/videos/{video_id}/corrected-tracks")
+@router.get("/api/projects/{project_id}/videos/{video_id}/corrected-tracks", response_model=CorrectedTracksOut)
 def get_corrected_tracks(
     project_id: int,
     video_id: int,
@@ -1726,7 +1728,7 @@ def generate_corrected_tracks(
     }
 
 
-@router.get("/api/projects/{project_id}/videos/{video_id}/detections/export")
+@router.get("/api/projects/{project_id}/videos/{video_id}/detections/export", response_model=CorrectedTracksExportOut)
 def export_corrected_detections(
     project_id: int,
     video_id: int,

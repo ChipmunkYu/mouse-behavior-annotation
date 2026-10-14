@@ -865,7 +865,7 @@ class DetectionWithTrackOut(BaseModel):
     frame_index: int
     raw_track_id: int
     display_track_id: int
-    box_xyxy_px: Optional[list[float]] = None
+    box_xyxy_px: Optional[list[int | float]] = None
     keypoints: Optional[list[Any]] = None
     confidence: Optional[float] = None
     import_revision: int
@@ -879,6 +879,91 @@ class CorrectedTrackSummaryOut(BaseModel):
     last_frame: Optional[int] = None
     detection_count: int
     visible_in_current_frame: Optional[bool] = None
+
+
+class DetectionsOut(BaseModel):
+    detections: list[DetectionWithTrackOut]
+    total: int
+
+
+class CorrectedTracksOut(BaseModel):
+    items: list[CorrectedTrackSummaryOut]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class CorrectedTracksExportOut(BaseModel):
+    tracks_corrected: list[str]
+    manifest: dict[str, Any]
+
+
+class TrackRoleConflictOut(BaseModel):
+    annotation_id: int
+    start_time: float
+    end_time: float
+    start_frame: int
+    end_frame: int
+    role_key: str
+    role_name: Optional[str] = None
+    track_id: int
+
+
+class IdentityEditCheckOut(BaseModel):
+    operation: Literal["split", "merge"]
+    old_display_track_id: Optional[int] = None
+    new_display_track_id: Optional[int] = None
+    split_frame: Optional[int] = None
+    detections_before: Optional[int] = None
+    detections_after: Optional[int] = None
+    retained_display_track_id: Optional[int] = None
+    merged_display_track_ids: Optional[list[int]] = None
+    affected_detection_count: Optional[int] = None
+    conflict_frames: Optional[list[int]] = None
+    message: Optional[str] = None
+    conflicts: Optional[list[TrackRoleConflictOut]] = None
+
+
+class IdentityEditResultOut(BaseModel):
+    identity_revision: int
+    edit_id: Optional[int] = None
+    suppression_id: Optional[int] = None
+    reverted_edit_id: Optional[int] = None
+    old_display_track_id: Optional[int] = None
+    new_display_track_id: Optional[int] = None
+    retained_display_track_id: Optional[int] = None
+    merged_display_track_ids: Optional[list[int]] = None
+    affected_detection_count: Optional[int] = None
+    affected_annotation_count: Optional[int] = None
+    frozen_detection_count: Optional[int] = None
+    freed_detection_count: Optional[int] = None
+    affected_track_ids: Optional[list[int]] = None
+    needs_mouse_ids_annotation_ids: Optional[list[int]] = None
+    message: Optional[str] = None
+
+
+class IdentityEditHistoryOut(BaseModel):
+    id: int
+    video_id: int
+    detection_import_id: int
+    operation: str
+    base_identity_revision: int
+    result_identity_revision: int
+    params: Optional[dict[str, Any]] = None
+    affected_detections: Optional[list[Any]] = None
+    affected_annotations: Optional[list[Any]] = None
+    operator_id: Optional[int] = None
+    created_at: datetime
+    reverted_edit_id: Optional[int] = None
+
+
+class DetectionSuppressionSummaryOut(BaseModel):
+    id: int
+    scope: Literal["corrected_track"]
+    result_identity_revision: int
+    created_at: datetime
+    frozen_detection_count: int
 
 
 class DetectionImportReplacementPreviewOut(BaseModel):

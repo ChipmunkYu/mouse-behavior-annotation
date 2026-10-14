@@ -169,8 +169,8 @@ export async function putDistanceCalibration(
   return video.distance_calibration;
 }
 
-export function deleteDistanceCalibration(projectId: number | string, videoId: number | string): Promise<void> {
-  return apiFetch<void>(`/projects/${projectId}/videos/${videoId}/distance-calibration`, { method: "DELETE" });
+export function deleteDistanceCalibration(projectId: number | string, videoId: number | string): Promise<Video> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/distance-calibration"]["delete"]>(`/projects/${projectId}/videos/${videoId}/distance-calibration`, { method: "DELETE" });
 }
 
 export function claimVideo(projectId: number | string, videoId: number): Promise<Video> {
@@ -280,45 +280,45 @@ export function getCurrentDetectionImport(projectId: number | string, videoId: n
 }
 
 export function getDetections(projectId: number | string, videoId: number | string, startFrame: number, endFrame: number, signal?: AbortSignal): Promise<DetectionsResponse> {
-  return apiFetch<DetectionsResponse>(`/projects/${projectId}/videos/${videoId}/detections?start_frame=${startFrame}&end_frame=${endFrame}`, { signal });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detections"]["get"]>(`/projects/${projectId}/videos/${videoId}/detections?start_frame=${startFrame}&end_frame=${endFrame}`, { signal });
 }
 
 export function getCorrectedTracks(projectId: number | string, videoId: number | string, params: CorrectedTracksParams = {}, signal?: AbortSignal): Promise<CorrectedTracksResponse> {
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => { if (value != null && value !== "") qs.set(key, String(value)); });
-  return apiFetch<CorrectedTracksResponse>(`/projects/${projectId}/videos/${videoId}/corrected-tracks${qs.size ? `?${qs}` : ""}`, { signal });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/corrected-tracks"]["get"]>(`/projects/${projectId}/videos/${videoId}/corrected-tracks${qs.size ? `?${qs}` : ""}`, { signal });
 }
 
 export function checkIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCheckRequest): Promise<IdentityEditCheckResponse> {
-  return apiFetch<IdentityEditCheckResponse>(`/projects/${projectId}/videos/${videoId}/identity-edits/check`, { method: "POST", body: JSON.stringify(input) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/check"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits/check`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/check"]["post"]>(input) });
 }
 
 export function commitIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCommitRequest): Promise<IdentityEditResult> {
-  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits`, { method: "POST", body: JSON.stringify(input) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits"]["post"]>(input) });
 }
 
 export function revertIdentityEdit(projectId: number | string, videoId: number | string, editId: number, base: { base_identity_revision: number; base_detection_import_revision: number }): Promise<IdentityEditResult> {
-  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits/${editId}/revert`, { method: "POST", body: JSON.stringify(base) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits/${editId}/revert`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert"]["post"]>(base) });
 }
 
 export function getIdentityEditHistory(projectId: number | string, videoId: number | string, limit = 1): Promise<IdentityEditRecord[]> {
-  return apiFetch<IdentityEditRecord[]>(`/projects/${projectId}/videos/${videoId}/identity-edits/history?limit=${limit}`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/history"]["get"]>(`/projects/${projectId}/videos/${videoId}/identity-edits/history?limit=${limit}`);
 }
 
 export function createSuppression(projectId: number | string, videoId: number | string, input: SuppressionCreateRequest): Promise<SuppressionResult> {
-  return apiFetch<SuppressionResult>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`, { method: "POST", body: JSON.stringify(input) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detection-suppressions"]["post"]>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/detection-suppressions"]["post"]>(input) });
 }
 
 export function listDetectionSuppressions(projectId: number | string, videoId: number | string): Promise<DetectionSuppression[]> {
-  return apiFetch<DetectionSuppression[]>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detection-suppressions"]["get"]>(`/projects/${projectId}/videos/${videoId}/detection-suppressions`);
 }
 
 export function revertSuppression(projectId: number | string, videoId: number | string, suppressionId: number, base: { base_identity_revision: number; base_detection_import_revision: number }): Promise<SuppressionResult> {
-  return apiFetch<SuppressionResult>(`/projects/${projectId}/videos/${videoId}/detection-suppressions/${suppressionId}/revert`, { method: "POST", body: JSON.stringify(base) });
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert"]["post"]>(`/projects/${projectId}/videos/${videoId}/detection-suppressions/${suppressionId}/revert`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/detection-suppressions/{suppression_id}/revert"]["post"]>(base) });
 }
 
 export function getCorrectedTracksExport(projectId: number | string, videoId: number | string): Promise<CorrectedTracksExport> {
-  return apiFetch<CorrectedTracksExport>(`/projects/${projectId}/videos/${videoId}/detections/export`);
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/detections/export"]["get"]>(`/projects/${projectId}/videos/${videoId}/detections/export`);
 }
 
 export interface VideoStreamBlob {
