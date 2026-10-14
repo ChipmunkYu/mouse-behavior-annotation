@@ -14,12 +14,16 @@ export const API_BASE: string =
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
+  readonly code?: string;
+  readonly context?: Record<string, unknown>;
 
-  constructor(status: number, message: string, detail?: unknown) {
+  constructor(status: number, message: string, detail?: unknown, code?: string, context?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.code = code;
+    this.context = context;
   }
 }
 
@@ -40,6 +44,11 @@ export interface OperationalErrorDetail {
 
 /** Read opt-in operational error metadata without changing legacy message extraction. */
 export function operationalErrorDetail(error: unknown): OperationalErrorDetail | null {
+  if (!(error instanceof ApiError)) return null;
+  if (typeof error.code === "string") {
+    return { code: error.code, message: typeof error.detail === "string" ? error.detail : error.message,
+      context: error.context ?? {} };
+  }
   const detail = apiErrorDetail(error);
   if (!detail || typeof detail !== "object") return null;
   const value = detail as Record<string, unknown>;
@@ -140,7 +149,14 @@ async function handleResponse<T>(res: Response): Promise<T> {
     } catch {
       // 响应体不是 JSON，保留默认错误信息
     }
-    throw new ApiError(res.status, friendlyDetail(res.status, detail), rawDetail);
+    const metadata = rawDetail && typeof rawDetail === "object"
+      ? rawDetail as Record<string, unknown> : {};
+    throw new ApiError(
+      res.status, friendlyDetail(res.status, detail), detail,
+      typeof metadata.code === "string" ? metadata.code : undefined,
+      metadata.context && typeof metadata.context === "object" && !Array.isArray(metadata.context)
+        ? metadata.context as Record<string, unknown> : undefined,
+    );
   }
 
   if (res.status === 204) return undefined as T;

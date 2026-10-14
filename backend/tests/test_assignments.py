@@ -56,9 +56,9 @@ def test_claim_competition_release_filters_and_stats(ctx, login_headers):
         f"/api/projects/{project['id']}/videos/{video['id']}/release", headers=winner_h,
     )
     assert denied.status_code == 409
-    assert denied.json()["detail"] == {
+    assert denied.json() == {
+        "detail": "Only the current assignee may release a draft video",
         "code": "video_release_not_allowed",
-        "message": "Only the current assignee may release a draft video",
         "context": {"project_id": project["id"], "video_id": video["id"],
                     "workflow_status": "draft", "is_current_assignee": False},
     }
@@ -429,9 +429,9 @@ def test_batch_assignment_validates_all_before_mutation_and_preserves_revisions(
         json={"video_ids": [v1["id"], v2["id"]], "assignee_membership_id": alice_mid}, headers=owner_h,
     )
     assert failed.status_code == 409
-    assert failed.json()["detail"] == {
+    assert failed.json() == {
+        "detail": "Assignment conflict: every video must still belong to this project and be draft/rejected",
         "code": "video_assignment_conflict",
-        "message": "Assignment conflict: every video must still belong to this project and be draft/rejected",
         "context": {"project_id": project["id"], "video_ids": [v1["id"], v2["id"]],
                     "assignee_membership_id": alice_mid},
     }

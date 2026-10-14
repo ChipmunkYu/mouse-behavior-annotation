@@ -18,6 +18,7 @@ from ..category_scheme_service import (
 from ..database import get_db
 from ..deps import project_access
 from ..models import CategorySchemeAudit, Project, ProjectMembership, User
+from ..operational_errors import operational_error
 from ..permissions import can_review, require_manager
 from ..schemas import (
     AssigneeDirectoryItem, InviteOut, JoinProjectRequest, MembershipOut, MembershipUpdate,
@@ -180,10 +181,8 @@ def update_member(project_id: int, membership_id: int, body: MembershipUpdate,
     if target is None or target.project_id != project_id:
         raise HTTPException(status_code=404, detail="Membership not found")
     if target.role == "owner":
-        raise HTTPException(status_code=409, detail={
-            "code": "project_owner_protected", "message": "Project owner cannot be changed",
-            "context": {"project_id": project_id, "membership_id": membership_id,
-                        "operation": "update"},
+        return operational_error(409, "Project owner cannot be changed", "project_owner_protected", {
+            "project_id": project_id, "membership_id": membership_id, "operation": "update",
         })
     if body.role is not None:
         target.role = body.role
@@ -201,26 +200,22 @@ def remove_member(project_id: int, membership_id: int, access: tuple = Depends(p
     if target is None or target.project_id != project_id:
         raise HTTPException(status_code=404, detail="Membership not found")
     if target.role == "owner":
-        raise HTTPException(status_code=409, detail={
-            "code": "project_owner_protected", "message": "Project owner cannot be removed",
-            "context": {"project_id": project_id, "membership_id": membership_id,
-                        "operation": "remove"},
+        return operational_error(409, "Project owner cannot be removed", "project_owner_protected", {
+            "project_id": project_id, "membership_id": membership_id, "operation": "remove",
         })
     from ..models import Video
     if db.query(Video.id).filter(Video.assignee_membership_id == target.id).first():
-        raise HTTPException(status_code=409, detail={
-            "code": "member_still_assigned", "message": "Member is still assigned to videos",
-            "context": {"project_id": project_id, "membership_id": membership_id},
+        return operational_error(409, "Member is still assigned to videos", "member_still_assigned", {
+            "project_id": project_id, "membership_id": membership_id,
         })
     db.delete(target)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail={
-            "code": "member_still_assigned", "message": "Member is still assigned to videos",
-            "context": {"project_id": project_id, "membership_id": membership_id},
-        }) from None
+        return operational_error(409, "Member is still assigned to videos", "member_still_assigned", {
+            "project_id": project_id, "membership_id": membership_id,
+        })
 
 
 @router.get("/{project_id}/invite", response_model=InviteOut)

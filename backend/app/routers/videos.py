@@ -29,6 +29,7 @@ from ..database import get_db
 from ..display_proxy_enqueue import enqueue_for_video, hash_display_proxy_source, submit_after_commit
 from ..deps import project_access
 from ..models import BackgroundJob, ProjectMembership, Submission, SubmissionAnnotation, User, Video
+from ..operational_errors import operational_error
 from ..media_auth import (
     MediaKeys, bearer_binding, decode_media_jwt, encode_media_jwt, raw_cookie_values,
 )
@@ -65,11 +66,9 @@ from ..schemas import (
 router = APIRouter(tags=["videos"])
 
 
-def _operational_detail(exc) -> str | dict[str, object]:
+def _operational_response(status_code: int, exc) -> Response:
     code = getattr(exc, "code", None)
-    if not code:
-        return exc.safe_message
-    return {"code": code, "message": exc.safe_message, "context": exc.context}
+    return operational_error(status_code, exc.safe_message, code, exc.context)
 
 # ---------- 真实视频上传：扩展名 / 媒体状态 ----------
 # 常见视频扩展名；大小写不敏感（_normalize_ext 统一小写）。Content-Type 仅作辅助，不作为校验依据。
@@ -122,15 +121,18 @@ def hard_delete_video(
             project_id=project_id, video_id=video_id, actor_user_id=actor_user_id,
         )
     except VideoDeleteForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=_operational_detail(exc)) from exc
+        raise HTTPException(status_code=403, detail=exc.safe_message) from exc
     except VideoDeleteNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=_operational_detail(exc)) from exc
+        raise HTTPException(status_code=404, detail=exc.safe_message) from exc
     except (VideoDeleteConflictError, VideoOperationBusyError) as exc:
-        detail = _operational_detail(exc) if isinstance(exc, VideoDeleteConflictError) else VIDEO_OPERATION_BUSY_DETAIL
+        if isinstance(exc, VideoDeleteConflictError) and exc.code:
+            return _operational_response(409, exc)
+        detail = exc.safe_message if isinstance(exc, VideoDeleteConflictError) else VIDEO_OPERATION_BUSY_DETAIL
         raise HTTPException(status_code=409, detail=detail) from exc
     except (VideoDeleteIntegrityError, VideoDeleteServiceError) as exc:
-        detail = _operational_detail(exc)
-        raise HTTPException(status_code=500, detail=detail) from exc
+        if exc.code:
+            return _operational_response(500, exc)
+        raise HTTPException(status_code=500, detail=exc.safe_message) from exc
 
 
 def _validate_assignee(db: Session, project_id: int, membership_id: int | None) -> ProjectMembership | None:
@@ -573,13 +575,10 @@ def release_video(project_id: int, video_id: int, request: Request,
         video = db.query(Video).filter_by(id=video_id, project_id=project_id).one_or_none()
         if video is None:
             raise HTTPException(status_code=404, detail="Video not found in this project")
-        raise HTTPException(status_code=409, detail={
-            "code": "video_release_not_allowed",
-            "message": "Only the current assignee may release a draft video",
-            "context": {"project_id": project_id, "video_id": video_id,
-                        "workflow_status": video.workflow_status,
-                        "is_current_assignee": video.assignee_membership_id == access[1].id},
-        })
+        return operational_error(409, "Only the current assignee may release a draft video",
+            "video_release_not_allowed", {"project_id": project_id, "video_id": video_id,
+            "workflow_status": video.workflow_status,
+            "is_current_assignee": video.assignee_membership_id == access[1].id})
     db.commit()
     return public_video(db.get(Video, video_id), request.app.state.settings)
 
@@ -605,15 +604,10 @@ def batch_assign(project_id: int, body: AssignmentBatchRequest, request: Request
         _raise_if_assignee_conflict(db, exc)
     if changed != len(ids):
         db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "video_assignment_conflict",
-                "message": "Assignment conflict: every video must still belong to this project and be draft/rejected",
-                "context": {"project_id": project_id, "video_ids": ids,
-                            "assignee_membership_id": body.assignee_membership_id},
-            },
-        )
+        return operational_error(409,
+            "Assignment conflict: every video must still belong to this project and be draft/rejected",
+            "video_assignment_conflict", {"project_id": project_id, "video_ids": ids,
+            "assignee_membership_id": body.assignee_membership_id})
     db.commit()
     return [public_video(video, request.app.state.settings) for video in
             db.query(Video).filter(Video.project_id == project_id, Video.id.in_(ids)).all()]

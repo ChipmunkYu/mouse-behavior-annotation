@@ -81,8 +81,8 @@ def test_member_update_owner_protection_and_assignee_blocks_removal(ctx, login_h
         json={"role": "member"}, headers=headers,
     )
     assert owner_update.status_code == 409
-    assert owner_update.json()["detail"] == {
-        "code": "project_owner_protected", "message": "Project owner cannot be changed",
+    assert owner_update.json() == {
+        "detail": "Project owner cannot be changed", "code": "project_owner_protected",
         "context": {"project_id": project["id"], "membership_id": owner["id"],
                     "operation": "update"},
     }
@@ -95,8 +95,8 @@ def test_member_update_owner_protection_and_assignee_blocks_removal(ctx, login_h
         f"/api/projects/{project['id']}/members/{alice['id']}", headers=headers
     )
     assert assigned.status_code == 409
-    assert assigned.json()["detail"] == {
-        "code": "member_still_assigned", "message": "Member is still assigned to videos",
+    assert assigned.json() == {
+        "detail": "Member is still assigned to videos", "code": "member_still_assigned",
         "context": {"project_id": project["id"], "membership_id": alice["id"]},
     }
 
@@ -123,8 +123,8 @@ def test_remove_member_fk_race_returns_stable_conflict(monkeypatch, ctx, login_h
     monkeypatch.setattr(Session, "commit", assign_before_delete)
     response = ctx.client.delete(f"/api/projects/{project['id']}/members/{membership_id}", headers=headers)
     assert response.status_code == 409
-    assert response.json()["detail"] == {
-        "code": "member_still_assigned", "message": "Member is still assigned to videos",
+    assert response.json() == {
+        "detail": "Member is still assigned to videos", "code": "member_still_assigned",
         "context": {"project_id": project["id"], "membership_id": membership_id},
     }
 

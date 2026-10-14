@@ -4,11 +4,17 @@ import { actionError, deleteError } from "../pages/VideosPage";
 import { friendlyError } from "../pages/ProjectManagementPage";
 
 const structured = (code: string, message = "server message") =>
+  new ApiError(409, message, message, code, { video_id: 7 });
+const nested = (code: string, message = "server message") =>
   new ApiError(409, message, { detail: { code, message, context: { video_id: 7 } } });
 
 describe("stable operational errors", () => {
   it("reads structured details and rejects legacy/non-ApiError values", () => {
     expect(operationalErrorDetail(structured("video_release_not_allowed"))).toEqual({
+      code: "video_release_not_allowed", message: "server message", context: { video_id: 7 },
+    });
+    expect(structured("video_release_not_allowed").detail).toBe("server message");
+    expect(operationalErrorDetail(nested("video_release_not_allowed"))).toEqual({
       code: "video_release_not_allowed", message: "server message", context: { video_id: 7 },
     });
     expect(operationalErrorDetail(new ApiError(409, "legacy", { detail: "legacy" }))).toBeNull();
