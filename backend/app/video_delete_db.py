@@ -39,8 +39,11 @@ class VideoDeleteDBError(RuntimeError):
 
     kind = "integrity"
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, code: str | None = None,
+                 context: dict[str, object] | None = None):
         self.safe_message = message
+        self.code = code
+        self.context = context or {}
         super().__init__(message)
 
 
@@ -144,10 +147,20 @@ def _authorize(db: Session, project_id: int, video_id: int, actor_user_id: int) 
     if membership is None or membership.status != "active" or membership.role not in {"owner", "admin"}:
         raise VideoDeleteForbiddenError("An active project owner or admin is required")
     if video.workflow_status not in {"draft", "rejected"}:
-        raise VideoDeleteConflictError("Only draft or rejected videos may be deleted")
+        raise VideoDeleteConflictError(
+            "Only draft or rejected videos may be deleted",
+            code="video_delete_workflow_conflict",
+            context={"project_id": project_id, "video_id": video_id,
+                     "workflow_status": video.workflow_status},
+        )
     if db.query(Submission.id).filter(
             Submission.video_id == video_id, Submission.status.in_(("submitted", "approved"))).first():
-        raise VideoDeleteConflictError("Submitted or approved authority forbids video deletion")
+        raise VideoDeleteConflictError(
+            "Submitted or approved authority forbids video deletion",
+            code="video_delete_workflow_conflict",
+            context={"project_id": project_id, "video_id": video_id,
+                     "has_submitted_or_approved_authority": True},
+        )
     return video
 
 
@@ -312,11 +325,17 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
     )
     if jobs.active:
         raise VideoDeleteConflictError(
-            "A related background job is active; contact an administrator before retrying"
+            "A related background job is active; contact an administrator before retrying",
+            code="video_delete_related_job_conflict",
+            context={"project_id": project_id, "video_id": video_id,
+                     "job_ids": [job.id for job in jobs.active], "classification": "active"},
         )
     if jobs.unknown:
         raise VideoDeleteConflictError(
-            "A related background job cannot be classified safely; contact an administrator before retrying"
+            "A related background job cannot be classified safely; contact an administrator before retrying",
+            code="video_delete_related_job_conflict",
+            context={"project_id": project_id, "video_id": video_id,
+                     "job_ids": [job.id for job in jobs.unknown], "classification": "unknown"},
         )
 
     rows_by_table: dict[str, Sequence[object]] = {

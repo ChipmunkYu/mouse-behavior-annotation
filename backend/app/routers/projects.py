@@ -180,7 +180,11 @@ def update_member(project_id: int, membership_id: int, body: MembershipUpdate,
     if target is None or target.project_id != project_id:
         raise HTTPException(status_code=404, detail="Membership not found")
     if target.role == "owner":
-        raise HTTPException(status_code=409, detail="Project owner cannot be changed")
+        raise HTTPException(status_code=409, detail={
+            "code": "project_owner_protected", "message": "Project owner cannot be changed",
+            "context": {"project_id": project_id, "membership_id": membership_id,
+                        "operation": "update"},
+        })
     if body.role is not None:
         target.role = body.role
     if body.can_review is not None:
@@ -197,16 +201,26 @@ def remove_member(project_id: int, membership_id: int, access: tuple = Depends(p
     if target is None or target.project_id != project_id:
         raise HTTPException(status_code=404, detail="Membership not found")
     if target.role == "owner":
-        raise HTTPException(status_code=409, detail="Project owner cannot be removed")
+        raise HTTPException(status_code=409, detail={
+            "code": "project_owner_protected", "message": "Project owner cannot be removed",
+            "context": {"project_id": project_id, "membership_id": membership_id,
+                        "operation": "remove"},
+        })
     from ..models import Video
     if db.query(Video.id).filter(Video.assignee_membership_id == target.id).first():
-        raise HTTPException(status_code=409, detail="Member is still assigned to videos")
+        raise HTTPException(status_code=409, detail={
+            "code": "member_still_assigned", "message": "Member is still assigned to videos",
+            "context": {"project_id": project_id, "membership_id": membership_id},
+        })
     db.delete(target)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Member is still assigned to videos") from None
+        raise HTTPException(status_code=409, detail={
+            "code": "member_still_assigned", "message": "Member is still assigned to videos",
+            "context": {"project_id": project_id, "membership_id": membership_id},
+        }) from None
 
 
 @router.get("/{project_id}/invite", response_model=InviteOut)

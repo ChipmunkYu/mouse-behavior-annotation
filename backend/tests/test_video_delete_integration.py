@@ -189,6 +189,12 @@ def test_hard_delete_permission_and_state_rejections_are_side_effect_free(ctx, l
         f"/api/projects/{project_id}/videos/{video_id}", headers=owner_headers,
     )
     assert blocked.status_code == 409
+    assert blocked.json()["detail"] == {
+        "code": "video_delete_workflow_conflict",
+        "message": "Only draft or rejected videos may be deleted",
+        "context": {"project_id": project_id, "video_id": video_id,
+                    "workflow_status": "submitted"},
+    }
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is not None
 
@@ -209,7 +215,12 @@ def test_active_job_and_busy_gate_block_with_zero_side_effects(ctx):
         f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
     )
     assert blocked.status_code == 409
-    assert "administrator" in blocked.json()["detail"]
+    assert blocked.json()["detail"] == {
+        "code": "video_delete_related_job_conflict",
+        "message": "A related background job is active; contact an administrator before retrying",
+        "context": {"project_id": project_id, "video_id": video_id,
+                    "job_ids": [job_id], "classification": "active"},
+    }
     quarantine = ctx.raw_client.app.state.video_delete_service.io.quarantine_dir
     assert not quarantine.exists()
     with ctx.session_factory() as db:
@@ -242,6 +253,14 @@ def test_active_display_proxy_job_returns_conflict(ctx):
         f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
     )
     assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "video_delete_related_job_conflict"
+    assert response.json()["detail"]["message"] == (
+        "A related background job is active; contact an administrator before retrying"
+    )
+    assert response.json()["detail"]["context"] == {
+        "project_id": project_id, "video_id": video_id,
+        "job_ids": [job_id], "classification": "active",
+    }
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is not None
         assert db.get(BackgroundJob, job_id).status == "running"
@@ -263,6 +282,7 @@ def test_final_database_conflict_restores_quarantined_source(ctx, monkeypatch):
         f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
     )
     assert response.status_code == 409
+    assert response.json()["detail"] == "The frozen video graph changed before final deletion"
     assert source.read_bytes() == b"video"
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is not None
@@ -283,7 +303,12 @@ def test_post_commit_purge_failure_is_recovered(ctx, monkeypatch):
         f"/api/projects/{project_id}/videos/{video_id}", headers=headers,
     )
     assert failed.status_code == 500
-    assert "data was deleted" in failed.json()["detail"]
+    assert failed.json()["detail"] == {
+        "code": "video_delete_cleanup_incomplete",
+        "message": "Video data was deleted, but file cleanup remains pending startup recovery",
+        "context": {"project_id": project_id, "video_id": video_id,
+                    "phase": "purge", "database_deleted": True},
+    }
     with ctx.session_factory() as db:
         assert db.get(Video, video_id) is None
     assert service.io.quarantine_dir.exists()

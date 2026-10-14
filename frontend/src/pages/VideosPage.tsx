@@ -8,7 +8,7 @@ import { Card, EmptyState, ErrorBox, Loading, StatusBadge, WorkflowBadge } from 
 import VideoUploadPanel from "../components/VideoUploadPanel";
 import { MediaStatusSummary } from "../components/MediaStatusPanel";
 import VideoPreviewDialog from "../components/VideoPreviewDialog";
-import { ApiError } from "../api/client";
+import { ApiError, operationalErrorDetail } from "../api/client";
 import { useVideoMarqueeSelection } from "../hooks/useVideoMarqueeSelection";
 import { formatDate, formatDuration } from "../utils/format";
 import { useProjectUploadVersion } from "../upload/UploadManagerContext";
@@ -38,11 +38,11 @@ const EMPTY_FORM: VideoFormState = {
   status: "",
 };
 
-function actionError(err: unknown): string {
+export function actionError(err: unknown): string {
+  const code = operationalErrorDetail(err)?.code;
+  if (code === "video_release_not_allowed") return "只有当前负责人可以释放草稿视频，列表已刷新。";
+  if (code === "video_assignment_conflict") return "批量改派发生冲突：部分视频已被删除、移出项目或进入待审核/已通过状态。列表已刷新，请重新选择。";
   const text = err instanceof Error ? err.message : "操作失败";
-  if (text.includes("already been claimed")) return "该视频已被其他成员领取，或已不再是草稿，列表已刷新。";
-  if (text.includes("Only the current assignee")) return "只有当前负责人可以释放草稿视频，列表已刷新。";
-  if (text.includes("Assignment conflict") || text.includes("every video must still belong")) return "批量改派发生冲突：部分视频已被删除、移出项目或进入待审核/已通过状态。列表已刷新，请重新选择。";
   return text;
 }
 
@@ -53,8 +53,12 @@ interface BatchDeleteOutcome {
   failures: Array<{ filename: string; message: string }>;
 }
 
-function deleteError(err: unknown): string {
+export function deleteError(err: unknown): string {
   if (!(err instanceof ApiError)) return err instanceof Error ? `删除失败：${err.message}` : "删除失败，请稍后重试。";
+  const code = operationalErrorDetail(err)?.code;
+  if (code === "video_delete_related_job_conflict") return "无法删除：关联任务仍在排队或运行。系统没有取消任务，请联系管理员处理后再重试。";
+  if (code === "video_delete_workflow_conflict") return "无法删除：视频状态已经变化。请刷新列表；只有草稿或已退回视频可以删除。";
+  if (code === "video_delete_cleanup_incomplete") return "删除过程未完整结束，业务记录可能已经移除。请勿反复重试，并联系管理员完成残留清理。";
   const message = err.message;
   if (err.status === 409) {
     if (/queued|running|active job|unknown job|关联任务|排队|运行中|任务状态/i.test(message)) {

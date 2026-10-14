@@ -52,6 +52,17 @@ def test_claim_competition_release_filters_and_stats(ctx, login_headers):
     released = ctx.client.post(f"/api/projects/{project['id']}/videos/{video['id']}/release", headers=winner_h)
     assert released.status_code == 200 and released.json()["assignee_membership_id"] is None
 
+    denied = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/release", headers=winner_h,
+    )
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == {
+        "code": "video_release_not_allowed",
+        "message": "Only the current assignee may release a draft video",
+        "context": {"project_id": project["id"], "video_id": video["id"],
+                    "workflow_status": "draft", "is_current_assignee": False},
+    }
+
 
 def test_claim_assignee_write_race_returns_stable_409_and_can_retry(
     monkeypatch, ctx, login_headers
@@ -418,6 +429,12 @@ def test_batch_assignment_validates_all_before_mutation_and_preserves_revisions(
         json={"video_ids": [v1["id"], v2["id"]], "assignee_membership_id": alice_mid}, headers=owner_h,
     )
     assert failed.status_code == 409
+    assert failed.json()["detail"] == {
+        "code": "video_assignment_conflict",
+        "message": "Assignment conflict: every video must still belong to this project and be draft/rejected",
+        "context": {"project_id": project["id"], "video_ids": [v1["id"], v2["id"]],
+                    "assignee_membership_id": alice_mid},
+    }
     with ctx.session_factory() as db:
         assert db.get(Video, v1["id"]).assignee_membership_id is None
         before = (db.get(Video, v1["id"]).annotation_revision, db.get(Video, v1["id"]).media_revision)

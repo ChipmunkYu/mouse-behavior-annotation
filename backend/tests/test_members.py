@@ -76,18 +76,29 @@ def test_member_update_owner_protection_and_assignee_blocks_removal(ctx, login_h
         json={"can_review": True}, headers=headers,
     )
     assert changed.status_code == 200 and changed.json()["can_review"] is True
-    assert ctx.client.patch(
+    owner_update = ctx.client.patch(
         f"/api/projects/{project['id']}/members/{owner['id']}",
         json={"role": "member"}, headers=headers,
-    ).status_code == 409
+    )
+    assert owner_update.status_code == 409
+    assert owner_update.json()["detail"] == {
+        "code": "project_owner_protected", "message": "Project owner cannot be changed",
+        "context": {"project_id": project["id"], "membership_id": owner["id"],
+                    "operation": "update"},
+    }
     video = ctx.client.post(
         f"/api/projects/{project['id']}/videos",
         json={"filename": "assigned.mp4", "assignee_membership_id": alice["id"]}, headers=headers,
     ).json()
     assert video["assignee"]["username"] == "alice"
-    assert ctx.client.delete(
+    assigned = ctx.client.delete(
         f"/api/projects/{project['id']}/members/{alice['id']}", headers=headers
-    ).status_code == 409
+    )
+    assert assigned.status_code == 409
+    assert assigned.json()["detail"] == {
+        "code": "member_still_assigned", "message": "Member is still assigned to videos",
+        "context": {"project_id": project["id"], "membership_id": alice["id"]},
+    }
 
 
 def test_remove_member_fk_race_returns_stable_conflict(monkeypatch, ctx, login_headers):
@@ -112,7 +123,10 @@ def test_remove_member_fk_race_returns_stable_conflict(monkeypatch, ctx, login_h
     monkeypatch.setattr(Session, "commit", assign_before_delete)
     response = ctx.client.delete(f"/api/projects/{project['id']}/members/{membership_id}", headers=headers)
     assert response.status_code == 409
-    assert response.json()["detail"] == "Member is still assigned to videos"
+    assert response.json()["detail"] == {
+        "code": "member_still_assigned", "message": "Member is still assigned to videos",
+        "context": {"project_id": project["id"], "membership_id": membership_id},
+    }
 
 
 def test_member_management_boundary_and_minimal_assignee_directory(ctx, login_headers):

@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { getAssignmentStats, getBehaviorStats, getCategoryScheme, getProjectInvite, listCategorySchemeAudit, listMembers, listProjects, lockCategoryScheme, putCategoryScheme, removeMember, resetProjectInvite, updateMember } from "../api";
-import { ApiError } from "../api/client";
+import { ApiError, operationalErrorDetail } from "../api/client";
 import type { AssignmentStats, BehaviorStats, CategoryScheme, CategorySchemeAudit, CategorySchemeCategoryInput, Membership, Project } from "../api/types";
 import CategorySchemeEditor, { normalizeCategorySchemeDraft, toCategorySchemeRequestCategories, validateCategoryScheme } from "../components/CategorySchemeEditor";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Card, CollapsibleCard, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
 import { formatDate } from "../utils/format";
 
-function friendlyError(err: unknown): string {
+export function friendlyError(err: unknown): string {
+  const code = operationalErrorDetail(err)?.code;
+  if (code === "project_owner_protected") return "项目所有者不能被修改或移除。";
+  if (code === "member_still_assigned") return "该成员仍负责视频。请先改派或清空其负责视频，再删除成员。";
   const text = err instanceof Error ? err.message : "操作失败";
-  if (text.includes("Project owner cannot")) return "项目所有者不能被修改或移除。";
-  if (text.includes("still assigned to videos")) return "该成员仍负责视频。请先改派或清空其负责视频，再删除成员。";
   return text;
 }
 

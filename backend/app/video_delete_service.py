@@ -22,9 +22,12 @@ logger = logging.getLogger(__name__)
 class VideoDeleteServiceError(RuntimeError):
     """A filesystem/protocol failure with a stable API-safe phase."""
 
-    def __init__(self, message: str, *, database_deleted: bool = False) -> None:
+    def __init__(self, message: str, *, database_deleted: bool = False,
+                 context: dict[str, object] | None = None) -> None:
         self.safe_message = message
         self.database_deleted = database_deleted
+        self.code = "video_delete_cleanup_incomplete"
+        self.context = context or {"database_deleted": database_deleted}
         super().__init__(message)
 
 
@@ -92,16 +95,24 @@ class VideoDeleteService:
                         logger.exception("Video delete rollback restore failed for video_id=%s", video_id)
                         self._log_failure(project_id, video_id, "restore", "administrator recovery required")
                         raise VideoDeleteServiceError(
-                            "Video was not deleted, but file restoration requires administrator recovery"
+                            "Video was not deleted, but file restoration requires administrator recovery",
+                            context={"project_id": project_id, "video_id": video_id,
+                                     "phase": "restore", "database_deleted": False},
                         ) from exc
                 if committed:
                     self._log_failure(project_id, video_id, "purge", "cleanup pending recovery")
                     raise VideoDeleteServiceError(
                         "Video data was deleted, but file cleanup remains pending startup recovery",
                         database_deleted=True,
+                        context={"project_id": project_id, "video_id": video_id,
+                                 "phase": "purge", "database_deleted": True},
                     ) from exc
                 self._log_failure(project_id, video_id, phase, "file isolation failed")
-                raise VideoDeleteServiceError("Video was not deleted because file isolation failed") from exc
+                raise VideoDeleteServiceError(
+                    "Video was not deleted because file isolation failed",
+                    context={"project_id": project_id, "video_id": video_id,
+                             "phase": phase, "database_deleted": False},
+                ) from exc
             except BaseException:
                 if (manifest is not None and not committed
                         and (self.io.quarantine_dir / manifest.operation_id).exists()):
@@ -111,7 +122,9 @@ class VideoDeleteService:
                         logger.exception("Video delete rollback restore failed for video_id=%s", video_id)
                         self._log_failure(project_id, video_id, "restore", "administrator recovery required")
                         raise VideoDeleteServiceError(
-                            "Video was not deleted, but file restoration requires administrator recovery"
+                            "Video was not deleted, but file restoration requires administrator recovery",
+                            context={"project_id": project_id, "video_id": video_id,
+                                     "phase": "restore", "database_deleted": False},
                         ) from restore_exc
                 raise
             row_counts = {table: len(ids) for table, ids in frozen.frozen_ids_by_table}

@@ -32,6 +32,26 @@ export function apiErrorDetail(error: unknown): unknown {
     : value;
 }
 
+export interface OperationalErrorDetail {
+  code: string;
+  message: string;
+  context: Record<string, unknown>;
+}
+
+/** Read opt-in operational error metadata without changing legacy message extraction. */
+export function operationalErrorDetail(error: unknown): OperationalErrorDetail | null {
+  const detail = apiErrorDetail(error);
+  if (!detail || typeof detail !== "object") return null;
+  const value = detail as Record<string, unknown>;
+  if (typeof value.code !== "string" || typeof value.message !== "string") return null;
+  return {
+    code: value.code,
+    message: value.message,
+    context: value.context && typeof value.context === "object" && !Array.isArray(value.context)
+      ? value.context as Record<string, unknown> : {},
+  };
+}
+
 function extractDetail(data: unknown): string | null {
   if (!data || typeof data !== "object") return null;
   const detail = (data as { detail?: unknown }).detail;
