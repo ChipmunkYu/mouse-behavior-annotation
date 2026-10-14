@@ -1,4 +1,6 @@
-"""程序化 Alembic 迁移入口：create_app 启动时自动迁移与 scripts/migrate.py CLI 共用。
+"""程序化 Alembic 入口：development/test 自动迁移，production 仅执行只读 head 门禁。
+
+生产 schema 升级只允许由 scripts/migrate.py 显式执行；应用及生产辅助脚本不会自动迁移。
 
 幂等策略：
 - 全新空库：直接 `upgrade head`（0001 建 P1 表，0002/0003 增量）建立完整 schema。

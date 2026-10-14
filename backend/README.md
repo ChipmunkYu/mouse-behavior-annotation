@@ -46,7 +46,9 @@ backend/
 │ ├── 0015_frame_authority.py # 多帧闭区间帧权威约束
 │ ├── 0016_display_proxy.py # 低码率展示代理状态与持久任务 ownership
 │ ├── 0017_behavior_level_review.py # 行为裁决审计、普通材料证据与旧审核安全迁移
-│ └── 0018_feedback_marks.py # 退回行为「标记已修改」人工状态记录（无回填）
+│ ├── 0018_feedback_marks.py # 退回行为「标记已修改」人工状态记录（无回填）
+│ ├── 0019_clip_retirement.py # Project 2 分类法更新所需的 Clip 软退役字段
+│ └── 0020_video_distance_calibration.py # 视频距离标定参数
 ├── app/
 │ ├── main.py # 应用工厂（生产 head 门禁、开发自动迁移、CORS、worker 生命周期）
 │ ├── config.py # 环境变量配置
@@ -152,9 +154,9 @@ stream 不进入公共 `video_operation_gate`。本地候选边界是：新请�
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
-- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership；0017 增加行为级审核证据与审计；0018 增加退回行为「标记已修改」人工状态表）。
+- 全新空库 → `upgrade head`（0001 建 P1 全表，0002～0011 形成提交、媒体和不可变 authority；0012 增加分工；0013 增加类别方案与角色；0014 增加三文件导入批次创建者和活动时间；0015 增加多帧闭区间帧权威约束；0016 增加展示代理状态与任务 ownership；0017 增加行为级审核证据与审计；0018 增加退回行为「标记已修改」人工状态表；0019 增加 Clip 软退役字段；0020 增加视频距离标定参数）。
 - P1 旧库（未版本化，含空版本表缺陷形态）→ 自动 `stamp 0001` 标记 baseline 后 `upgrade head`，旧数据原样保留。
-- 0002～0017 已版本化库 → 按迁移链增量 `upgrade head` 到 0018；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
+- 已版本化旧库 → 按迁移链增量 `upgrade head` 到动态解析的唯一 Alembic head；进入 0008 前严格预检 legacy current state，不完整时硬失败，进入 0010 前严格预检既有 0009 snapshot authority；进入 0015 前拒绝单帧或反向区间。
 - 已版本化 → 幂等 `upgrade head`。
 - 非预期表 / 未知版本 / 版本表损坏 → `--check` 与迁移均报错退出（退出码 2），不执行任何修改。
 
@@ -727,8 +729,8 @@ ClipItem 字段完整性、review_status 仅允许 approved），批次 6 项目
 排他、owner/admin 权限、项目/category/job 隔离、类别筛选与 scoped status、ready 实体安全校验、
 missing 自动补生成与失败不发布、独立四文件 ZIP、下载过期/越界/缺文件、重跑保留历史），
 分工模块（三角色与 `can_review` 权限、成员管理、邀请码幂等加入/重置、精简负责人目录、未分配 `draft` 的单个/批量 CAS 自领、1–200 唯一 ID 校验、当前 membership、全有或全无、统一 409、防泄漏、请求顺序及并发重叠、draft 释放、管理员事务批量分配、三视图、负责人筛选、`unassigned/claimable` 双口径统计、上传与三文件导入指定负责人、复合外键与 active trigger），
-以及迁移验收（全新库建至 head 0018 / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
-已版本化旧库的代表路径按迁移链升级至 head 0018，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检、0015→0016 的展示代理约束与 downgrade/upgrade /
+以及迁移验收（全新库建至动态解析的唯一 Alembic head / P1 旧库数据保留并新增列默认正确 / 空 alembic_version 表缺陷回归 /
+已版本化旧库的代表路径按迁移链升级至该 head，并覆盖 0013→0014 的创建者/活动时间回填、0014→0015 的帧权威预检、0015→0016 的展示代理约束与 downgrade/upgrade /
 0008 sparse state 回填与严格预检 / 0009 Clip nullable 过渡 / 0010 digest 回填、损坏 authority 原子拒绝及降级重升 /
 0011 SQLite trigger 安装、降级移除与重升恢复 / 未知版本与非预期表安全报错 / 重复迁移幂等 / 启动自动迁移 /
 CLI --check 输出区分空版本表 / 外键 ON DELETE：删除用户后 uploaded_by、reviewer_id 置空，

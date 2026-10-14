@@ -12,6 +12,7 @@ from app.migration import (
     schema_head,
     upgrade_to,
 )
+from scripts import cleanup_retention, seed_demo
 
 
 def _url(path: Path) -> str:
@@ -39,6 +40,34 @@ def test_production_app_rejects_stale_database_without_upgrade(tmp_path):
 
     assert current_revision(url) == "0001"
     assert not (tmp_path / "data").exists()
+
+
+def test_production_seed_demo_rejects_stale_database_before_directories(tmp_path, monkeypatch):
+    url = _url(tmp_path / "database.sqlite")
+    upgrade_to(url, "0001")
+    settings = _production_settings(tmp_path, url)
+    monkeypatch.setattr(seed_demo, "get_settings", lambda: settings)
+    monkeypatch.setattr(seed_demo.sys, "argv", ["seed_demo.py"])
+
+    with pytest.raises(MigrationStateError, match="scripts/migrate.py"):
+        seed_demo._main()
+
+    assert current_revision(url) == "0001"
+    assert not settings.data_dir.exists()
+
+
+def test_production_cleanup_rejects_stale_database_before_directories(tmp_path, monkeypatch):
+    url = _url(tmp_path / "database.sqlite")
+    upgrade_to(url, "0001")
+    settings = _production_settings(tmp_path, url)
+    monkeypatch.setattr(cleanup_retention, "get_settings", lambda: settings)
+    monkeypatch.setattr(cleanup_retention.sys, "argv", ["cleanup_retention.py"])
+
+    with pytest.raises(MigrationStateError, match="scripts/migrate.py"):
+        cleanup_retention.main()
+
+    assert current_revision(url) == "0001"
+    assert not settings.data_dir.exists()
 
 
 def test_head_database_is_accepted(tmp_path):
