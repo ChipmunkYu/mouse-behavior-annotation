@@ -21,6 +21,7 @@ from .media_jobs import MediaWorker
 from .video_delete_service import VideoDeleteService
 from .video_operation_gate import VideoOperationGateCoordinator
 from .factory import register_routers
+from .migration import require_schema_at_head
 
 
 def _default_media_processor(settings: Settings) -> MediaProcessor:
@@ -48,6 +49,9 @@ def create_app(
     """
     s = settings or get_settings()
 
+    if s.is_production:
+        require_schema_at_head(s.resolved_database_url)
+
     for directory in (
         s.data_dir,
         s.videos_dir,
@@ -61,7 +65,8 @@ def create_app(
         directory.mkdir(parents=True, exist_ok=True)
 
     db_mod.configure_engine(s.resolved_database_url)
-    db_mod.ensure_schema(s.resolved_database_url)
+    if not s.is_production:
+        db_mod.ensure_schema(s.resolved_database_url)
     configure_display_proxy_observability()
 
     with db_mod.SessionLocal() as db:

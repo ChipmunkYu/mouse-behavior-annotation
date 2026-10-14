@@ -21,6 +21,7 @@ from app.migration import (
     downgrade_to,
     inspect_state,
     run_migrations,
+    schema_head,
     upgrade_to,
 )
 from app.models import (
@@ -263,7 +264,7 @@ def test_fresh_db_upgrade_head_full_schema(tmp_path):
 
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)

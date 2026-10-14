@@ -13,7 +13,8 @@
 - 已版本化 → 幂等 upgrade head。
 - 非预期表 / 未知版本 / 版本表损坏 → 报错退出（退出码 2），不执行任何修改。
 
-应用启动时（create_app）也会自动执行同样的迁移，本 CLI 供部署/CI 显式迁移使用。
+development/test 应用启动会自动迁移；production 启动只读校验 head，必须先用本 CLI 显式迁移。
+`--check` 仅诊断当前状态，不是 production head gate。
 """
 from __future__ import annotations
 

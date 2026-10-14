@@ -13,6 +13,7 @@ from app import database as db_mod  # noqa: E402
 from app import models  # noqa: E402,F401
 from app.cleanup import RetentionCleaner, run_retention_cleanup  # noqa: E402
 from app.config import get_settings  # noqa: E402
+from app.migration import require_schema_at_head  # noqa: E402
 
 
 def main() -> int:
@@ -20,8 +21,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="report actions without side effects")
     args = parser.parse_args()
     settings = get_settings()
+    if settings.is_production:
+        require_schema_at_head(settings.resolved_database_url)
     db_mod.configure_engine(settings.resolved_database_url)
-    db_mod.ensure_schema(settings.resolved_database_url)
+    if not settings.is_production:
+        db_mod.ensure_schema(settings.resolved_database_url)
     if args.dry_run:
         with db_mod.SessionLocal() as db:
             report = run_retention_cleanup(db, settings, dry_run=True)

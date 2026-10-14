@@ -42,6 +42,7 @@ from app.models import (  # noqa: E402
     Video,
 )
 from app.seed import ensure_demo_user, init_project_categories  # noqa: E402
+from app.migration import require_schema_at_head  # noqa: E402
 from app.category_scheme_service import (  # noqa: E402
     categories_for_project,
     scheme_hash,
@@ -86,11 +87,15 @@ def seed_demo(
     if duration <= 0 or fps <= 0:
         raise ValueError("duration 与 fps 必须为正数")
 
-    # 与 create_app 相同的初始化路径：目录、引擎、幂等迁移建表
+    if settings.is_production:
+        require_schema_at_head(settings.resolved_database_url)
+
+    # 与 create_app 相同的初始化路径：目录、引擎、开发环境幂等迁移建表
     for directory in (settings.data_dir, settings.videos_dir, settings.exports_dir):
         directory.mkdir(parents=True, exist_ok=True)
     db_mod.configure_engine(settings.resolved_database_url)
-    db_mod.ensure_schema(settings.resolved_database_url)
+    if not settings.is_production:
+        db_mod.ensure_schema(settings.resolved_database_url)
 
     with db_mod.SessionLocal() as db:
         demo_user = ensure_demo_user(db, settings)

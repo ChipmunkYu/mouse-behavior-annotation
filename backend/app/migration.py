@@ -22,6 +22,7 @@ from typing import Callable
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
@@ -160,7 +161,6 @@ def _inspect(database_url: str) -> tuple[frozenset[str], str | None]:
     （由先前 `alembic check` 副作用创建、无任何版本行）均视为 None。
     版本表损坏（结构异常 / 多行版本记录）时抛 MigrationStateError。
     """
-    _ensure_sqlite_parent(database_url)
     kwargs: dict = {}
     if database_url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
@@ -183,6 +183,30 @@ def _inspect(database_url: str) -> tuple[frozenset[str], str | None]:
             f"{VERSION_TABLE} 表含 {len(rows)} 行版本记录（应为 0 或 1 行），数据库迁移状态损坏"
         )
     return tables, (rows[0][0] if rows else None)
+
+
+def schema_head() -> str:
+    """返回当前代码中唯一的 Alembic head。"""
+    heads = ScriptDirectory.from_config(alembic_config("sqlite:///:memory:")).get_heads()
+    if len(heads) != 1:
+        raise MigrationStateError(f"Alembic 必须恰有一个 head，当前为 {heads}")
+    return heads[0]
+
+
+def require_schema_at_head(database_url: str) -> None:
+    """生产只读门禁：数据库必须存在且 revision 精确等于当前 head。"""
+    path = _sqlite_path(database_url)
+    if path is not None and not path.is_file():
+        raise MigrationStateError(
+            f"生产数据库不存在: {path}；请先显式运行 backend/scripts/migrate.py"
+        )
+    current = current_revision(database_url)
+    head = schema_head()
+    if current != head:
+        raise MigrationStateError(
+            f"生产数据库 revision 为 {current!r}，要求 Alembic head {head!r}；"
+            "请先显式运行 backend/scripts/migrate.py"
+        )
 
 
 def inspect_state(database_url: str) -> str:

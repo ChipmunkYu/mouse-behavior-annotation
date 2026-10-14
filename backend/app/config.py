@@ -180,6 +180,10 @@ class Settings(BaseSettings):
         return self.data_dir / "cleanup-issues.log"
 
     @property
+    def is_production(self) -> bool:
+        return self.env.strip().lower() == "production"
+
+    @property
     def resolved_database_url(self) -> str:
         if self.database_url:
             return self.database_url

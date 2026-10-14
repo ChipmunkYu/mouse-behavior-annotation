@@ -4,7 +4,7 @@
 
 > 当前技术文档术语遵循[项目术语表](../项目术语表.md)；现行架构见[检测状态、提交审核与独立行为视频片段导出设计](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md)。代码/API 标识符保持不变。
 
-> 行为级审核、锁定/撤销、跨轮次沿用、退回处理和 legacy/purge 的现行合同见[行为级审核 API 契约](../docs/behavior-review-api.md)。本分支 schema head 为 `0018`，不代表生产已升级。
+> 行为级审核、锁定/撤销、跨轮次沿用、退回处理和 legacy/purge 的现行合同见[行为级审核 API 契约](../docs/behavior-review-api.md)。schema head 由 Alembic 迁移图动态确定，不代表生产已升级。
 
 - 技术栈：Python 3.10+、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
@@ -48,10 +48,10 @@ backend/
 │ ├── 0017_behavior_level_review.py # 行为裁决审计、普通材料证据与旧审核安全迁移
 │ └── 0018_feedback_marks.py # 退回行为「标记已修改」人工状态记录（无回填）
 ├── app/
-│ ├── main.py # 应用工厂（自动迁移、CORS、路由注册、媒体/导出 worker 生命周期）
+│ ├── main.py # 应用工厂（生产 head 门禁、开发自动迁移、CORS、worker 生命周期）
 │ ├── config.py # 环境变量配置
 │ ├── database.py # SQLAlchemy 引擎 / Session / ensure_schema
-│ ├── migration.py # 程序化 Alembic 入口（启动自动迁移 / CLI 共用）
+│ ├── migration.py # 程序化 Alembic 入口（生产只读门禁 / 显式迁移共用）
 │ ├── models.py # 业务、审核/媒体、YOLO 检测结果导入与 track 修正模型
 │ ├── schemas.py # Pydantic 请求/响应模型
 │ ├── auth.py # 密码哈希（PBKDF2）+ JWT
@@ -128,17 +128,10 @@ stream 不进入公共 `video_operation_gate`。本地候选边界是：新请�
 
 数据模型由 Alembic 版本脚本管理（`migrations/versions/`），**不在业务代码中硬编码迁移版本**。
 
-**启动策略**：`create_app` 在建库前自动执行幂等迁移——全新空库直接建立完整 schema；
-已存在的 P1 未版本化数据库（有 `users` 等表、无有效版本行）会先安全标记
-baseline（0001）再升级到 head（0018），**不删除任何已有数据**；重复启动无副作用。
-因此 README 的最短启动方式对全新库与 P1 旧库同样有效。
-
-> **自动迁移的进程边界**：`create_app` 内的自动迁移只适合**单进程启动**
-> （如开发时 `uvicorn app.main:app`）。**多 worker 部署**
-> （`uvicorn --workers N` / gunicorn 多 worker 等）必须**先手动运行一次
-> `scripts/migrate.py` 完成迁移**，再启动多 worker，否则多个 worker 同时
-> 尝试迁移同一 SQLite 库会互相干扰（`Database is locked` 或重复 DDL）。
-> 部署/CI 统一约定：迁移由显式命令完成，应用启动不再承担迁移职责。
+**启动策略**：development/test 的 `create_app` 保持自动幂等迁移，支持 fresh DB 和 P1 旧库。
+`ENV=production` 时，应用会在创建目录、engine、seed 和 worker 前只读确认数据库 revision
+精确等于迁移图的唯一 head；缺库、落后、超前或多 head 均启动失败，且不会创建 SQLite 文件或
+`.pre-migration`。生产必须先显式运行 `scripts/migrate.py`，不存在绕过该门禁的环境开关。
 
 **空版本表**：迁移状态以 `alembic_version` 表的**版本行**为准，而非仅看表是否存在。
 若该表存在但没有任何版本行（例如先前 `alembic check` 留下的副作用），
@@ -155,7 +148,7 @@ baseline（0001）再升级到 head（0018），**不删除任何已有数据**�
 # 指定其它数据库
 .venv\Scripts\python scripts\migrate.py --db-url sqlite:///./data/annotation.db
 
-# 仅检查当前状态，不做任何修改（可区分“空版本表”并显示当前版本号）
+# 仅诊断当前状态，不做任何修改；它不是生产 head 门禁
 .venv\Scripts\python scripts\migrate.py --check
 ```
 
