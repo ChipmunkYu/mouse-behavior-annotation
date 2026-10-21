@@ -43,6 +43,7 @@ from ..video_delete_service import VideoDeleteServiceError
 from ..video_operation_gate import VideoOperationBusyError
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_dependency import require_video_operation_gate
+from ..video_write_gate import require_not_archived
 from ..video_playback import (
     DISPLAY_PROXY_FAILED,
     DISPLAY_PROXY_PENDING,
@@ -270,7 +271,7 @@ def list_videos(
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    query = db.query(Video).filter(Video.project_id == project_id)
+    query = db.query(Video).filter(Video.project_id == project_id, Video.workflow_status != "archived")
     if view == "mine":
         query = query.filter(Video.assignee_membership_id == access[1].id)
     elif view == "unassigned":
@@ -325,6 +326,7 @@ def _calibration_video(db: Session, project_id: int, video_id: int, *, require_d
     video = db.query(Video).filter_by(id=video_id, project_id=project_id).one_or_none()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found in this project")
+    require_not_archived(video)
     if require_dimensions and (video.width is None or video.height is None
                                or video.width <= 0 or video.height <= 0):
         raise HTTPException(status_code=409, detail="Video dimensions are required for calibration")
@@ -660,7 +662,7 @@ def behavior_stats(project_id: int, access: tuple = Depends(project_access),
     latest_attempts = db.query(
         Submission.video_id, func.max(Submission.attempt_no).label("attempt_no")
     ).join(Video, Video.id == Submission.video_id).filter(
-        Video.project_id == project_id
+        Video.project_id == project_id, Video.workflow_status != "archived"
     ).group_by(Submission.video_id).subquery()
     submission_ids = [row.id for row in db.query(Submission.id).join(
         latest_attempts,

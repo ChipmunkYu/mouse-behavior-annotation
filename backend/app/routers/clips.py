@@ -147,7 +147,7 @@ def list_clips(
     db: Session = Depends(get_db),
 ) -> ClipPageOut:
     """项目成员分页浏览跨视频审核通过片段库（仅成员；不校验 active）。"""
-    conds = [Video.project_id == project_id]
+    conds = [Video.project_id == project_id, Video.workflow_status != "archived"]
     if category_id is not None: conds.append(SubmissionAnnotation.category_id == category_id)
     if video_id is not None: conds.append(Submission.video_id == video_id)
     if annotator_id is not None: conds.append(Submission.submitted_by == annotator_id)
@@ -311,7 +311,7 @@ def clip_categories(
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
-        .filter(Video.project_id == project_id, Clip.retired_at.is_(None))
+        .filter(Video.project_id == project_id, Clip.retired_at.is_(None), Video.workflow_status != "archived")
         .group_by(SubmissionAnnotation.category_id, SubmissionAnnotation.category_name)
         .order_by(SubmissionAnnotation.category_id)
         .all()

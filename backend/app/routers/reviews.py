@@ -335,7 +335,7 @@ def review_queue(project_id: int, request: Request, access: tuple = Depends(proj
                  db: Session = Depends(get_db)) -> list[dict]:
     require_reviewer(access[1], "Review permission is required to view the review queue")
     rows = db.query(Video, Submission).join(Submission, Submission.video_id == Video.id).filter(
-        Video.project_id == project_id, Submission.status == "submitted"
+        Video.project_id == project_id, Submission.status == "submitted", Video.workflow_status != "archived"
     ).order_by(Submission.submitted_at.desc(), Submission.id.desc()).all()
     return [public_video(
                 video, request.app.state.settings,

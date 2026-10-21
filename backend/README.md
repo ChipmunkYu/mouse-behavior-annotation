@@ -6,6 +6,8 @@
 
 > 行为级审核、锁定/撤销、跨轮次沿用、退回处理和 legacy/purge 的现行合同见[行为级审核 API 契约](../docs/behavior-review-api.md)。schema head 由 Alembic 迁移图动态确定，不代表生产已升级。
 
+> 视频 `workflow_status=archived` 的后台失效终态、隐藏/写保护/新导出边界与只读候选报告见[视频历史隐藏归档](../docs/设计/2026-10-21｜决策：视频历史隐藏归档.md)。本地实现不表示已执行数据归档或生产发布。
+
 - 技术栈：Python 3.10+、FastAPI、SQLite、SQLAlchemy 2.x、Pydantic v2
 - 范围：真实数据模型 + CRUD；Mock/seed 仅用于账号、项目、视频元数据
 - 批次 2：真实视频流式上传（分块写入 + 磁盘余量保护 + 原子 rename），保留 P1 的 JSON Mock 视频元数据接口

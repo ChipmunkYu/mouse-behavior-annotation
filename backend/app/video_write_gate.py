@@ -14,6 +14,13 @@ from .models import DetectionImport, Submission, Video
 from .video_operation_gate import VideoOperationBusyError, VideoOperationGateCoordinator
 from .video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 
+ARCHIVED_DETAIL = "该视频已归档，不能修改或导出"
+
+
+def require_not_archived(video: Video) -> None:
+    if video.workflow_status == "archived":
+        raise HTTPException(status_code=409, detail=ARCHIVED_DETAIL)
+
 
 @dataclass(frozen=True)
 class VideoWriteState:
@@ -65,6 +72,7 @@ def video_write_gate(
             _after_video_lock()
             db.expire_all()
             video = db.get(Video, video_id)
+            require_not_archived(video)
             detection_import = (
                 db.query(DetectionImport)
                 .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)
