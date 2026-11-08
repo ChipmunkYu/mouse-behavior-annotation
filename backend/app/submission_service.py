@@ -23,6 +23,7 @@ from .file_identity import FileIdentity, file_identity, hash_file_handle
 from .integrity_canonical import (canonical_digest as _canonical_digest, canonical_rows_digest,
                                   validate_pose_metadata)
 from .participant_roles import ParticipantRoleError, canonicalize_participant_roles
+from .participant_continuity import keypoint_names, participant_continuity_error
 from .behavior_review import (assert_video_not_final_approved, carry_approved_decisions, ensure_material_evidence,
                               rejected_blockers)
 
@@ -210,7 +211,7 @@ def _validate_crop(crop, width: int, height: int) -> bool:
     return x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= width and y + h <= height
 
 
-def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> list[tuple[Annotation, BehaviorCategory]]:
+def validate_annotations(db: Session, video: Video, imp: DetectionImport, settings=None) -> list[tuple[Annotation, BehaviorCategory]]:
     rows = db.query(Annotation, BehaviorCategory).outerjoin(
         BehaviorCategory, BehaviorCategory.id == Annotation.category_id
     ).filter(Annotation.video_id == video.id).order_by(Annotation.id).all()
@@ -288,6 +289,15 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport) -> lis
         if reason is None and category.participant_mode == "unordered" and not (category.mouse_count_min <= len(ids)
                                    and (category.mouse_count_max is None or len(ids) <= category.mouse_count_max)):
             reason = f"Category '{category.name}' participant count is invalid"
+        if reason is None and settings is not None:
+            try:
+                names = keypoint_names(settings, imp) if category.group == "社交行为" else []
+                reason = participant_continuity_error(
+                    db, imp, category, ids, ann.start_frame, ann.end_frame, ann.crop_region,
+                    keypoint_names=names,
+                )
+            except ValueError as exc:
+                reason = str(exc)
         if reason is None:
             for track_id in ids:
                 if not any(ann.start_frame <= frame <= ann.end_frame
@@ -317,7 +327,7 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
         raise HTTPException(status_code=409, detail="Active detection import does not belong to video")
     if db.query(Submission.id).filter_by(video_id=video.id, status="submitted").first():
         raise HTTPException(status_code=409, detail="Video already has a submitted attempt")
-    rows = validate_annotations(db, video, imp)
+    rows = validate_annotations(db, video, imp, settings)
     blockers = rejected_blockers(db, video.id, imp.id)
     if blockers:
         raise HTTPException(status_code=409, detail={

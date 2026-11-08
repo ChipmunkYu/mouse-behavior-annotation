@@ -658,7 +658,7 @@ def test_clip_library_mixes_legacy_and_submission_authority_per_video(media_ctx,
     legacy_annotation = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{legacy_video['id']}/annotations",
         json={"category_id": category_id, "start_time": 0.0, "end_time": 0.04,
-              "start_frame": 0, "end_frame": 1}, headers=headers,
+              "start_frame": 0, "end_frame": 1, "mouse_ids": [1]}, headers=headers,
     ).json()
     with ctx.session_factory() as db:
         video_row = db.get(__import__("app.models", fromlist=["Video"]).Video, legacy_video["id"])

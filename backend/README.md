@@ -633,7 +633,7 @@ terminal 非 export、失败 export、非法/越界结果路径不会永久保�
     `workflow_status ∈ {draft, submitted, approved, rejected}`（默认 `draft`）、
     `annotation_revision`（≥1，默认 1）、`submitted_at` / `approved_at` / `approved_by`（可空）。
 - `Annotation`：视频级标注（起止时间、起止帧、confidence、review_status、crop_region 可空）。
-  role-based 时 `participant_roles` 是 authority，`mouse_ids` 为去重升序并集；`participant_status` 表示角色待补全，和 Track 有效性的 `mouse_id_status` 分离。
+  role-based 时 `participant_roles` 是 authority，保存时必须完整覆盖角色定义并满足各角色 min/max，`mouse_ids` 为去重升序并集；`participant_status=needs_participants` 仅用于兼容历史存量或检测修订后的状态，新建和编辑不得保存该状态，并继续与 Track 有效性的 `mouse_id_status` 分离。
   `annotator_id` `NOT NULL + ON DELETE RESTRICT`（仍被引用时不可删用户），
   `reviewer_id` 可空并 `ON DELETE SET NULL`（删除用户不销毁标注）。
 - `Video.uploaded_by` 可空并 `ON DELETE SET NULL`（删除上传者后视频元数据保留）；

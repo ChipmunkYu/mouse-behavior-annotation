@@ -371,7 +371,7 @@ class AnnotationCreate(BaseModel):
     confidence: str = "certain"
     crop_region: Optional[dict[str, Any]] = None
     # v0.6：参与小鼠 ID + 修订号
-    mouse_ids: Optional[list[int]] = None
+    mouse_ids: Optional[list[StrictNonNegativeBusinessInt]] = None
     participant_roles: Optional[dict[str, Any]] = None
     detection_import_revision: Optional[int] = None
     identity_revision: Optional[int] = None
@@ -397,7 +397,7 @@ class AnnotationUpdate(BaseModel):
     confidence: Optional[str] = None
     crop_region: Optional[dict[str, Any]] = None
     # v0.6：参与小鼠 ID + 修订号
-    mouse_ids: Optional[list[int]] = None
+    mouse_ids: Optional[list[StrictNonNegativeBusinessInt]] = None
     participant_roles: Optional[dict[str, Any]] = None
     detection_import_revision: Optional[int] = None
     identity_revision: Optional[int] = None
