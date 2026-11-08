@@ -39,6 +39,7 @@ from ..models import (
 from ..permissions import MANAGER_ROLES, require_editor as require_edit_permission
 from ..participant_roles import ParticipantRoleError, canonicalize_participant_roles
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
+from ..participant_continuity import validate_participant_continuity
 from ..video_write_gate import video_write_gate
 from ..behavior_review import (assert_annotation_unlocked, assert_video_not_final_approved, ensure_material_evidence,
                                material_digest, material_values)
@@ -463,6 +464,8 @@ def create_annotation(
             participant_roles, mouse_ids, participant_status = _canonical_participants(
                 category, body.participant_roles
             )
+            if participant_status != "valid":
+                raise HTTPException(status_code=400, detail="每个参与角色都必须满足配置的数量要求")
             mouse_id_status = _validate_track_coverage(
                 db, imp, mouse_ids, body.start_frame, body.end_frame, id_rev
             )
@@ -471,15 +474,21 @@ def create_annotation(
                 raise HTTPException(status_code=422, detail="unordered annotations must have empty participant_roles")
             participant_roles, participant_status = {}, "valid"
         if category.participant_mode == "unordered" and body.mouse_ids is not None:
-            if imp is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot specify mouse_ids without an active detection import",
-                )
             deduped = sorted(set(body.mouse_ids))
-            _validate_mouse_ids(db, imp, deduped, body.start_frame, body.end_frame, category, id_rev)
+            if imp is not None:
+                _validate_mouse_ids(db, imp, deduped, body.start_frame, body.end_frame, category, id_rev)
             mouse_ids = deduped
-            mouse_id_status = "valid"
+            mouse_id_status = "valid" if imp is not None else "needs_mouse_ids"
+        if category.participant_mode == "unordered" and not (
+            category.mouse_count_min <= len(mouse_ids)
+            and (category.mouse_count_max is None or len(mouse_ids) <= category.mouse_count_max)
+        ):
+            raise HTTPException(status_code=400, detail=f"Category '{category.name}' participant count is invalid")
+
+        validate_participant_continuity(
+            db, request.app.state.settings, imp, category, mouse_ids,
+            body.start_frame, body.end_frame, body.crop_region,
+        )
 
         plan = _invalidate_video(db, video, request.app.state.settings, increment_media=True)
         annotation = Annotation(
@@ -593,12 +602,26 @@ def update_annotation(
         if target_category.participant_mode == "role_based":
             role_input = body.participant_roles if "participant_roles" in body.model_fields_set else annotation.participant_roles
             canonical_roles = _canonical_participants(target_category, role_input)
+            if canonical_roles[2] != "valid":
+                raise HTTPException(status_code=400, detail="每个参与角色都必须满足配置的数量要求")
             if canonical_roles[0] != (annotation.participant_roles or {}) or canonical_roles[1] != (annotation.mouse_ids or []):
                 changed_fields.add("participant_roles")
         elif annotation.participant_roles or annotation.participant_status != "valid":
             changed_fields.add("participant_roles")
         if normalized_mouse_ids is not None and normalized_mouse_ids != (annotation.mouse_ids or []):
             changed_fields.add("mouse_ids")
+        candidate_ids = canonical_roles[1] if canonical_roles is not None else (
+            normalized_mouse_ids if normalized_mouse_ids is not None else annotation.mouse_ids or [])
+        if target_category.participant_mode == "unordered" and not (
+            target_category.mouse_count_min <= len(candidate_ids)
+            and (target_category.mouse_count_max is None or len(candidate_ids) <= target_category.mouse_count_max)
+        ):
+            raise HTTPException(status_code=400, detail=f"Category '{target_category.name}' participant count is invalid")
+        validate_participant_continuity(
+            db, request.app.state.settings, state.detection_import, target_category, candidate_ids,
+            target_start_frame, target_end_frame,
+            body.crop_region if body.crop_region is not None else annotation.crop_region,
+        )
         media_changed = bool(changed_fields.intersection(
             {"start_time", "end_time", "start_frame", "end_frame", "crop_region"}))
         plan = (_invalidate_video(db, video, request.app.state.settings, increment_media=media_changed)
@@ -631,15 +654,13 @@ def update_annotation(
             annotation.participant_status = "valid"
             imp = state.detection_import
             if body.mouse_ids is not None:
-                if imp is None:
-                    raise HTTPException(status_code=400,
-                                        detail="Cannot specify mouse_ids without an active detection import")
                 deduped = normalized_mouse_ids
-                _validate_mouse_ids(db, imp, deduped, annotation.start_frame,
-                                    annotation.end_frame, target_category, video.identity_revision)
+                if imp is not None:
+                    _validate_mouse_ids(db, imp, deduped, annotation.start_frame,
+                                        annotation.end_frame, target_category, video.identity_revision)
                 annotation.mouse_ids = deduped
-                annotation.mouse_id_status = "valid"
-                annotation.detection_import_revision = imp.revision
+                annotation.mouse_id_status = "valid" if imp else "needs_mouse_ids"
+                annotation.detection_import_revision = imp.revision if imp else 0
                 annotation.identity_revision = video.identity_revision
             elif body.category_id is not None or body.start_frame is not None or body.end_frame is not None:
                 annotation.mouse_ids = sorted(set(annotation.mouse_ids or []))

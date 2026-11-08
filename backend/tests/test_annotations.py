@@ -11,6 +11,7 @@ def _base_payload(category_id: int) -> dict:
         "end_time": 3.0,
         "start_frame": 25,
         "end_frame": 75,
+        "mouse_ids": [1],
     }
 
 
@@ -316,7 +317,7 @@ def test_export_matches_export_event_contract(ctx):
     assert response.status_code == 200
     event = response.json()[0]
     assert event["annotation_id"] == created["id"]
-    assert event["mouse_ids"] == []
+    assert event["mouse_ids"] == [1]
     assert event["detection_import_revision"] == 0
     assert event["identity_revision"] == 0
     assert event["clip_file"] is None

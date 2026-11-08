@@ -67,6 +67,7 @@
             "anyOf": [
               {
                 "items": {
+                  "minimum": 0.0,
                   "type": "integer"
                 },
                 "type": "array"
@@ -363,6 +364,7 @@
             "anyOf": [
               {
                 "items": {
+                  "minimum": 0.0,
                   "type": "integer"
                 },
                 "type": "array"

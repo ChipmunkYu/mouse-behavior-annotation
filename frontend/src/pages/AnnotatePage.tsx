@@ -296,7 +296,7 @@ export function buildAnnotationEditPatch(input: {
   };
 }
 
-function draftApiErrorMessages(error: unknown): string[] {
+export function draftApiErrorMessages(error: unknown): string[] {
   if (!(error instanceof ApiError)) return [error instanceof Error ? error.message : "保存行为标注失败"];
   const messages: string[] = [];
   const raw = apiErrorDetail(error);
@@ -1920,6 +1920,10 @@ export default function AnnotatePage() {
       return;
     }
     if (!cat || !sp || !ep || !effectiveFps) return;
+    setDraftErrors([]);
+    setDraftErrorFields(new Set());
+    setErrorMsg(null);
+    setSaveState("idle");
     // 已提交 / 已通过 / 已退回的视频新增标注前需确认（会退回草稿、审核失效）
     if (!(await guardMutation("新增行为标注"))) {
       setHint("已取消保存，未保存行为草稿保持不变");
@@ -2126,6 +2130,8 @@ export default function AnnotatePage() {
       setErrorMsg("此行为已通过并锁定；请先由审核人撤销通过");
       throw new Error("此行为已锁定");
     }
+    setErrorMsg(null);
+    setSaveState("idle");
     if (!(await guardMutation("编辑行为标注"))) return;
     setSaveState("saving");
     setAnnotationMutationBusy(true);

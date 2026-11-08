@@ -245,7 +245,11 @@ def test_submit_requires_detection_import(ctx):
     headers, project, categories, video = (
         setup["headers"], setup["project"], setup["categories"], setup["video"]
     )
-    _annotate(ctx, headers, project, video, categories[0]["id"])
+    response = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
+        json={"category_id": categories[0]["id"], "start_frame": 0, "end_frame": 1,
+              "mouse_ids": [1]}, headers=headers)
+    assert response.status_code == 201, response.text
     resp = _submit(ctx, headers, project, video)
     assert resp.status_code == 400
     assert "no detection import" in resp.json()["detail"].lower()
@@ -375,13 +379,15 @@ def test_submit_invalid_mixed_annotations_changes_neither(ctx, login_headers):
         ) == ("needs_mouse_ids", 1, 2)
 
 
-def test_submit_rejects_needs_mouse_ids(ctx, login_headers):
-    """有检测导入但标注缺少 mouse_ids 时提交应被拒绝。"""
+def test_save_rejects_missing_mouse_ids(ctx, login_headers):
+    """有检测导入但标注缺少 mouse_ids 时保存即被拒绝。"""
     headers, project, categories, video = _setup_video_with_import(ctx, login_headers)
-    _annotate(ctx, headers, project, video, categories[0]["id"])
-    resp = _submit(ctx, headers, project, video)
+    resp = ctx.client.post(
+        f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
+        json={"category_id": categories[0]["id"], "start_frame": 0, "end_frame": 1},
+        headers=headers)
     assert resp.status_code == 400
-    assert resp.json()["detail"] == "1 annotation(s) still need valid mouse_ids before submission"
+    assert "participant count" in resp.json()["detail"]
 
 
 def _clear_rejection(ctx, headers, project, video, annotation_id, confidence):

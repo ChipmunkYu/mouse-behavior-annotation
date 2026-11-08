@@ -6,7 +6,7 @@ from tests.conftest import auth_headers
 from tests.test_detection_imports import SAMPLE_METADATA, make_tracks_jsonl
 
 
-def _role_project(ctx):
+def _role_project(ctx, *, unordered_group="个体"):
     headers = auth_headers(ctx.client)
     project = ctx.client.post("/api/projects", json={"name": "roles"}, headers=headers).json()
     payload = {"expected_version": 0, "categories": [{
@@ -16,7 +16,7 @@ def _role_project(ctx):
             {"name": "被追逐者", "min_count": 1, "max_count": 2, "role_sort_order": 1},
         ],
     }, {
-        "name": "行走", "group": "个体", "sort_order": 1,
+        "name": "行走", "group": unordered_group, "sort_order": 1,
         "participant_mode": "unordered", "role_definitions": [],
         "mouse_count_min": 1, "mouse_count_max": 2,
     }]}
@@ -58,18 +58,13 @@ def test_role_annotation_complete_incomplete_projection_and_unordered_regression
     url = f"/api/projects/{project['id']}/videos/{video['id']}/annotations"
     draft = ctx.client.post(url, json=_body(role_category["id"], {first: [3], second: []}),
                             headers=headers)
-    assert draft.status_code == 201, draft.text
-    assert draft.json()["participant_status"] == "needs_participants"
-    assert draft.json()["participant_roles"] == {first: [3], second: []}
-    assert draft.json()["mouse_ids"] == [3]
-    completed = ctx.client.patch(f"{url}/{draft.json()['id']}",
-        json={"participant_roles": {first: [3], second: [8]}}, headers=headers)
-    assert completed.status_code == 200
-    assert completed.json()["participant_status"] == "valid"
+    assert draft.status_code == 400
+    completed = ctx.client.post(url, json=_body(
+        role_category["id"], {first: [3], second: [8]}), headers=headers)
+    assert completed.status_code == 201
     assert completed.json()["mouse_ids"] == [3, 8]
     plain = ctx.client.post(url, json=_body(unordered["id"]), headers=headers)
-    assert plain.status_code == 201
-    assert plain.json()["participant_roles"] == {} and plain.json()["participant_status"] == "valid"
+    assert plain.status_code == 400
 
 
 def test_role_annotation_rejects_mouse_ids_and_structural_json_errors(ctx):
@@ -164,6 +159,7 @@ def test_legacy_export_projects_role_participants_and_unordered_empty(ctx):
     assert ctx.client.post(url, json=_body(
         role_category["id"], {first: [8], second: [3]}), headers=headers).status_code == 201
     plain = _body(unordered["id"])
+    plain["mouse_ids"] = [1]
     assert ctx.client.post(url, json=plain, headers=headers).status_code == 201
     events = ctx.client.get(f"{url}/export", headers=headers).json()
     assert events[0]["mouse_ids"] == [3, 8]
@@ -171,5 +167,5 @@ def test_legacy_export_projects_role_participants_and_unordered_empty(ctx):
         {"role_key": first, "role_name": "追逐者", "track_ids": [8]},
         {"role_key": second, "role_name": "被追逐者", "track_ids": [3]},
     ]
-    assert events[1]["mouse_ids"] == []
+    assert events[1]["mouse_ids"] == [1]
     assert events[1]["participants"] == []

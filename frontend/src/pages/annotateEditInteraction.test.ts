@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Category } from "../api/types";
+import { ApiError } from "../api/client";
 import annotateSource from "./AnnotatePage.tsx?raw";
 import {
   buildAnnotationEditPatch,
+  draftApiErrorMessages,
   isEditingAnnotationShortcutAllowed,
   parseMouseIdList,
 } from "./AnnotatePage";
@@ -114,6 +116,13 @@ describe("编辑行为 PATCH 构造", () => {
     expect(buildAnnotationEditPatch({ ...base, startFrame: 0, endFrame: 200 })).toEqual({ error: "结束帧不能超过最后一帧 99" });
     expect(buildAnnotationEditPatch({ ...base, startFrame: 1, endFrame: 5, fps: null })).toEqual({ error: "视频 FPS 无效，无法由帧派生时间" });
     expect(buildAnnotationEditPatch({ ...base, startFrame: null, endFrame: 5 })).toEqual({ error: "请设置开始帧和结束帧" });
+  });
+});
+
+describe("保存 API 错误", () => {
+  it("直接展示后端 400 detail，不降级成通用保存失败", () => {
+    const error = new ApiError(400, "该行为需要恰好两只不同的参与小鼠", { detail: "该行为需要恰好两只不同的参与小鼠" });
+    expect(draftApiErrorMessages(error)).toEqual(["该行为需要恰好两只不同的参与小鼠"]);
   });
 });
 
