@@ -70,13 +70,23 @@ def _annotate(ctx, headers, project, video, category_id, start_time=1.0):
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
             "category_id": category_id,
+            "mouse_ids": [1],
             "start_frame": int(start_time * 25),
             "end_frame": int((start_time + 2.0) * 25),
         },
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
-    return resp.json()
+    annotation = resp.json()
+    assert annotation["mouse_ids"] == [1]
+    assert annotation["review_status"] == "pending"
+    assert annotation["mouse_id_status"] == "needs_mouse_ids"
+    with ctx.session_factory() as db:
+        saved = db.get(Annotation, annotation["id"])
+        assert saved.video_id == video["id"]
+        assert saved.category_id == category_id
+        assert saved.mouse_ids == [1]
+    return annotation
 
 
 def _patch(ctx, headers, project, video, ann_id, payload):
@@ -222,6 +232,7 @@ def test_create_returns_to_draft_without_final_submission_authority(ctx, login_h
             f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
             json={
                 "category_id": categories[1]["id"],
+                "mouse_ids": [1],
                 "start_time": 6.0,
                 "end_time": 8.0,
                 "start_frame": 150,
@@ -320,6 +331,7 @@ def test_each_content_change_increments_once_while_draft_and_noop_stays_stable(c
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
             "category_id": categories[1]["id"],
+            "mouse_ids": [1],
             "start_time": 9.0,
             "end_time": 11.0,
             "start_frame": 225,
@@ -399,15 +411,7 @@ def test_invalidation_only_affects_video_own_clips(ctx, login_headers, tmp_path)
         json={"filename": "s2.mp4", "duration": 120.0, "fps": 25.0, "status": "metadata"},
         headers=headers,
     ).json()
-    ann2 = ctx.client.post(
-        f"/api/projects/{project['id']}/videos/{video2['id']}/annotations",
-        json={
-            "category_id": categories[1]["id"],
-            "start_frame": 25,
-            "end_frame": 75,
-        },
-        headers=headers,
-    ).json()
+    ann2 = _annotate(ctx, headers, project, video2, categories[1]["id"])
 
     _add_clip(ctx, tmp_path, project["id"], ann1["id"], "v1.mp4", "v1.jpg")
     _add_clip(ctx, tmp_path, project["id"], ann2["id"], "v2.mp4", "v2.jpg")
@@ -531,11 +535,12 @@ def test_review_capable_member_can_create_but_not_modify_others_annotations(ctx,
     ann = _annotate(ctx, headers, project, video, categories[0]["id"])
     reviewer_headers, _ = _reviewer_headers(ctx, login_headers, project["id"])
 
-    # reviewer 创建 → 403
+    # 具备审核权限的成员仍可创建自己的标注。
     resp = ctx.client.post(
         f"/api/projects/{project['id']}/videos/{video['id']}/annotations",
         json={
             "category_id": categories[1]["id"],
+            "mouse_ids": [1],
             "start_time": 1.0,
             "end_time": 3.0,
             "start_frame": 25,
@@ -544,6 +549,8 @@ def test_review_capable_member_can_create_but_not_modify_others_annotations(ctx,
         headers=reviewer_headers,
     )
     assert resp.status_code == 201
+    assert resp.json()["mouse_ids"] == [1]
+    assert resp.json()["review_status"] == "pending"
     # reviewer 修改 / 删除 → 403
     assert _patch(ctx, reviewer_headers, project, video, ann["id"], {"end_frame": 225}).status_code == 403
     assert _delete(ctx, reviewer_headers, project, video, ann["id"]).status_code == 403
@@ -562,6 +569,7 @@ def test_direct_review_status_writes_rejected_422(ctx, login_headers):
     # 创建时直接写非 pending 审核状态 → 422
     payload = {
         "category_id": categories[0]["id"],
+        "mouse_ids": [1],
         "start_time": 1.0,
         "end_time": 3.0,
         "start_frame": 25,
@@ -577,4 +585,7 @@ def test_direct_review_status_writes_rejected_422(ctx, login_headers):
 
     # 创建固定 pending；显式传 "pending" 与缺省等价
     payload["review_status"] = "pending"
-    assert ctx.client.post(base, json=payload, headers=headers).status_code == 201
+    resp = ctx.client.post(base, json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["review_status"] == "pending"
+    assert resp.json()["mouse_ids"] == [1]
