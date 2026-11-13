@@ -10,7 +10,7 @@
   1/fps，使容器时长满足 canonical frame/fps 时间轴（源 PTS 透传会让容器时长漂移，
   触发导出契约 `ffprobe duration mismatch`）。
 - 输出先写临时文件，由 worker 成功后原子替换；失败由 worker 清理半成品；
-  stderr 截断写入错误字段。
+  错误字段不写入原始 stderr、执行命令或绝对路径。
 - 本机可能没有 ffmpeg：测试通过 `FakeMediaProcessor` / 其它替换实现注入，
   不要求系统 ffmpeg。真实执行器通过 FFMPEG_PATH / FFPROBE_PATH 配置。
 """
@@ -23,28 +23,50 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
-STDERR_TRUNCATE_LIMIT = 4000
-
-
 class MediaCommandError(RuntimeError):
-    """媒体命令失败（非零退出 / 超时 / 可执行文件缺失 / 路径越界等）。
-
-    错误信息包含截断后的 stderr，供任务与 Clip 记录展示。
-    """
+    """可安全展示的媒体操作失败；环境依赖故障使用 MediaDependencyError。"""
 
 
-def truncate_text(text: str | None, limit: int = STDERR_TRUNCATE_LIMIT) -> str:
-    """截断长文本（stderr / 错误信息），尾部注明原长度，避免撑爆 DB 字段。"""
-    value = (text or "").strip()
-    if len(value) <= limit:
-        return value
-    return value[:limit] + f"...[truncated, {len(value)} chars]"
+class MediaDependencyError(MediaCommandError):
+    """Service dependency failure; never include subprocess output or configured paths."""
+
+    code = "media_dependency_unavailable"
+
+    def __init__(self, tool: str):
+        self.tool = tool
+        self.detail = {
+            "code": self.code,
+            "message": f"服务媒体依赖 {tool} 不可用；请管理员检查 FFMPEG_PATH / FFPROBE_PATH、执行权限及运行库，运行媒体预检后重试。无需修改上传文件。",
+            "tool": tool,
+        }
+        super().__init__(f"{self.code}: {self.detail['message']}")
 
 
-def _stderr_text(stderr: str | bytes | None) -> str:
-    if isinstance(stderr, bytes):
-        return stderr.decode("utf-8", errors="replace")
-    return stderr or ""
+def check_media_executable(executable: str, tool: str) -> None:
+    """Actually execute the configured binary, including loader/permission checks."""
+    try:
+        result = subprocess.run([executable, "-version"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=5, shell=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise MediaDependencyError(tool) from None
+    if result.returncode != 0 or not result.stdout.lower().startswith(f"{tool} version "):
+        raise MediaDependencyError(tool)
+
+
+def run_media_command(command: list[str], *, tool: str, timeout: int):
+    """Shared classification for rendering, probing, timestamps and display proxies."""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=timeout, shell=False)
+    except OSError:
+        raise MediaDependencyError(tool) from None
+    except subprocess.TimeoutExpired:
+        raise MediaCommandError(f"Media command timed out after {timeout}s") from None
+    if result.returncode != 0:
+        # A broken loader/runtime is environmental; a healthy tool rejecting media is not.
+        check_media_executable(command[0], tool)
+        raise MediaCommandError(f"Media command failed (exit {result.returncode}); video or media operation is invalid")
+    return result
 
 
 def format_time(value: float) -> str:
@@ -92,6 +114,10 @@ class FfmpegMediaProcessor:
         self.preset = preset
         self.timeout = timeout_seconds
         self.map_audio = map_audio
+
+    def check_dependencies(self) -> None:
+        check_media_executable(self.ffmpeg, "ffmpeg")
+        check_media_executable(self.ffprobe, "ffprobe")
 
     def build_clip_command(
         self, input_path: str, start: float, frames: int, output_path: str,
@@ -181,46 +207,13 @@ class FfmpegMediaProcessor:
         return cmd
 
     def _run(self, cmd: list[str]) -> None:
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                shell=False,  # 参数列表直传，禁用 shell
-            )
-        except subprocess.TimeoutExpired as exc:
-            detail = truncate_text(_stderr_text(getattr(exc, "stderr", None)))
-            raise MediaCommandError(
-                f"Media command timed out after {self.timeout}s: {cmd[0]}"
-                + (f"\n{detail}" if detail else "")
-            ) from exc
-        except FileNotFoundError as exc:
-            raise MediaCommandError(
-                f"Media executable not found: {cmd[0]!r} "
-                "(check FFMPEG_PATH / FFPROBE_PATH)"
-            ) from exc
-        except OSError as exc:
-            raise MediaCommandError(f"Failed to run media command {cmd[0]!r}: {exc}") from exc
-        if proc.returncode != 0:
-            raise MediaCommandError(
-                f"Media command failed (exit {proc.returncode}): {cmd[0]}\n"
-                f"{truncate_text(_stderr_text(proc.stderr))}"
-            )
+        run_media_command(cmd, tool="ffmpeg", timeout=self.timeout)
 
     def probe_clip(self, path: str, *, expected: dict | None = None) -> dict:
         cmd = [self.ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
                "-show_entries", "stream=width,height,avg_frame_rate,nb_read_frames:format=duration",
                "-of", "json", path]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=self.timeout, shell=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise MediaCommandError(f"ffprobe failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise MediaCommandError(f"ffprobe failed: {truncate_text(proc.stderr)}")
+        proc = run_media_command(cmd, tool="ffprobe", timeout=self.timeout)
         try:
             document = json.loads(proc.stdout)
             stream = document["streams"][0]
@@ -246,7 +239,7 @@ class FfmpegMediaProcessor:
             path = Path(input_path).resolve()
             stat = path.stat()
         except OSError as exc:
-            raise MediaCommandError(f"cannot stat media input {input_path!r}: {exc}") from exc
+            raise MediaCommandError("Cannot read media input") from None
         timestamps = self._probe_frame_timestamps(str(path), stat.st_size, stat.st_mtime_ns)
         if start_frame >= len(timestamps):
             raise MediaCommandError(
@@ -260,17 +253,7 @@ class FfmpegMediaProcessor:
     ) -> tuple[float, ...]:
         cmd = [self.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_frames",
                "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", input_path]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=self.timeout, shell=False)
-        except subprocess.TimeoutExpired as exc:
-            raise MediaCommandError(f"ffprobe timed out after {self.timeout}s") from exc
-        except FileNotFoundError as exc:
-            raise MediaCommandError(f"Media executable not found: {cmd[0]!r} (check FFMPEG_PATH / FFPROBE_PATH)") from exc
-        except OSError as exc:
-            raise MediaCommandError(f"ffprobe failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise MediaCommandError(f"ffprobe failed: {truncate_text(proc.stderr)}")
+        proc = run_media_command(cmd, tool="ffprobe", timeout=self.timeout)
         try:
             frames = json.loads(proc.stdout)["frames"]
             if not isinstance(frames, list) or not frames:

@@ -22,6 +22,16 @@ def require_not_archived(video: Video) -> None:
         raise HTTPException(status_code=409, detail=ARCHIVED_DETAIL)
 
 
+def reject_heuristic(video: Video, code="heuristic_judgment_required") -> None:
+    if video.source == "heuristic":
+        raise HTTPException(status_code=409, detail={"code": code, "message": "Use the heuristic judgment workflow"})
+
+
+def require_heuristic_mutable(video: Video) -> None:
+    if video.source == "heuristic" and video.workflow_status in {"approved", "unusable"}:
+        raise HTTPException(status_code=409, detail={"code": "heuristic_completed_locked", "message": "Completed heuristic input is read-only"})
+
+
 @dataclass(frozen=True)
 class VideoWriteState:
     video: Video
@@ -73,6 +83,7 @@ def video_write_gate(
             db.expire_all()
             video = db.get(Video, video_id)
             require_not_archived(video)
+            require_heuristic_mutable(video)
             detection_import = (
                 db.query(DetectionImport)
                 .filter(DetectionImport.video_id == video_id, DetectionImport.active == True)

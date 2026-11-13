@@ -31,6 +31,7 @@ P1—P4 低码率展示代理与导出热修已部署至生产，schema 为 `001
 
 ## 计划与独立分支实现（混合状态）
 
+- [启发式结果判断与复核](设计/2026-11-09｜决策：启发式结果判断与复核.md)：WI-20261109-01；已实现并完成本地定向测试，待真实上游样本及浏览器验收、未部署；实际契约与待验证缺口见 owner 第 11 节。
 - [projects/2 新增四类行为标签计划](计划/projects-2新增行为标签计划.md)：仅为既有 `projects/2` 新增 Following、Group locomotion、Social clustering、Dispersal 四类；已确认、尚未实施，不改运行时代码或默认新项目模板。
 - [视频同步硬删除需求规格](计划/视频同步硬删除需求规格.md)：DELETE API、active owner/admin 与 draft/rejected 限制、活动/未知任务 409 零副作用门禁、单进程 gate、终态 worker 不变量、版本化 manifest/quarantine/startup recovery 及视频库入口已实现；POSIX descriptor-relative 能力已在生产 Linux 候选实机验证。已随 `9360603` 部署，生产保持单 Uvicorn worker。
 - [标注流程与帧边界需求规格](计划/标注流程与帧边界需求规格.md)：任意顺序草稿与显式保存、参与 ID 分别相交、行为任意重叠、禁止单帧、帧权威/派生只读时间及既定草稿交互均已实现，帧权威迁移为 `0015_frame_authority.py`；已随 `9360603` 部署，生产数据库 schema 为 `0015`。

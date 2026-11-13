@@ -32,6 +32,7 @@ from ..database import get_db
 from ..deps import project_access
 from ..models import Annotation, BehaviorCategory, Clip, Submission, SubmissionAnnotation, User, Video
 from ..schemas import ClipCategoryCount, ClipItem, ClipPageOut
+from ..heuristic_judgment import published_source_condition
 
 router = APIRouter(tags=["clips"])
 
@@ -83,6 +84,7 @@ def _base_filters(
         Annotation.review_status == APPROVED,
         Video.workflow_status == APPROVED,
         Video.project_id == project_id,
+        Video.source == "manual",
     ]
     if category_id is not None:
         conds.append(Annotation.category_id == category_id)
@@ -112,6 +114,7 @@ def _to_item(row, settings) -> ClipItem:
         clip_id=row.clip_id,
         annotation_id=row.annotation_id,
         video_id=row.video_id,
+        source=row.source,
         video_filename=row.video_filename,
         category_id=row.category_id,
         category_name=row.category_name,
@@ -136,6 +139,7 @@ def _to_item(row, settings) -> ClipItem:
 def list_clips(
     project_id: int,
     request: Request,
+    source: Literal["all", "manual", "heuristic"] = "all",
     category_id: Optional[int] = None,
     video_id: Optional[int] = None,
     annotator_id: Optional[int] = None,
@@ -147,7 +151,7 @@ def list_clips(
     db: Session = Depends(get_db),
 ) -> ClipPageOut:
     """项目成员分页浏览跨视频审核通过片段库（仅成员；不校验 active）。"""
-    conds = [Video.project_id == project_id, Video.workflow_status != "archived"]
+    conds = [Video.project_id == project_id, Video.workflow_status != "archived", published_source_condition(source)]
     if category_id is not None: conds.append(SubmissionAnnotation.category_id == category_id)
     if video_id is not None: conds.append(Submission.video_id == video_id)
     if annotator_id is not None: conds.append(Submission.submitted_by == annotator_id)
@@ -176,6 +180,7 @@ def list_clips(
             SubmissionAnnotation.role_definitions_snapshot.label("role_definitions"),
             SubmissionAnnotation.participant_roles_snapshot.label("participant_roles"),
             SubmissionAnnotation.mouse_ids,
+            Video.source,
         )
         .select_from(Clip)
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
@@ -188,6 +193,8 @@ def list_clips(
                                  annotator_id=annotator_id, search=search)
     legacy_conds.append(~_submission_bound_asset_exists())
     legacy_conds.append(~_retired_legacy_asset_exists())
+    if source != "all":
+        legacy_conds.append(Video.source == source)
     latest_legacy_clip_id = select(func.max(Clip.id)).where(
         Clip.annotation_id == Annotation.id, Clip.retired_at.is_(None)
     ).correlate(Annotation).scalar_subquery()
@@ -208,6 +215,7 @@ def list_clips(
         BehaviorCategory.participant_mode.label("category_participant_mode"),
         BehaviorCategory.role_definitions.label("role_definitions"),
         Annotation.participant_roles.label("participant_roles"), Annotation.mouse_ids,
+        Video.source,
     ).select_from(Annotation).join(Video).join(BehaviorCategory).outerjoin(User, User.id == Annotation.annotator_id).outerjoin(
         Clip, Clip.id == latest_legacy_clip_id
     ).where(*legacy_conds)
@@ -263,6 +271,7 @@ def get_clip_thumbnail(
             Clip.source_revision == Video.media_revision,
             Annotation.review_status == APPROVED,
             Video.workflow_status == APPROVED,
+            Video.source == "manual",
             ~_submission_bound_asset_exists(),
         ).first()
     else:
@@ -275,6 +284,7 @@ def get_clip_thumbnail(
         ).filter(
             Clip.id == clip.id,
             Video.project_id == project_id,
+            published_source_condition(),
         ).first()
     if current is None:
         raise HTTPException(status_code=404, detail="Thumbnail not ready")
@@ -296,6 +306,7 @@ def get_clip_thumbnail(
 )
 def clip_categories(
     project_id: int,
+    source: Literal["all", "manual", "heuristic"] = "all",
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> list[ClipCategoryCount]:
@@ -311,7 +322,7 @@ def clip_categories(
         .join(SubmissionAnnotation, SubmissionAnnotation.id == Clip.submission_annotation_id)
         .join(Submission, Submission.id == SubmissionAnnotation.submission_id)
         .join(Video, Video.id == Submission.video_id)
-        .filter(Video.project_id == project_id, Clip.retired_at.is_(None), Video.workflow_status != "archived")
+        .filter(Video.project_id == project_id, Clip.retired_at.is_(None), Video.workflow_status != "archived", published_source_condition(source))
         .group_by(SubmissionAnnotation.category_id, SubmissionAnnotation.category_name)
         .order_by(SubmissionAnnotation.category_id)
         .all()
@@ -323,6 +334,7 @@ def clip_categories(
         Annotation.review_status == APPROVED, Video.workflow_status == APPROVED,
         Video.project_id == project_id, ~_submission_bound_asset_exists(),
         ~_retired_legacy_asset_exists(),
+        Video.source == "manual", Video.source.in_(["manual", "heuristic"] if source == "all" else [source]),
     ).group_by(BehaviorCategory.id, BehaviorCategory.name).all()
     counts: dict[tuple[int, str], int] = {}
     for row in [*new_rows, *legacy_rows]:

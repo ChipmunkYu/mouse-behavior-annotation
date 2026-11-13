@@ -32,6 +32,7 @@ import { ParticipantSummary } from "../components/ParticipantSummary";
 import { formatDate, formatTime, formatTimeShort } from "../utils/format";
 import { useMediaSource } from "../media";
 import { deriveReviewAnnotationView, deriveReviewOverlay, toggleReviewCategory } from "./reviewAnnotationView";
+import HeuristicJudgmentPanel from "./HeuristicJudgmentPanel";
 
 /* ================= 只读标注列表（审核视角，无编辑/删除） ================= */
 function ReadOnlyAnnotationList({
@@ -47,6 +48,7 @@ function ReadOnlyAnnotationList({
   decisionOpen,
   revokeOpen,
   submissionStatus,
+  completedLocked = false,
   onFeedbackChange,
   onDecision,
 }: {
@@ -62,6 +64,7 @@ function ReadOnlyAnnotationList({
   decisionOpen: boolean;
   revokeOpen: boolean;
   submissionStatus: string | null | undefined;
+  completedLocked?: boolean;
   onFeedbackChange: (id: number, value: string) => void;
   onDecision: (annotation: BehaviorReviewAnnotation, status: BehaviorReviewStatus) => void;
 }) {
@@ -78,7 +81,7 @@ function ReadOnlyAnnotationList({
         const current = activeAnnotationIds.has(a.id);
         const feedback = feedbackDrafts[a.id] ?? "";
         const rejectionReady = feedback.trim().length > 0;
-        const restriction = behaviorDecisionRestriction(submissionStatus);
+        const restriction = completedLocked ? "启发式结果已完成：只读，不可重新打开审核。" : behaviorDecisionRestriction(submissionStatus);
         return (
           <div
             key={a.id}
@@ -258,6 +261,7 @@ export default function ReviewPage() {
 
   const [comment, setComment] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [heuristicEditing, setHeuristicEditing] = useState(false);
   const reviewActionBusyRef = useRef(false);
   const behaviorNoticeCleanupRef = useRef<(() => void) | null>(null);
   const [reviewDisabled, setReviewDisabled] = useState(true);
@@ -275,7 +279,7 @@ export default function ReviewPage() {
   const handleMediaReady = useCallback((_reason: "initial" | "retry-restored", element: HTMLVideoElement) => {
     setElementDuration(element.duration);
   }, []);
-  const media = useMediaSource({ videoId: selectedId, surface: "review", videoRef, onReady: handleMediaReady });
+  const media = useMediaSource({ videoId: selectedVideo?.source === "heuristic" ? null : selectedId, surface: "review", videoRef, onReady: handleMediaReady });
   selectedVideoRef.current = selectedVideo;
 
   const clearBehaviorNoticeTimer = useCallback(() => {
@@ -375,6 +379,7 @@ export default function ReviewPage() {
    * selectedVideo 由 selectVideo 显式设置：审核通过后队列刷新不再覆盖已选视频，
    * 便于继续核对本次裁决。 */
   const selectVideo = useCallback((v: Video) => {
+    if (heuristicEditing) { setErrorMsg("请先保存或放弃当前判断修改，并关闭 ID 预览，再切换视频。"); return; }
     clearBehaviorNoticeTimer();
     setNotice(null);
     setSelectedId(v.id);
@@ -382,7 +387,22 @@ export default function ReviewPage() {
     focusMainAfterSelectionRef.current = true;
     setQueueOpen((open) => nextReviewQueueOpen(open, "select"));
     setSearchParams({ video: String(v.id) }, { replace: true });
-  }, [clearBehaviorNoticeTimer, setSearchParams]);
+  }, [clearBehaviorNoticeTimer, setSearchParams, heuristicEditing]);
+
+  const refreshHeuristic = useCallback(async () => {
+    if (selectedId == null) return;
+    const operationId = selectedId;
+    setReviewDisabled(true);
+    const [state, videos, history] = await Promise.all([getBehaviorReviewState(pid, operationId), listVideos(pid, { view: "all" }), listVideoReviews(pid, operationId)]);
+    if (selectedVideoRef.current?.id !== operationId) return;
+    setReviewState(state); setAnnotations(state.annotations);
+    setFeedbackDrafts(Object.fromEntries(state.annotations.map((item) => [item.id, item.decision.feedback ?? ""])));
+    setFocusedAnnotationId(null); setReviews(history);
+    const updated = videos.find((item) => item.id === operationId);
+    if (updated) setSelectedVideo(updated);
+    setReviewDisabled(false);
+    await loadQueue();
+  }, [pid, selectedId, loadQueue]);
 
   useEffect(() => {
     const requested = searchParams.get("video");
@@ -490,7 +510,7 @@ export default function ReviewPage() {
   }, [selectedId, pid]);
 
   async function saveBehaviorDecision(annotation: BehaviorReviewAnnotation, status: BehaviorReviewStatus) {
-    if (!reviewState?.submission_id || reviewActionBusyRef.current || selectedId == null) return;
+    if (!reviewState?.submission_id || reviewActionBusyRef.current || selectedId == null || heuristicEditing) return;
     const operationVideoId = selectedId;
     const feedback = (feedbackDrafts[annotation.id] ?? "").trim();
     if (status === "rejected" && !feedback) {
@@ -587,6 +607,7 @@ export default function ReviewPage() {
   /* ---------- 键盘快捷键（输入框聚焦时不触发） ---------- */
   const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
   keyHandlerRef.current = (e: KeyboardEvent) => {
+    if (selectedVideo?.source === "heuristic") return;
     function isEditable(target: EventTarget | null): boolean {
       if (!(target instanceof HTMLElement)) return false;
       const tag = target.tagName;
@@ -636,7 +657,7 @@ export default function ReviewPage() {
 
   /* ---------- 发布审核结果（视频级唯一动作） ---------- */
   async function handlePublish() {
-    if (!selectedVideo || !reviewState?.submission_id || reviewActionBusyRef.current) return;
+    if (!selectedVideo || !reviewState?.submission_id || reviewActionBusyRef.current || heuristicEditing) return;
     const operationVideoId = selectedVideo.id;
     const outcome = resolvePublishOutcome(reviewState.counts);
     if (outcome === "incomplete") {
@@ -654,7 +675,7 @@ export default function ReviewPage() {
       title: outcome === "approved" ? "确认发布为通过？" : "确认发布为退回？",
       message:
         outcome === "approved" ? (
-          <>全部行为均已通过。发布后现有行为保持锁定；如需再改，须先明确重新打开审核。</>
+          <>{selectedVideo.source === "heuristic" ? "启发式结果完成后永久只读，不可重新打开。请确认当前快照与判断内容。" : "全部行为均已通过。发布后现有行为保持锁定；如需再改，须先明确重新打开审核。"}</>
         ) : (
           <>已通过行为继续锁定，退回行为与对应意见一并保留，未审核行为保持未审核。</>
         ),
@@ -715,6 +736,7 @@ export default function ReviewPage() {
   }
 
   async function handleReopen() {
+    if (selectedVideo?.source === "heuristic") return;
     if (!selectedVideo || !reviewState?.submission_id || !reviewState.can_reopen || reviewActionBusyRef.current) return;
     const operationVideoId = selectedVideo.id;
     const ok = await confirm({ title: "重新打开审核？", message: "重新打开后可撤销单条通过。已通过行为在撤销前仍保持锁定。", confirmLabel: "重新打开" });
@@ -748,7 +770,9 @@ export default function ReviewPage() {
   }
 
   const videoReady = media.status === "ready";
-  const decisionAccess = behaviorDecisionAccess(reviewState?.submission_status, reviewBusy || decisionBusyId != null || reviewDisabled);
+  const heuristic = selectedVideo?.source === "heuristic";
+  const canReopen = !heuristic && reviewState?.can_reopen;
+  const decisionAccess = behaviorDecisionAccess(reviewState?.submission_status, reviewBusy || decisionBusyId != null || reviewDisabled || heuristicEditing || (heuristic && ["approved", "unusable"].includes(selectedVideo?.workflow_status ?? "")));
 
   return (
     <div className="review-page">
@@ -770,7 +794,7 @@ export default function ReviewPage() {
         ) : null}
         <div className="actions">
           <button ref={queueTabRef} type="button" className="btn btn-sm review-rail-trigger" aria-controls="review-queue-panel" onClick={() => setQueueOpen((open) => nextReviewQueueOpen(open, "toggle"))}>视频列表</button>
-          <button type="button" className="btn btn-sm" onClick={() => void loadQueue()}>
+          <button type="button" className="btn btn-sm" onClick={() => void (heuristic ? refreshHeuristic().catch((error: unknown) => setErrorMsg(error instanceof Error ? error.message : "复核快照刷新失败")) : loadQueue())}>
             刷新
           </button>
         </div>
@@ -792,7 +816,7 @@ export default function ReviewPage() {
           />
         </Card>
       ) : (
-        <div className="review-body">
+        <div className={`review-body${heuristic ? " review-heuristic" : ""}`}>
           {queueOpen ? <button type="button" className="review-queue-backdrop" tabIndex={-1} aria-label="关闭审核队列" onClick={() => closeQueue()} /> : null}
           <aside
             id="review-queue-panel"
@@ -823,21 +847,24 @@ export default function ReviewPage() {
             </div>
             {selectedId == null ? (
               <Card title="审核意见"><EmptyState compact title="尚未选择视频" hint="打开审核队列选择待审核视频" /></Card>
+            ) : heuristic ? (
+              <Card title="任务状态"><WorkflowBadge value={selectedVideo?.workflow_status ?? "draft"} revision={selectedVideo?.annotation_revision} /><details className="review-history-details"><summary>审核历史（{reviews.length}）</summary><div className="review-history-scroll"><ReviewHistory reviews={reviews} /></div></details></Card>
             ) : (
               <Card title="审核裁决" className="review-decision-panel">
                 <div className="field review-comment-field">
-                  <label htmlFor="review-comment">{reviewState?.can_reopen ? "重新打开原因（可选）" : "视频说明（可选）"}</label>
+                  <label htmlFor="review-comment">{canReopen ? "重新打开原因（可选）" : "视频说明（可选）"}</label>
                   <textarea
                     id="review-comment"
                     className="textarea"
                     rows={5}
                     value={comment}
-                    placeholder={reviewState?.can_reopen ? "说明为什么需要重新打开本次审核结果" : "这里只填写视频整体说明；单条意见请写在对应行为下"}
+                    disabled={heuristic && selectedVideo?.workflow_status === "approved"}
+                    placeholder={canReopen ? "说明为什么需要重新打开本次审核结果" : "这里只填写视频整体说明；单条意见请写在对应行为下"}
                     onChange={(e) => setComment(e.target.value)}
                   />
                 </div>
                 <div className="review-actions">
-                  {reviewState?.can_reopen ? <button type="button" className="btn" disabled={reviewBusy || decisionBusyId != null} onClick={() => void handleReopen()}>{reviewBusy ? "处理中…" : "重新打开审核"}</button> : (
+                  {canReopen ? <button type="button" className="btn" disabled={reviewBusy || decisionBusyId != null} onClick={() => void handleReopen()}>{reviewBusy ? "处理中…" : "重新打开审核"}</button> : (
                     <button
                       type="button"
                       className="btn btn-primary"
@@ -871,6 +898,7 @@ export default function ReviewPage() {
             ) : (
               <>
                 <h2 ref={mainHeadingRef} className="review-current-heading" tabIndex={-1}>{selectedVideo?.filename ?? `视频 #${selectedId}`}</h2>
+                {heuristic && selectedVideo ? <HeuristicJudgmentPanel key={selectedVideo.id} projectId={pid} video={selectedVideo} project={project} review disabled={reviewBusy || decisionBusyId != null || reviewDisabled} refreshKey={`${reviewState?.submission_id}:${reviewState?.decision_revision}:${selectedVideo.workflow_status}`} onChanged={refreshHeuristic} onEditingChange={setHeuristicEditing} /> : <>
                 <div className="card review-player">
                   <div className="video-wrap">
                     <video
@@ -955,12 +983,12 @@ export default function ReviewPage() {
                     </>
                   ) : null}
                 </div>
-
+                </>}
               </>
             )}
           </section>
 
-          <aside className="review-behaviors" aria-label="行为审核列表">
+          {!heuristic ? <aside className="review-behaviors" aria-label="行为审核列表">
             {selectedId == null ? <Card><EmptyState compact title="行为列表" hint="选择视频后在这里逐条审核行为。" /></Card> : <>
               {reviewState ? <div className="behavior-review-counts" aria-label="行为审核进度"><span><b>{reviewState.counts.pending}</b> 待审核</span><span className="approved"><b>{reviewState.counts.approved}</b> 已通过</span><span className="rejected"><b>{reviewState.counts.rejected}</b> 已退回</span></div> : null}
               <section className="review-category-overview" aria-label="按行为类别筛选">
@@ -1009,12 +1037,13 @@ export default function ReviewPage() {
                     decisionOpen={decisionAccess.decisionOpen}
                     revokeOpen={decisionAccess.revokeOpen}
                     submissionStatus={reviewState?.submission_status}
+                    completedLocked={heuristic && selectedVideo?.workflow_status === "approved"}
                     onFeedbackChange={(id, value) => { setFeedbackDrafts((drafts) => ({ ...drafts, [id]: value })); if (failedFeedbackId === id) setFailedFeedbackId(null); }}
                     onDecision={(annotation, status) => void saveBehaviorDecision(annotation, status)}
                 />
               </Card>
             </>}
-          </aside>
+          </aside> : null}
         </div>
       )}
     </div>

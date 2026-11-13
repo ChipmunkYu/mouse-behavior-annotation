@@ -5,6 +5,13 @@ import { createVideoReview, putBehaviorDecision, submitVideoForReview } from "."
 afterEach(() => vi.restoreAllMocks());
 
 describe("behavior review API wiring", () => {
+  it("binds heuristic unusable to the existing final review endpoint with CAS", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ id: 1, result: "unusable" }), { status: 200 }));
+    await createVideoReview(2, 4, { result: "unusable", comment: null, expected_submission_id: 7, expected_decision_revision: 6 });
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/projects\/2\/videos\/4\/review$/);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ result: "unusable", comment: null, expected_submission_id: 7, expected_decision_revision: 6 });
+  });
   it("sends snapshot identity and decision revision to the decision endpoint", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ annotations: [], counts: { pending: 0, approved: 0, rejected: 0 }, decision_revision: 8, can_finalize_approval: false, feedback_items: [], locked_annotation_ids: [], can_reopen: false }), { status: 200, headers: { "Content-Type": "application/json" } }));
     await putBehaviorDecision(2, 4, 7, 31, { status: "pending", feedback: null, expected_decision_revision: 6 });

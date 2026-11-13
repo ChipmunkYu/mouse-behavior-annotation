@@ -61,6 +61,7 @@ import type {
   ReviewSubmissionContext,
   DistanceCalibration,
   DistanceCalibrationInput,
+  DataSource, SourceScope, Judgment, JudgmentInput, JudgmentVersions,
 } from "./types";
 
 type JsonContent<T> = T extends { content: { "application/json": infer Body } } ? Body : never;
@@ -145,6 +146,7 @@ export function listCategorySchemeAudit(projectId: number | string): Promise<Cat
 // ---------- 视频 ----------
 export function listVideos(projectId: number | string, params: VideoListParams = {}): Promise<Video[]> {
   const qs = new URLSearchParams();
+  if (params.source) qs.set("source", params.source);
   if (params.view) qs.set("view", params.view);
   if (params.workflow_status) qs.set("workflow_status", params.workflow_status);
   if (params.assignee_membership_id != null) qs.set("assignee_membership_id", String(params.assignee_membership_id));
@@ -223,8 +225,8 @@ export function uploadVideo(
 }
 
 // ---------- YOLO 三文件导入 ----------
-export function createImportBatch(projectId: number | string, signal?: AbortSignal): Promise<VideoImportBatch> {
-  return apiOperation<paths["/api/projects/{project_id}/video-import-batches"]["post"]>(`/projects/${projectId}/video-import-batches`, { method: "POST", signal });
+export function createImportBatch(projectId: number | string, signal?: AbortSignal, source: DataSource = "manual"): Promise<VideoImportBatch> {
+  return apiFetch<VideoImportBatch>(`/projects/${projectId}/video-import-batches`, { method: "POST", signal, body: JSON.stringify({ source }) });
 }
 
 export function uploadBatchFile(
@@ -290,15 +292,15 @@ export function getCorrectedTracks(projectId: number | string, videoId: number |
 }
 
 export function checkIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCheckRequest): Promise<IdentityEditCheckResponse> {
-  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/check"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits/check`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/check"]["post"]>(input) });
+  return apiFetch<IdentityEditCheckResponse>(`/projects/${projectId}/videos/${videoId}/identity-edits/check`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/check"]["post"]>(input) });
 }
 
 export function commitIdentityEdit(projectId: number | string, videoId: number | string, input: IdentityEditCommitRequest): Promise<IdentityEditResult> {
-  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits"]["post"]>(input) });
+  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits"]["post"]>(input) });
 }
 
-export function revertIdentityEdit(projectId: number | string, videoId: number | string, editId: number, base: { base_identity_revision: number; base_detection_import_revision: number }): Promise<IdentityEditResult> {
-  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert"]["post"]>(`/projects/${projectId}/videos/${videoId}/identity-edits/${editId}/revert`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert"]["post"]>(base) });
+export function revertIdentityEdit(projectId: number | string, videoId: number | string, editId: number, base: { base_identity_revision: number; base_detection_import_revision: number } & Partial<JudgmentVersions>): Promise<IdentityEditResult> {
+  return apiFetch<IdentityEditResult>(`/projects/${projectId}/videos/${videoId}/identity-edits/${editId}/revert`, { method: "POST", body: operationJson<paths["/api/projects/{project_id}/videos/{video_id}/identity-edits/{edit_id}/revert"]["post"]>(base) });
 }
 
 export function getIdentityEditHistory(projectId: number | string, videoId: number | string, limit = 1): Promise<IdentityEditRecord[]> {
@@ -414,6 +416,17 @@ export async function fetchVideoStreamTicket(
 }
 
 // ---------- 标注 ----------
+export function getJudgment(projectId: number | string, videoId: number | string): Promise<Judgment> {
+  return apiFetch<Judgment>(`/projects/${projectId}/videos/${videoId}/judgment`);
+}
+
+export function putJudgment(projectId: number | string, videoId: number | string, input: JudgmentInput): Promise<Judgment> {
+  return apiFetch<Judgment>(`/projects/${projectId}/videos/${videoId}/judgment`, { method: "PUT", body: JSON.stringify(input) });
+}
+
+export function withdrawVideo(projectId: number | string, videoId: number | string, context: Pick<JudgmentVersions, "expected_submission_id" | "expected_decision_revision">): Promise<Video> {
+  return apiFetch<Video>(`/projects/${projectId}/videos/${videoId}/withdraw`, { method: "POST", body: JSON.stringify(context) });
+}
 export function listAnnotations(
   projectId: number | string,
   videoId: number | string
@@ -567,6 +580,7 @@ export function getJob(projectId: number | string, jobId: number | string): Prom
  */
 export function listClips(projectId: number | string, params: ClipListParams): Promise<ClipListResponse> {
   const qs = new URLSearchParams();
+  if (params.source) qs.set("source", params.source);
   if (params.category_id != null) qs.set("category_id", String(params.category_id));
   if (params.video_id != null) qs.set("video_id", String(params.video_id));
   if (params.search && params.search.trim().length > 0) qs.set("search", params.search.trim());
@@ -576,8 +590,8 @@ export function listClips(projectId: number | string, params: ClipListParams): P
 }
 
 /** 片段类别计数：GET /api/projects/:pid/clips/categories -> ClipCategoryCount[]。 */
-export function listClipCategories(projectId: number | string): Promise<ClipCategoryCount[]> {
-  return apiOperation<paths["/api/projects/{project_id}/clips/categories"]["get"]>(`/projects/${projectId}/clips/categories`);
+export function listClipCategories(projectId: number | string, source: SourceScope = "all"): Promise<ClipCategoryCount[]> {
+  return apiFetch<ClipCategoryCount[]>(`/projects/${projectId}/clips/categories?source=${source}`);
 }
 
 /** 通过不透明 Clip ID 获取缩略图；前端不接收或拼接服务端文件名。 */
@@ -615,7 +629,7 @@ export function createExport(
 ): Promise<Job> {
   return apiOperation<paths["/api/projects/{project_id}/export"]["post"]>(`/projects/${projectId}/export`, {
     method: "POST",
-    body: operationJson<paths["/api/projects/{project_id}/export"]["post"]>(input),
+    body: JSON.stringify({ ...input, source: input.source ?? "manual" }),
   });
 }
 
@@ -623,8 +637,8 @@ export function createExport(
  * 导出状态汇总：GET /api/projects/:pid/export/status -> ExportStatus。
  * 含最近任务（latest_job）与可导出 / 就绪 / 缺失计数，导出中按任务状态轮询本接口。
  */
-export function getExportStatus(projectId: number | string): Promise<ExportStatus> {
-  return apiOperation<paths["/api/projects/{project_id}/export/status"]["get"]>(`/projects/${projectId}/export/status`);
+export function getExportStatus(projectId: number | string, source: SourceScope = "manual"): Promise<ExportStatus> {
+  return apiFetch<ExportStatus>(`/projects/${projectId}/export/status?source=${source}`);
 }
 
 /** 从 Content-Disposition 解析文件名（优先 RFC 5987 filename*，其次 filename=）。 */
@@ -648,9 +662,9 @@ function parseContentDisposition(value: string | null): string | null {
  * 文件名以后端 Content-Disposition 为准，缺失时回退到默认名（供下载提示）。
  */
 export async function fetchExportDownload(
-  projectId: number | string
+  projectId: number | string, source: SourceScope = "manual"
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await apiRaw(`/projects/${projectId}/export/download`);
+  const res = await apiRaw(`/projects/${projectId}/export/download?source=${source}`);
   if (res.status === 401) {
     // 与 apiFetch 一致：清除登录态并广播登出，避免 blob 请求 401 后界面停留
     handleUnauthorized();

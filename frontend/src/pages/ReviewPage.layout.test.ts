@@ -104,7 +104,8 @@ describe("review workspace layout", () => {
   });
 
   it("exposes one video-level publish action and blocks incomplete reviews", () => {
-    const actions = reviewSource.slice(reviewSource.indexOf('className="review-actions"'), reviewSource.indexOf("审核历史（"));
+    const start = reviewSource.indexOf('className="review-actions"');
+    const actions = reviewSource.slice(start, reviewSource.indexOf("审核历史（", start));
     expect(actions).toContain("发布审核结果");
     expect(actions.match(/<button/g)).toHaveLength(2);
     expect(reviewSource).not.toContain("退回视频");

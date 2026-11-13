@@ -40,7 +40,7 @@ from ..permissions import MANAGER_ROLES, require_editor as require_edit_permissi
 from ..participant_roles import ParticipantRoleError, canonicalize_participant_roles
 from ..schemas import AnnotationCreate, AnnotationOut, AnnotationUpdate
 from ..participant_continuity import validate_participant_continuity
-from ..video_write_gate import video_write_gate
+from ..video_write_gate import video_write_gate, reject_heuristic
 from ..behavior_review import (assert_annotation_unlocked, assert_video_not_final_approved, ensure_material_evidence,
                                material_digest, material_values)
 
@@ -445,6 +445,7 @@ def create_annotation(
         expected_annotation_revision=observed.annotation_revision,
     ) as state:
         video = state.video
+        reject_heuristic(video)
         category = _get_category_in_project(db, project_id, body.category_id)
         if not category.is_active:
             raise HTTPException(status_code=400, detail="Category is disabled")
@@ -518,6 +519,7 @@ def export_annotations(
 ) -> list[dict]:
     """导出符合需求文档的统一事件格式 JSON 列表。"""
     video = _get_video_in_project(db, project_id, video_id)
+    reject_heuristic(video, "heuristic_snapshot_export_required")
     rows = (
         db.query(Annotation)
         .filter(Annotation.video_id == video_id)
@@ -557,6 +559,7 @@ def update_annotation(
         expected_annotation_revision=observed.annotation_revision,
     ) as state:
         video = state.video
+        reject_heuristic(video)
         annotation = _get_annotation_in_video(db, video_id, annotation_id)
         assert_annotation_unlocked(db, video_id, annotation_id)
         ensure_material_evidence(annotation)
@@ -713,6 +716,7 @@ def delete_annotation(
         expected_annotation_revision=observed.annotation_revision,
     ) as state:
         video = state.video
+        reject_heuristic(video)
         annotation = _get_annotation_in_video(db, video_id, annotation_id)
         assert_annotation_unlocked(db, video_id, annotation_id)
         if not _can_modify(access[1].role, annotation, access[1].user_id):

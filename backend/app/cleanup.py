@@ -333,7 +333,9 @@ def run_retention_cleanup(
 
     _retry_cleanup_issues(db, settings, report, dry_run=dry_run)
     stale_batches = db.query(VideoImportBatch.id, VideoImportBatch.project_id).filter(
-        VideoImportBatch.status.in_(("uploading", "failed")),
+        ((VideoImportBatch.status.in_(("uploading", "failed"))) |
+         ((VideoImportBatch.status == "processing") & (VideoImportBatch.source == "heuristic") &
+          VideoImportBatch.created_video_id.is_(None))),
         VideoImportBatch.updated_at < temp_cutoff,
     ).all()
     for batch_id, project_id in stale_batches:

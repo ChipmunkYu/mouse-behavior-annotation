@@ -27,6 +27,7 @@ import type {
   ClipListParams,
   Project,
   Video,
+  SourceScope,
 } from "../api/types";
 import { DEFAULT_PAGE_SIZE } from "../api/types";
 import { Card, EmptyState, ErrorBox, Loading, StatusBadge } from "../components/ui";
@@ -217,11 +218,14 @@ export default function ClipsPage() {
 
   // 筛选与分页（全部类型化，服务端只认已声明的参数）
   const [categoryFilter, setCategoryFilter] = useState<number | null>(null);
+  const [source, setSource] = useState<SourceScope>("all");
+  const scopeRef = useRef("");
+  scopeRef.current = `${pid}:${source}`;
+  const listGeneration = useRef(0);
   const [videoFilter, setVideoFilter] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [refreshTick, setRefreshTick] = useState(0);
 
   // 预览区（一次只播放一个）
@@ -252,13 +256,15 @@ export default function ClipsPage() {
 
   /* ---------- 元数据（项目 / 视频 / 完整类别含颜色 / 片段类别计数） ---------- */
   const loadMeta = useCallback(async () => {
+    const scope = `${pid}:${source}`;
     try {
       const [projs, vids, cats, cnts] = await Promise.all([
         listProjects(),
         listVideos(pid),
         listCategories(pid),
-        listClipCategories(pid),
+        listClipCategories(pid, source),
       ]);
+      if (scopeRef.current !== scope) return;
       setProject(projs.find((p) => p.id === pid) ?? null);
       setVideos(vids);
       setCategories(cats);
@@ -266,17 +272,19 @@ export default function ClipsPage() {
     } catch {
       // 元数据失败不阻塞列表；缺失时界面自动退化为「全部」chip 与无视频选择
     }
-  }, [pid]);
+  }, [pid, source]);
 
   /* ---------- 片段列表（silent = 轮询静默刷新，不闪 loading / 不改错误态） ---------- */
   const loadClips = useCallback(
     async (params: ClipListParams, opts: { silent?: boolean } = {}) => {
+      const generation = ++listGeneration.current;
       if (!opts.silent) {
         setLoading(true);
         setError(null);
       }
       try {
         const res = await listClips(pid, params);
+        if (generation !== listGeneration.current) return;
         setItems(res.items);
         setTotal(res.total);
         setPages(Math.max(1, res.pages));
@@ -285,11 +293,12 @@ export default function ClipsPage() {
           setPage(Math.max(1, res.pages));
         }
       } catch (err) {
+        if (generation !== listGeneration.current) return;
         if (opts.silent) return; // 轮询失败静默保留旧数据
         setItems([]);
         setError(err instanceof Error ? err.message : "加载片段失败");
       } finally {
-        if (!opts.silent) setLoading(false);
+        if (!opts.silent && generation === listGeneration.current) setLoading(false);
       }
     },
     [pid]
@@ -313,18 +322,18 @@ export default function ClipsPage() {
     setCategoryFilter(null);
     setVideoFilter(null);
     setPage(1);
-    setPageSize(DEFAULT_PAGE_SIZE);
   }, [pid]);
 
   useEffect(() => {
     void loadClips({
+      source,
       category_id: categoryFilter,
       video_id: videoFilter,
       search: debouncedQuery,
       page,
-      page_size: pageSize,
+      page_size: DEFAULT_PAGE_SIZE,
     });
-  }, [loadClips, categoryFilter, videoFilter, debouncedQuery, page, pageSize, refreshTick]);
+  }, [loadClips, categoryFilter, videoFilter, debouncedQuery, page, refreshTick, source]);
 
   /* ---------- 轮询：仅当前页存在「待生成」片段时自动刷新，离开页面即停止 ---------- */
   const hasPending = useMemo(() => (items ?? []).some((c) => shouldPollClipMedia(effectiveClipMediaStatus(c.media_status, c.clip_id))), [items]);
@@ -338,11 +347,12 @@ export default function ClipsPage() {
         if (!alive) return;
         await loadClips(
           {
+            source,
             category_id: categoryFilter,
             video_id: videoFilter,
             search: debouncedQuery,
             page,
-            page_size: pageSize,
+            page_size: DEFAULT_PAGE_SIZE,
           },
           { silent: true }
         );
@@ -354,7 +364,7 @@ export default function ClipsPage() {
       alive = false;
       if (timer != null) window.clearTimeout(timer);
     };
-  }, [hasPending, loadClips, categoryFilter, videoFilter, debouncedQuery, page, pageSize]);
+  }, [hasPending, loadClips, categoryFilter, videoFilter, debouncedQuery, page, source]);
 
   /* ---------- 预览：切换片段时重置页面显示状态；媒体生命周期由公共 controller 管理 ---------- */
   useEffect(() => {
@@ -452,7 +462,7 @@ export default function ClipsPage() {
     : "var(--text-3)";
   const inRange =
     selected != null && currentTime >= selected.start_time - 0.05 && currentTime <= selected.end_time + 0.05;
-  const filterActive = categoryFilter != null || videoFilter != null || debouncedQuery.length > 0;
+  const filterActive = source !== "all" || categoryFilter != null || videoFilter != null || debouncedQuery.length > 0;
   const emptyTotal = (items ?? []).length === 0 && total === 0;
 
   return (
@@ -508,7 +518,7 @@ export default function ClipsPage() {
                 to={`/projects/${pid}/annotate/${selected.video_id}?t=${selected.start_time}`}
                 title="回到行为标注工作台并定位到该标注区间起点"
               >
-                跳转到行为标注 →
+                {selected.source === "heuristic" ? "进入判断 →" : "进入标注 →"}
               </Link>
               <button type="button" className="btn btn-sm" onClick={() => setSelected(null)}>
                 关闭预览
@@ -647,6 +657,17 @@ export default function ClipsPage() {
             }}
           />
           <select
+            id="clips-data-source"
+            className="select source-filter"
+            aria-label="数据来源"
+            value={source}
+            onChange={(event) => { setSource(event.target.value as SourceScope); setPage(1); setSelected(null); }}
+          >
+            <option value="all">全部来源</option>
+            <option value="manual">人工</option>
+            <option value="heuristic">启发式</option>
+          </select>
+          <select
             className="select video-select"
             value={videoFilter ?? ""}
             aria-label="按视频筛选"
@@ -666,7 +687,7 @@ export default function ClipsPage() {
           <span className="clips-note">
             {debouncedQuery
               ? `搜索「${debouncedQuery}」· 共 ${total} 条结果`
-              : `每页 ${pageSize} 条 · 服务端分页`}
+              : `每页 ${DEFAULT_PAGE_SIZE} 条 · 服务端分页`}
           </span>
         </div>
       </div>
@@ -726,6 +747,7 @@ export default function ClipsPage() {
                   </span>
                 </span>
                 <span className="clip-meta">
+                  <span className="badge badge-muted">{c.source === "heuristic" ? "启发式" : "人工"}</span>
                   <ReviewStatusBadge value={c.review_status} />
                   <ClipStatusChip status={effectiveClipMediaStatus(c.media_status, c.clip_id)} />
                   <span className="clip-annotator" title={c.annotator_name ?? undefined}>
@@ -746,22 +768,6 @@ export default function ClipsPage() {
           <span className="pager-info">
             共 {total} 条 · 第 {page} / {pages} 页
           </span>
-          <select
-            className="select"
-            style={{ width: 110 }}
-            value={pageSize}
-            aria-label="每页条数"
-            onChange={(e) => {
-              setPageSize(Number(e.target.value));
-              setPage(1);
-            }}
-          >
-            {[20, 50, 100].map((n) => (
-              <option key={n} value={n}>
-                {n} 条/页
-              </option>
-            ))}
-          </select>
           <button
             type="button"
             className="btn btn-sm"

@@ -281,10 +281,11 @@ def commit_split(
     expected_version: int,
     operator_id: int,
 ) -> dict:
-    reject_role_conflicts(
-        "Split conflicts with participant role assignments",
-        role_track_conflicts(db, video.id, {track_id}, split_frame=frame),
-    )
+    if video.source != "heuristic":
+        reject_role_conflicts(
+            "Split conflicts with participant role assignments",
+            role_track_conflicts(db, video.id, {track_id}, split_frame=frame),
+        )
     new_version, new_track_id = _claim_version(
         db, detection_import, expected_version, allocate_track_id=True
     )
@@ -329,7 +330,7 @@ def commit_split(
     )
     video.identity_revision = new_version
     invalidate_compatibility_review(db, video, affected_annotations | set(needs))
-    db.commit()
+    db.flush()
     return {
         "edit_id": edit.id,
         "identity_revision": new_version,
@@ -365,12 +366,15 @@ def commit_merge(
     for conflict in role_conflicts:
         by_annotation.setdefault(conflict["annotation_id"], []).append(conflict)
     invalid_conflicts = [item for items in by_annotation.values() if len(items) != 1 for item in items]
-    reject_role_conflicts("Merge conflicts with participant role assignments", invalid_conflicts)
+    if video.source != "heuristic":
+        reject_role_conflicts("Merge conflicts with participant role assignments", invalid_conflicts)
     new_version, _ = _claim_version(db, detection_import, expected_version)
     annotation_snapshots: dict[str, dict] = {}
     legacy_mouse_ids_before: dict[str, list[int]] = {}
     affected_annotations: set[int] = set()
     for annotation in db.query(Annotation).filter(Annotation.video_id == video.id).all():
+        if video.source == "heuristic":
+            continue
         category = annotation.category
         if category is not None and category.participant_mode == "role_based" and annotation.id in by_annotation:
             roles, _ids, _status = canonicalize_participant_roles(
@@ -430,7 +434,7 @@ def commit_merge(
     needs = revalidate_annotations(db, detection_import, video, new_version)
     video.identity_revision = new_version
     invalidate_compatibility_review(db, video, affected_annotations | set(needs))
-    db.commit()
+    db.flush()
     return {
         "edit_id": edit.id,
         "identity_revision": new_version,
@@ -486,7 +490,7 @@ def commit_suppress(
     needs = revalidate_annotations(db, detection_import, video, new_version)
     video.identity_revision = new_version
     invalidate_compatibility_review(db, video, set(needs))
-    db.commit()
+    db.flush()
     return {
         "suppression_id": edit.id,
         "identity_revision": new_version,
@@ -562,7 +566,7 @@ def undo_latest(
     needs = revalidate_annotations(db, detection_import, video, new_version)
     video.identity_revision = new_version
     invalidate_compatibility_review(db, video, set(needs))
-    db.commit()
+    db.flush()
     return {
         "identity_revision": new_version,
         "reverted_edit_id": requested_edit_id,

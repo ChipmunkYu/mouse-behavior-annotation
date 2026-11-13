@@ -13,7 +13,7 @@ from ..draft_detection_edits import (
 from ..models import DetectionImport, DraftIdentityEdit, Video
 from ..permissions import require_editor as require_edit_permission
 from ..schemas import DetectionSuppressionSummaryOut, IdentityEditResultOut, SuppressionCreateRequest, SuppressionRevertRequest
-from ..video_write_gate import video_write_gate
+from ..video_write_gate import video_write_gate, reject_heuristic
 
 router = APIRouter(tags=["detection-suppressions"])
 def _require_editor(membership) -> None:
@@ -83,10 +83,13 @@ def create_suppression(
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
-        return commit_suppress(
+        reject_heuristic(state.video)
+        result = commit_suppress(
             db, state.detection_import, state.video, track_id=body.track_id,
             expected_version=body.base_identity_revision, operator_id=access[1].user_id,
         )
+        db.commit()
+        return result
 
 
 @router.post(
@@ -110,7 +113,10 @@ def revert_suppression(
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
-        return undo_latest(
+        reject_heuristic(state.video)
+        result = undo_latest(
             db, state.detection_import, state.video, requested_edit_id=suppression_id,
             expected_operation="suppress_track", expected_version=body.base_identity_revision,
         )
+        db.commit()
+        return result

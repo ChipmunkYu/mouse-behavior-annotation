@@ -43,7 +43,7 @@ from ..video_delete_service import VideoDeleteServiceError
 from ..video_operation_gate import VideoOperationBusyError
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_dependency import require_video_operation_gate
-from ..video_write_gate import require_not_archived
+from ..video_write_gate import require_not_archived, reject_heuristic
 from ..video_playback import (
     DISPLAY_PROXY_FAILED,
     DISPLAY_PROXY_PENDING,
@@ -266,12 +266,15 @@ def list_videos(
     project_id: int,
     request: Request,
     view: Literal["mine", "unassigned", "all"] = "all",
+    source: Literal["all", "manual", "heuristic"] = "all",
     workflow_status: str | None = None,
     assignee_membership_id: int | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     query = db.query(Video).filter(Video.project_id == project_id, Video.workflow_status != "archived")
+    if source != "all":
+        query = query.filter(Video.source == source)
     if view == "mine":
         query = query.filter(Video.assignee_membership_id == access[1].id)
     elif view == "unassigned":
@@ -347,6 +350,7 @@ def put_distance_calibration(
 ) -> dict:
     require_editor(access[1])
     video = _calibration_video(db, project_id, video_id)
+    reject_heuristic(video)
     points = (body.point_a, body.point_b)
     if any(point.x < 0 or point.x > video.width or point.y < 0 or point.y > video.height
            for point in points):
@@ -376,6 +380,7 @@ def delete_distance_calibration(
 ) -> dict:
     require_editor(access[1])
     video = _calibration_video(db, project_id, video_id, require_dimensions=False)
+    reject_heuristic(video)
     video.distance_calibration = None
     db.commit()
     db.refresh(video)

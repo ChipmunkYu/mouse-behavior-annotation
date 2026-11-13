@@ -854,6 +854,12 @@ a:focus-visible,
   min-width: 150px;
 }
 
+.video-toolbar .source-filter,
+.clips-filters .source-filter {
+  flex: 0 0 120px;
+  width: 120px;
+}
+
 .video-toolbar .assignee-filter {
   flex: 0 1 210px;
   width: auto;
@@ -1297,7 +1303,34 @@ a:focus-visible,
 /* ============ 三文件批次上传 ============ */
 .upload-mode-tabs { align-self: flex-start; }
 .batch-drop { padding: 10px; text-align: center; border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--text-3); background: var(--bg-inset); }
-.batch-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.batch-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+
+/* 启发式判断沿用已有卡片、色彩和原生表单，不改变人工标注工作台。 */
+.judgment-workspace { display: grid; gap: 14px; min-width: 0; }
+.judgment-workspace .card-body { display: grid; gap: 12px; }
+.judgment-main > .player-card > .card-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.judgment-workspace .judgment-player { min-height: 220px; border-radius: var(--radius); overflow: hidden; }
+.judgment-side-header { position: sticky; top: 0; z-index: 2; flex-shrink: 0; display: grid; gap: 8px; background: var(--bg); }
+.judgment-summary { display: grid; gap: 4px; padding: 8px; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.judgment-summary .badge { white-space: normal; }
+.judgment-side > .workspace-panel { flex-shrink: 0; }
+@media (min-width: 961px) {
+  .judgment-body { height: calc(100vh - var(--topbar-h) - 150px); min-height: 380px; }
+}
+.review-body.review-heuristic > .review-main,
+.review-body.review-heuristic > .review-behaviors { grid-column: 2 / -1; }
+@media (max-width: 1180px) {
+  .review-body.review-heuristic > .review-main,
+  .review-body.review-heuristic > .review-behaviors { grid-column: 1 / -1; }
+}
+.judgment-fields { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-width: 0; }
+.judgment-fields legend { color: var(--text-2); font-weight: 600; padding: 0 5px; }
+.judgment-workspace .judgment-player-controls { justify-content: space-between; padding-inline: 0; }
+.judgment-frame-controls, .judgment-disposition-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.judgment-disposition-actions { margin-left: auto; justify-content: flex-end; }
+.judgment-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.judgment-boundary { color: var(--text-2); line-height: 1.7; border-left: 3px solid var(--border-strong); padding-left: 12px; }
+.judgment-identity-preview { padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); }
 .batch-slot { min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); }
 .batch-slot.success { border-color: var(--ok); }
 .batch-slot.error { border-color: var(--danger); }
@@ -2088,6 +2121,7 @@ a:focus-visible,
 @media (max-width: 760px) {
   .videos-page { min-width: 0; }
   .video-toolbar .search,
+  .video-toolbar .source-filter,
   .video-toolbar .workflow-filter,
   .video-toolbar .assignee-filter,
   .video-toolbar .fixed-filter,
@@ -3654,11 +3688,25 @@ a:focus-visible,
 }
 
 .clips-filters .search {
-  width: 260px;
+  flex: 1 1 220px;
+  width: auto;
+  min-width: 180px;
 }
 
 .clips-filters .video-select {
+  flex: 0 1 230px;
   width: 230px;
+  min-width: 140px;
+}
+
+.clips-filters .page-size-select {
+  flex: 0 0 110px;
+  width: 110px;
+}
+
+.clips-filters .input,
+.clips-filters .select {
+  height: 32px;
 }
 
 .clips-note {
@@ -3847,8 +3895,12 @@ a:focus-visible,
 /* 窄屏堆叠 */
 @media (max-width: 640px) {
   .clips-filters .search,
-  .clips-filters .video-select {
+  .clips-filters .source-filter,
+  .clips-filters .video-select,
+  .clips-filters .page-size-select {
+    flex: 1 1 100%;
     width: 100%;
+    min-width: 0;
   }
 
   .preview-actions {

@@ -68,6 +68,7 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("检测缓存块", () => {
@@ -85,6 +86,25 @@ describe("检测缓存块", () => {
 });
 
 describe("DetectionOverlay 异步缓存", () => {
+  it("默认从检测API加载所有鼠框；选中参与鼠只高亮，不过滤其他鼠，并沿用坐标映射", async () => {
+    apiMocks.getCurrentDetectionImport.mockResolvedValue({ ...detectionImport, width: 100, height: 100 });
+    apiMocks.getDetections.mockResolvedValue({ detections: [
+      { ...detection(0, 12), box_xyxy_px: [10, 20, 20, 30] },
+      { ...detection(0, 31), box_xyxy_px: [40, 50, 60, 70] },
+    ], total: 2 });
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(200);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(200);
+    const strokeRect = vi.fn();
+    const context = { setTransform: vi.fn(), clearRect: vi.fn(), strokeRect, measureText: () => ({ width: 40 }), fillRect: vi.fn(), fillText: vi.fn() };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as unknown as CanvasRenderingContext2D);
+    await act(async () => root.render(<DetectionOverlay projectId={1} videoId={2} video={document.createElement("video")} currentTime={0} selectedIds={[12]} showOnlySelected={false} />));
+    expect(apiMocks.getCurrentDetectionImport).toHaveBeenCalledWith(1, 2);
+    expect(apiMocks.getDetections).toHaveBeenCalledWith(1, 2, 0, 30, expect.any(AbortSignal));
+    expect(strokeRect).toHaveBeenCalledWith(20, 40, 20, 20);
+    expect(strokeRect).toHaveBeenCalledWith(80, 100, 40, 40);
+    expect(host.textContent).toContain("帧 0 · 2");
+  });
+
   it("同块连续帧只请求一次，跨块 abort 且忽略旧请求晚到", async () => {
     const oldRange = deferred<DetectionsResponse>();
     const newRange = deferred<DetectionsResponse>();

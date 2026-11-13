@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .media import MediaCommandError, MediaDependencyError, run_media_command
+
 
 DISPLAY_PROXY_PROFILE_VERSION = "candidate-720p-h264-crf28-g30-sar1-ordinal-cfr"
 # Exact allowlist used only to recognize jobs left by supported profile generations
@@ -103,13 +105,12 @@ class DisplayProxyProcessor:
 
     def _run(self, command: list[str], *paths: str | Path) -> subprocess.CompletedProcess:
         try:
-            result = subprocess.run(command, shell=False, capture_output=True, text=True,
-                                    timeout=self.timeout_seconds, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DisplayProxyError(sanitize_error(exc, *paths)) from None
-        if result.returncode:
-            raise DisplayProxyError(sanitize_error(result.stderr or "media command failed", *paths))
-        return result
+            return run_media_command(command, tool="ffprobe" if command[0] == self.ffprobe_path else "ffmpeg",
+                                     timeout=self.timeout_seconds)
+        except MediaDependencyError:
+            raise
+        except MediaCommandError as exc:
+            raise DisplayProxyError(str(exc)) from None
 
     def probe(self, path: str | Path) -> dict:
         command = [self.ffprobe_path, "-v", "error", "-count_frames", "-show_streams",

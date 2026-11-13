@@ -114,9 +114,14 @@ def _preflight(
             _checked_file("video", batch.video_path, settings),
             _checked_file("tracks", batch.tracks_path, settings),
             _checked_file("metadata", batch.metadata_path, settings),
+            _checked_file("annotation", batch.annotation_path, settings),
         )
         if item is not None
     ]
+    if batch.source == "heuristic" and batch.tracks_path and batch.metadata_path:
+        from .heuristic_judgment import normalized_names
+        for role, name in zip(("tracks", "metadata"), normalized_names(batch)):
+            files.extend(_checked_file(role, name + suffix, settings) for suffix in ("", ".part"))
     created_video = db.get(Video, batch.created_video_id) if batch.created_video_id else None
     if batch.created_video_id is not None and created_video is None:
         raise BatchCleanupConflict("Import batch references a missing created video")
@@ -142,8 +147,7 @@ def _preflight(
             consumers = db.query(
                 DetectionImport.tracks_path, DetectionImport.metadata_path
             ).all()
-            index = 0 if item.role == "tracks" else 1
-            if any(_same_path(row[index], item, settings) for row in consumers):
+            if any(_same_path(stored, item, settings) for row in consumers for stored in row):
                 raise BatchCleanupConflict(f"Import batch {item.role} file has already been consumed")
     return files, created_video
 
@@ -241,9 +245,13 @@ def _shared_by_other_batch(
         "video": VideoImportBatch.video_path,
         "tracks": VideoImportBatch.tracks_path,
         "metadata": VideoImportBatch.metadata_path,
+        "annotation": VideoImportBatch.annotation_path,
     }
-    values = db.query(columns[item.role]).filter(VideoImportBatch.id != batch.id).all()
-    return any(_same_path(stored, item, settings) for (stored,) in values)
+    values = db.query(*columns.values()).filter(VideoImportBatch.id != batch.id).all()
+    return any(_same_path(stored, item, settings) or
+               (stored and any(_same_path(stored + suffix, item, settings) for suffix in
+                              (".normalized.jsonl", ".normalized.json", ".normalized.jsonl.part", ".normalized.json.part")))
+               for row in values for stored in row)
 
 
 def _restore_claim(db: Session, batch_id: int, original_status: str) -> None:
@@ -277,12 +285,16 @@ def cleanup_import_batch(
     if batch is None or batch.project_id != project_id:
         raise LookupError("Import batch not found")
     original_status = batch.status
-    if original_status not in CANCELLABLE_BATCH_STATUSES:
+    heuristic = batch.source == "heuristic"
+    stale_processing = (original_status == "processing" and batch.source == "heuristic"
+                        and stale_before is not None and batch.created_video_id is None)
+    if original_status not in CANCELLABLE_BATCH_STATUSES and not stale_processing:
         raise BatchCleanupConflict(f"Import batch in status '{original_status}' cannot be cancelled")
     slot_states = (
         batch.video_upload_state,
         batch.tracks_upload_state,
         batch.metadata_upload_state,
+        batch.annotation_upload_state,
     )
     if not allow_active_upload_slots and "uploading" in slot_states:
         raise BatchCleanupConflict("Import batch has a file upload in progress")
@@ -314,6 +326,7 @@ def cleanup_import_batch(
             VideoImportBatch.video_upload_state != "uploading",
             VideoImportBatch.tracks_upload_state != "uploading",
             VideoImportBatch.metadata_upload_state != "uploading",
+            VideoImportBatch.annotation_upload_state != "uploading",
         ))
     now = datetime.utcnow()
     claimed = db.query(VideoImportBatch).filter(*filters).update(
@@ -331,6 +344,7 @@ def cleanup_import_batch(
     manifest = None
     io = VideoDeleteIO(settings)
     committed = False
+    heuristic_deleted = 0
     try:
         if created_video is not None:
             _before_pristine_video_delete()
@@ -414,6 +428,14 @@ def cleanup_import_batch(
             ).rowcount
             if removed_video != 1:
                 raise BatchCleanupConflict("Import batch video changed concurrently")
+        if batch.source == "heuristic" and created_video is None:
+            # Keep the batch's ownership paths available for retry if any unlink
+            # fails. Four owned files and normalization artifacts only.
+            for item in deletable:
+                removed, reason = remove_checked(item.path, root_dir=item.root, data_dir=settings.data_dir)
+                heuristic_deleted += int(removed)
+                if reason is not None:
+                    raise BatchCleanupConflict("Heuristic batch cleanup incomplete; retry cancellation")
         removed_batch = db.query(VideoImportBatch).filter(
             VideoImportBatch.id == batch_id,
             VideoImportBatch.status == "cancelling",
@@ -435,7 +457,7 @@ def cleanup_import_batch(
         raise
 
     issues: list[dict[str, Any]] = []
-    deleted = 0
+    deleted = heuristic_deleted
     if manifest is not None:
         deleted = sum(entry.identity is not None for entry in manifest.entries)
         try:
@@ -447,7 +469,7 @@ def cleanup_import_batch(
                 "project_id": project_id, "reason": str(exc),
                 "operation_id": manifest.operation_id,
             })
-    else:
+    elif not heuristic:
         for item in deletable:
             removed, reason = remove_checked(
                 item.path, root_dir=item.root, data_dir=settings.data_dir
@@ -489,12 +511,12 @@ def cleanup_replaced_batch_file(
                 for (path,) in db.query(Video.storage_path).filter(Video.storage_path.is_not(None)).all()
             )
         else:
-            index = 0 if role == "tracks" else 1
             referenced = any(
-                _same_path(row[index], item, settings)
+                _same_path(path, item, settings)
                 for row in db.query(
                     DetectionImport.tracks_path, DetectionImport.metadata_path
                 ).all()
+                for path in row
             )
         if referenced:
             return

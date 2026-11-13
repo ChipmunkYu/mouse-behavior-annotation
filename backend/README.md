@@ -105,6 +105,36 @@ Linux resolved lock 保存在 `constraints-py310-linux.txt`；目标 release 必
 runtime 依赖安装与 `pip check`。生产 release 和运行状态只以仓库外“网站服务器文件清单”为准，
 本 README 不复制易过期的当前提交号。
 
+### 媒体运行依赖门禁
+
+`ffmpeg` 与 `ffprobe` 是服务运行依赖，不随 Python requirements 自动安装。配置
+`FFMPEG_PATH`、`FFPROBE_PATH`；生产环境文件须填写目标主机上经确认的持久绝对可执行路径
+（例如 `/usr/bin/ffmpeg`、`/usr/bin/ffprobe`），不要依赖交互 shell 的 PATH，也不要使用本地
+Temp/npm 验证工具路径。必须以实际服务用户、release Python 和相同环境文件执行：
+
+```bash
+.venv/bin/python scripts/media_preflight.py --env-file /home/jinghan/.config/mouse-annotation/backend.env
+```
+
+这是不启动应用、不访问 DB 的发布硬门禁：实际执行两者的 `-version`（每个最多 5 秒），
+验证返回码及程序身份；仅文件存在或 `which` 成功不算通过。退出码 `0` 才通过，`1` 为
+媒体依赖故障，`2` 为配置读取失败；输出不包含配置值、路径、命令或原始 stderr。
+生产启动会在 worker 恢复前再次执行同一检查，失败即停止启动；开发启动记录可理解错误，
+保留普通 API，但在创建上传批次及接收 multipart 请求体前返回 `503`：
+
+```json
+{"detail":{"code":"media_dependency_unavailable","message":"服务媒体依赖不可用及管理员修复提示","tool":"ffprobe"}}
+```
+
+实际 message 会注明故障工具及 `FFMPEG_PATH / FFPROBE_PATH` 检查要求。普通上传、批次上传、
+完成导入、片段/缩略图、导出与展示代理共用执行故障分类；可执行程序正常但视频损坏时仍走
+媒体/输入校验错误，不归类为环境故障。启发式 complete 期间若依赖消失，回滚未发布内容并
+保留 `uploading` 批次和原文件，允许修复环境后重试；不改变失败输入的既有取消/清理规则。
+测试通过显式注入 fake executor 隔离外部依赖，不通过 ENV 开关跳过真实执行器检查。
+
+本地实现和真实接口验收不代表已发布；生产发布仍须在目标环境通过该预检与受影响媒体验收，
+详见[增量版本更新精简流程](../deploy/增量版本更新精简流程.md)。
+
 ## 原生视频流媒体票据（历史实现背景）
 
 `MEDIA_TICKET_ENABLED` 安全默认 `false`，`MEDIA_LEGACY_BEARER_ENABLED` 默认 `true` 以支持回滚。

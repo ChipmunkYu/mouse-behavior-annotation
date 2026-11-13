@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from collections.abc import Iterator
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -34,7 +35,7 @@ def _export_video_gate(
 ) -> Iterator[None]:
     category_ids = list(dict.fromkeys(body.category_ids or []))
     video_ids = sorted({submission.video_id for _annotation, submission, _clip
-                        in asset_rows(db, project_id, category_ids)})
+                        in asset_rows(db, project_id, category_ids, source=body.source)})
     if not video_ids:
         yield
         return
@@ -80,7 +81,7 @@ def create_export(
                 status_code=400, detail="Category does not belong to this project"
             )
     try:
-        job = enqueue_export_job(db, access[0], category_ids)
+        job = enqueue_export_job(db, access[0], category_ids, source=body.source)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if job is None:
@@ -97,16 +98,17 @@ def create_export(
 def export_status(
     project_id: int,
     request: Request,
+    source: Literal["manual", "heuristic", "all"] = "manual",
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> ExportStatusOut:
     """返回最近任务范围内可导出、实体就绪和缺失片段统计。"""
     _require_export_role(access)
-    latest = latest_export_job(db, project_id)
+    latest = latest_export_job(db, project_id, source)
     category_ids = None
     if latest is not None:
         category_ids = (latest.payload or {}).get("category_ids") or None
-    rows = asset_rows(db, project_id, category_ids)
+    rows = asset_rows(db, project_id, category_ids, source=source)
     missing: list[MissingClipOut] = []
     ready = 0
     for annotation, submission, clip in rows:
@@ -124,6 +126,7 @@ def export_status(
                 )
             )
     return ExportStatusOut(
+        source=source, category_ids=category_ids,
         latest_job=_job_out(latest) if latest is not None else None,
         exportable_count=len(rows),
         ready_count=ready,
@@ -136,21 +139,13 @@ def export_status(
 def download_export(
     project_id: int,
     request: Request,
+    source: Literal["manual", "heuristic", "all"] = "manual",
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ):
     """下载项目最近成功且未过期的安全导出文件。"""
     _require_export_role(access)
-    job = (
-        db.query(BackgroundJob)
-        .filter(
-            BackgroundJob.project_id == project_id,
-            BackgroundJob.job_type == JOB_TYPE_EXPORT,
-            BackgroundJob.status == "succeeded",
-        )
-        .order_by(BackgroundJob.id.desc())
-        .first()
-    )
+    job = latest_export_job(db, project_id, source, succeeded=True)
     if job is None or job.expires_at is None or job.expires_at <= datetime.utcnow():
         raise HTTPException(status_code=404, detail="Export not found")
     path, _ = _resolve_within(job.result_path, request.app.state.settings.exports_dir)

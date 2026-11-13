@@ -29,6 +29,7 @@ from .models import (BackgroundJob, Clip, DetectionSnapshotState, Project, RawDe
                      Submission, SubmissionAnnotation, Video)
 from .submission_media_plan import build_submission_media_plan
 from .submission_service import validate_snapshot_integrity
+from .heuristic_judgment import published_source_condition
 
 logger = logging.getLogger(__name__)
 JOB_TYPE_EXPORT = "export"
@@ -46,13 +47,16 @@ def _release_export_key(job: BackgroundJob) -> None:
     job.dedupe_key = f"export:project:{job.project_id}:history:{job.id}"
 
 
-def latest_export_job(db: Session, project_id: int) -> BackgroundJob | None:
-    return db.query(BackgroundJob).filter_by(job_type=JOB_TYPE_EXPORT, project_id=project_id).order_by(
-        BackgroundJob.id.desc()).first()
+def latest_export_job(db: Session, project_id: int, source="manual", *, succeeded=False) -> BackgroundJob | None:
+    query = db.query(BackgroundJob).filter_by(job_type=JOB_TYPE_EXPORT, project_id=project_id)
+    if succeeded:
+        query = query.filter_by(status="succeeded")
+    return next((job for job in query.order_by(BackgroundJob.id.desc())
+                 if (job.payload or {}).get("source", "manual") == source), None)
 
 
 def asset_rows(db: Session, project_id: int, category_ids: list[int] | None,
-               submission_annotation_ids: list[int] | None = None):
+               submission_annotation_ids: list[int] | None = None, *, source="manual"):
     """Read published submission-bound Clip assets (status API/enqueue only).
 
     Authority is the immutable ``Clip`` row bound to its ``SubmissionAnnotation``;
@@ -65,6 +69,7 @@ def asset_rows(db: Session, project_id: int, category_ids: list[int] | None,
              .join(Video, Video.id == Submission.video_id)
              .filter(Video.project_id == project_id, Video.workflow_status != "archived",
                      Clip.retired_at.is_(None)))
+    query = query.filter(published_source_condition(source))
     if category_ids:
         query = query.filter(SubmissionAnnotation.category_id.in_(category_ids))
     if submission_annotation_ids is not None:
@@ -72,9 +77,9 @@ def asset_rows(db: Session, project_id: int, category_ids: list[int] | None,
     return query.order_by(SubmissionAnnotation.start_frame, SubmissionAnnotation.id).all()
 
 
-def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | None) -> BackgroundJob | None:
+def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | None, *, source="manual") -> BackgroundJob | None:
     requested = sorted(set(category_ids or []))
-    rows = asset_rows(db, project.id, requested or None)
+    rows = asset_rows(db, project.id, requested or None, source=source)
     # Empty means all concrete categories actually represented by published assets now.
     represented = {annotation.category_id for annotation, _submission, _clip in rows}
     frozen_categories = requested if requested else sorted(represented)
@@ -116,6 +121,7 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
         project_id=project.id, job_type=JOB_TYPE_EXPORT, status="queued", progress=0,
         dedupe_key=export_dedupe_key(project.id), payload={
             "contract_version": 1, "project_id": project.id, "category_ids": frozen_categories,
+            "source": source,
             "category_directories": category_directories, "category_tokens": category_tokens,
             "submission_ids": submission_ids, "submission_annotation_ids": annotation_ids,
             "refs": refs,
@@ -278,6 +284,9 @@ class ExportWorker:
 
     def _frozen_rows(self, db: Session, job: BackgroundJob, *, require_ready: bool):
         payload = job.payload or {}
+        source_scope = payload.get("source", "manual")
+        if source_scope not in {"manual", "heuristic", "all"}:
+            raise MediaCommandError("invalid export source")
         if payload.get("contract_version") != 1 or payload.get("project_id") != job.project_id:
             raise MediaCommandError("invalid export payload")
         ids = payload.get("submission_annotation_ids")
@@ -298,6 +307,9 @@ class ExportWorker:
         by_id = {annotation.id: (annotation, submission, clip) for annotation, submission, clip in rows}
         if set(by_id) != set(ids):
             raise MediaCommandError("frozen SubmissionAnnotation no longer exists")
+        allowed = {a.id for a, _s, _c in asset_rows(db, job.project_id, payload.get("category_ids"), ids, source=source_scope)}
+        if allowed != set(ids):
+            raise MediaCommandError("export source or final authority changed")
         refs_by_id = {ref.get("submission_annotation_id"): ref for ref in refs}
         for annotation_id in ids:
             annotation, submission, clip = by_id[annotation_id]; ref = refs_by_id.get(annotation_id, {})
@@ -352,8 +364,15 @@ class ExportWorker:
             for relative in range(end_frame - start_frame + 1):
                 absolute = start_frame + relative; detections = []
                 while current is not None and current[0].frame_index == absolute:
-                    item = transform_detection(current[0], current.display_track_id, plan.crop,
-                                               plan.output_width, plan.output_height)
+                    if submission.video.source == "heuristic":
+                        raw = current[0]
+                        item = dict(track_id=current.display_track_id,
+                                    box=[raw.box[k] for k in ("x1", "y1", "x2", "y2")],
+                                    keypoints=[[p[k] for k in ("x_px", "y_px", "confidence")] for p in raw.keypoints],
+                                    detection_confidence=raw.detection_confidence, class_id=raw.class_id)
+                    else:
+                        item = transform_detection(current[0], current.display_track_id, plan.crop,
+                                                   plan.output_width, plan.output_height)
                     if item is not None: detections.append(item)
                     current = next(iterator, None)
                 if relative: fh.write(",")
@@ -386,9 +405,11 @@ class ExportWorker:
                 end = min(end, neighbor.start_frame - 1)
         return start, end
 
-    def _write_item(self, db, annotation, submission, staged_source: Path, target: Path) -> None:
+    def _write_item(self, db, annotation, submission, staged_source: Path, target: Path, *, clip_path: Path | None = None) -> None:
         snapshot = submission.detection_snapshot
-        start_frame, end_frame = self._export_range(db, annotation, submission)
+        video = db.get(Video, submission.video_id)
+        heuristic = video.source == "heuristic"
+        start_frame, end_frame = ((0, snapshot.frame_count - 1) if heuristic else self._export_range(db, annotation, submission))
         plan = build_submission_media_plan(start_time=start_frame / snapshot.fps,
             end_time=(end_frame + 1) / snapshot.fps,
             start_frame=start_frame, end_frame=end_frame, fps=snapshot.fps,
@@ -397,9 +418,17 @@ class ExportWorker:
         target.mkdir(parents=True)
         temp_clip = target / f".clip_{annotation.id}_revexport_{uuid.uuid4().hex}.mp4.part"
         try:
-            self.processor.render_clip(input_path=str(staged_source), start_frame=start_frame,
-                                       frames=plan.frame_count, output_path=str(temp_clip),
-                                       fps=snapshot.fps, crop=plan.crop)
+            if heuristic:
+                from .media_jobs import verify_heuristic_media
+                verify_heuristic_media(self.processor, video, submission, annotation, staged_source)
+                if clip_path is None:
+                    raise MediaCommandError("verified heuristic Clip is required")
+                verify_heuristic_media(self.processor, video, submission, annotation, clip_path)
+                shutil.copyfile(clip_path, temp_clip)
+            else:
+                self.processor.render_clip(input_path=str(staged_source), start_frame=start_frame,
+                                           frames=plan.frame_count, output_path=str(temp_clip),
+                                           fps=snapshot.fps, crop=plan.crop)
             os.replace(temp_clip, target / "clip.mp4")
         finally:
             temp_clip.unlink(missing_ok=True)
@@ -436,10 +465,14 @@ class ExportWorker:
                 "crop_region": ({"x": plan.crop[0], "y": plan.crop[1], "w": plan.crop[2], "h": plan.crop[3]}
                                  if plan.crop else {"x": 0, "y": 0, "w": snapshot.width, "h": snapshot.height})}}
         calibration = db.get(Video, submission.video_id).distance_calibration
+        if heuristic:
+            metadata["source"] = video.heuristic_input["source"]
         if calibration is not None:
             metadata["distance_scale"] = {
                 "cm_per_pixel": calibration["cm_per_pixel"], "unit": "cm"
             }
+        elif heuristic and video.heuristic_input.get("distance_scale") is not None:
+            metadata["distance_scale"] = video.heuristic_input["distance_scale"]
         for name, value in (("annotation.json", annotation_doc), ("metadata.json", metadata)):
             with (target / name).open("w", encoding="utf-8") as fh:
                 json.dump(value, fh, ensure_ascii=False, indent=2)
@@ -479,7 +512,7 @@ class ExportWorker:
                 if source is None:
                     source = stage_submission_input(self.settings, submission, job.id)
                     staged_sources[submission.id] = source
-                self._ensure_clip(db, job, annotation, submission, clip, source)
+                clip_path = self._ensure_clip(db, job, annotation, submission, clip, source)
                 category_count = len((job.payload or {}).get("category_ids") or [])
                 parent = (job.payload.get("category_directories", {}).get(str(annotation.category_id), "")
                           if category_count > 1 else "")
@@ -493,7 +526,7 @@ class ExportWorker:
                     name = safe_part(f"{base}_{tail}", limit=120)
                     relative = f"{parent}/{name}".strip("/")
                 used.add(relative.casefold()); expected_dirs.add(relative)
-                self._write_item(db, annotation, submission, source, staging / relative)
+                self._write_item(db, annotation, submission, source, staging / relative, clip_path=clip_path)
                 current = db.get(BackgroundJob, job.id); current.progress = int(index * 90 / len(rows)) if rows else 90
                 db.commit()
             with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:

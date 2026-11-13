@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,17 +19,17 @@ from tests.test_media import _setup
 
 @pytest.fixture(scope="module")
 def ffmpeg_path():
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
     if not ffmpeg:
-        pytest.skip("real FFmpeg integration skipped: ffmpeg is not available on PATH")
+        pytest.skip("Set FFMPEG_PATH or provide ffmpeg on PATH")
     return ffmpeg
 
 
 @pytest.fixture(scope="module")
 def ffprobe_path():
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = os.environ.get("FFPROBE_PATH") or shutil.which("ffprobe")
     if not ffprobe:
-        pytest.skip("real media probe skipped: ffprobe is not available on PATH")
+        pytest.skip("Set FFPROBE_PATH or provide ffprobe on PATH")
     return ffprobe
 
 

@@ -74,6 +74,9 @@ def media_status(
     """项目成员可读：当前修订的片段生成进度与该视频对应任务。"""
     video = _get_video_in_project(db, project_id, video_id)
     submission = _published_submission(db, video.id)
+    if video.source == "heuristic" and (video.workflow_status != "approved" or video.judgment_status != "usable"
+                                        or submission is None or submission.status != "approved"):
+        submission = None
     revision = submission.source_media_revision if submission else video.media_revision
     clips = (
         db.query(Clip)
@@ -129,6 +132,9 @@ def generate_media(
         )
     video = _get_video_in_project(db, project_id, video_id)
     submission = _published_submission(db, video.id)
+    if video.source == "heuristic" and (video.workflow_status != "approved" or video.judgment_status != "usable"
+                                        or submission is None or submission.status != "approved"):
+        raise HTTPException(409, detail={"code": "heuristic_final_approval_required"})
     if submission is not None:
         jobs = enqueue_submission_media(db, submission, request.app.state.settings)
         if not jobs:

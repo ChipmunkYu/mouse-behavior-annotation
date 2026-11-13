@@ -16,7 +16,7 @@ from ..models import (
 )
 from ..permissions import can_review, require_editor, require_reviewer
 from ..schemas import (BehaviorDecisionIn, BehaviorReopenIn, BehaviorReviewStateOut,
-                       ReviewCreate, ReviewOut, ReviewSubmissionContextIn, VideoOut)
+                       ReviewCreate, ReviewOut, ReviewSubmissionContextIn, VideoOut, JudgmentPut, JudgmentOut)
 from ..behavior_review import current_final_approval
 from ..submission_service import (create_submission, resolve_and_hash_source,
                                   validate_snapshot_integrity)
@@ -138,7 +138,7 @@ def _review_state(db: Session, video: Video, membership) -> dict:
                                  and bool(snapshots) and counts["approved"] == len(snapshots),
         "annotations": annotations, "feedback_items": feedback_items,
         "locked_annotation_ids": locks,
-        "can_reopen": submission.status == "approved" and can_review(membership),
+        "can_reopen": video.source != "heuristic" and submission.status == "approved" and can_review(membership),
     }
 
 
@@ -224,6 +224,8 @@ def reopen_behavior_review(project_id: int, video_id: int, submission_id: int,
     _get_video(db, project_id, video_id)
     with video_write_gate(db, project_id=project_id, video_id=video_id, allow_submitted=True,
                           operation_gate=request.app.state.video_operation_gate) as state:
+        if state.video.source == "heuristic":
+            raise HTTPException(409, detail={"code": "heuristic_completed_locked"})
         submission = db.get(Submission, submission_id)
         latest = db.query(Submission).filter_by(video_id=video_id).order_by(Submission.attempt_no.desc()).first()
         if submission is None or latest is None or submission.id != latest.id or submission.status != "approved":
@@ -271,6 +273,11 @@ def submit_video(project_id: int, video_id: int, request: Request,
         expected_storage_path=source_identity[0],
     ) as state:
         video, imp = state.video, state.detection_import
+        if video.source == "heuristic":
+            from ..heuristic_judgment import check_context
+            if body is None:
+                raise HTTPException(422, detail="Heuristic submit requires version context")
+            check_context(db, video, imp, body, membership)
         if video.identity_revision != imp.edit_version:
             raise HTTPException(status_code=400, detail=(
                 f"Video identity revision projection is stale: video={video.identity_revision}, import={imp.edit_version}"
@@ -299,6 +306,7 @@ def submit_video(project_id: int, video_id: int, request: Request,
 
 @router.post("/api/projects/{project_id}/videos/{video_id}/withdraw", response_model=VideoOut)
 def withdraw_video(project_id: int, video_id: int, request: Request,
+                   body: ReviewSubmissionContextIn | None = None,
                    access: tuple = Depends(project_access),
                    db: Session = Depends(get_db)) -> Video:
     membership = access[1]
@@ -313,6 +321,12 @@ def withdraw_video(project_id: int, video_id: int, request: Request,
         expected_edit_version=observed_import.edit_version if observed_import else None,
         expected_annotation_revision=observed.annotation_revision,
     ) as state:
+        if state.video.source == "heuristic":
+            if body is None or body.expected_submission_id is None or body.expected_decision_revision is None:
+                raise HTTPException(422, detail="Heuristic withdraw requires submission context")
+            current = db.query(Submission).filter_by(video_id=video_id, status="submitted").one_or_none()
+            if current is None or current.id != body.expected_submission_id or current.decision_revision != body.expected_decision_revision:
+                raise HTTPException(409, detail={"code": "stale_submission"})
         submission = db.query(Submission).filter_by(video_id=video_id, status="submitted").one_or_none()
         if submission is None:
             raise HTTPException(status_code=409, detail="Video has no submitted attempt to withdraw")
@@ -358,6 +372,8 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
     membership = access[1]
     require_reviewer(membership)
     observed = _get_video(db, project_id, video_id)
+    if body.result == "unusable" and observed.source != "heuristic":
+        raise HTTPException(status_code=422, detail={"code": "unusable_requires_heuristic_video"})
     observed_was_submitted = observed.workflow_status == "submitted"
     observed_import = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
     job_id = None
@@ -404,6 +420,8 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
                 "code": "no_rejected_behavior",
                 "message": "A video rejection requires at least one rejected behavior snapshot",
             })
+        if body.result == "unusable" and state.video.judgment_status != "usable":
+            raise HTTPException(status_code=409, detail={"code": "heuristic_usable_required"})
         now = _now()
         if body.result == "approved":
             db.query(Submission).filter(
@@ -424,9 +442,6 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
             created_at=now,
         )
         db.add(review)
-        state.video.workflow_status = body.result
-        state.video.approved_at = now if body.result == "approved" else None
-        state.video.approved_by = membership.user_id if body.result == "approved" else None
         # Compatibility projection only; per-snapshot decisions remain authoritative. A video-level
         # rejection never invents individual rejections for pending historical rows.
         for copy in copies:
@@ -435,14 +450,22 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
             if live is not None and live.video_id == video_id and decision is not None:
                 live.review_status = decision.status
                 live.reviewer_id = decision.reviewer_id if decision.status != "pending" else None
+        db.flush()
+        state.video.workflow_status = body.result
+        if body.result == "unusable":
+            state.video.judgment_status = "unusable"
+        state.video.approved_at = now if body.result == "approved" else None
+        state.video.approved_by = membership.user_id if body.result == "approved" else None
         if body.result == "approved":
             db.query(DraftIdentityEdit).filter_by(detection_import_id=imp.id).delete(synchronize_session=False)
             db.flush()
-        # Both terminal results publish their approved subset (canonical reuse aware).
+        # Publish only outcomes that can contain approved behavior snapshots.
+        db.expire(submission, ["status"])
         # Jobs may belong to another submission when a carried behavior's existing asset
         # needs regeneration; all of them must be scheduled after commit.
-        job_ids = [job.id for job in enqueue_submission_media(
+        job_ids = ([job.id for job in enqueue_submission_media(
             db, submission, request.app.state.settings)]
+            if state.video.source != "heuristic" or body.result == "approved" else [])
         db.commit(); db.refresh(review)
         result = _to_review_out(review)
     for job_id in job_ids:
@@ -451,3 +474,19 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
         except Exception:
             logger.exception("Schedule immutable media job %s failed; queued row remains recoverable", job_id)
     return result
+
+
+@router.get("/api/projects/{project_id}/videos/{video_id}/judgment", response_model=JudgmentOut, response_model_exclude_unset=True)
+def get_judgment(project_id: int, video_id: int, access: tuple = Depends(project_access),
+                 db: Session = Depends(get_db)):
+    from ..heuristic_judgment import judgment_out
+    return judgment_out(db, _get_video(db, project_id, video_id))
+
+
+@router.put("/api/projects/{project_id}/videos/{video_id}/judgment", response_model=JudgmentOut, response_model_exclude_unset=True)
+def put_judgment(project_id: int, video_id: int, body: JudgmentPut, request: Request,
+                 access: tuple = Depends(project_access), db: Session = Depends(get_db)):
+    from ..heuristic_judgment import save_judgment
+    with video_write_gate(db, project_id=project_id, video_id=video_id, require_active_import=True,
+                          allow_submitted=True, operation_gate=request.app.state.video_operation_gate) as state:
+        return save_judgment(db, request.app.state.settings, state.video, state.detection_import, body, access[1])

@@ -624,6 +624,11 @@
       "BatchStatusOut": {
         "description": "批次状态（含文件上传状态与已创建视频 ID）。",
         "properties": {
+          "annotation_upload_state": {
+            "default": "pending",
+            "title": "Annotation Upload State",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -662,6 +667,15 @@
           "project_id": {
             "title": "Project Id",
             "type": "integer"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
           },
           "status": {
             "title": "Status",
@@ -1801,6 +1815,15 @@
             "title": "Role Definitions",
             "type": "array"
           },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "start_frame": {
             "title": "Start Frame",
             "type": "integer"
@@ -2421,6 +2444,16 @@
               }
             ],
             "title": "Category Ids"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic",
+              "all"
+            ],
+            "title": "Source",
+            "type": "string"
           }
         },
         "title": "ExportRequest",
@@ -2429,6 +2462,20 @@
       "ExportStatusOut": {
         "description": "导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。",
         "properties": {
+          "category_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Ids"
+          },
           "exportable_count": {
             "title": "Exportable Count",
             "type": "integer"
@@ -2457,6 +2504,16 @@
           "ready_count": {
             "title": "Ready Count",
             "type": "integer"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic",
+              "all"
+            ],
+            "title": "Source",
+            "type": "string"
           }
         },
         "required": [
@@ -2599,6 +2656,23 @@
             "title": "Operation",
             "type": "string"
           },
+          "participant_confirmation_required": {
+            "default": false,
+            "title": "Participant Confirmation Required",
+            "type": "boolean"
+          },
+          "proposed_selection": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Selection"
+          },
           "retained_display_track_id": {
             "anyOf": [
               {
@@ -2629,9 +2703,10 @@
         "type": "object"
       },
       "IdentityEditCheckRequest": {
+        "additionalProperties": false,
         "properties": {
           "base_detection_import_revision": {
-            "minimum": 1.0,
+            "exclusiveMinimum": 0.0,
             "title": "Base Detection Import Revision",
             "type": "integer"
           },
@@ -2640,9 +2715,46 @@
             "title": "Base Identity Revision",
             "type": "integer"
           },
+          "expected_annotation_revision": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Annotation Revision"
+          },
+          "expected_decision_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Decision Revision"
+          },
+          "expected_submission_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Submission Id"
+          },
           "frame": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -2661,6 +2773,7 @@
           },
           "track_ids": {
             "items": {
+              "minimum": 0.0,
               "type": "integer"
             },
             "minItems": 1,
@@ -2678,9 +2791,10 @@
         "type": "object"
       },
       "IdentityEditCommitRequest": {
+        "additionalProperties": false,
         "properties": {
           "base_detection_import_revision": {
-            "minimum": 1.0,
+            "exclusiveMinimum": 0.0,
             "title": "Base Detection Import Revision",
             "type": "integer"
           },
@@ -2689,9 +2803,56 @@
             "title": "Base Identity Revision",
             "type": "integer"
           },
+          "confirmed_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgmentSelectionIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_annotation_revision": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Annotation Revision"
+          },
+          "expected_decision_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Decision Revision"
+          },
+          "expected_submission_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Submission Id"
+          },
           "frame": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -2710,6 +2871,7 @@
           },
           "track_ids": {
             "items": {
+              "minimum": 0.0,
               "type": "integer"
             },
             "minItems": 1,
@@ -2866,6 +3028,22 @@
             ],
             "title": "Affected Track Ids"
           },
+          "annotation_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotation Revision"
+          },
+          "decision_revision": {
+            "default": 0,
+            "title": "Decision Revision",
+            "type": "integer"
+          },
           "edit_id": {
             "anyOf": [
               {
@@ -2986,6 +3164,29 @@
             ],
             "title": "Reverted Edit Id"
           },
+          "selection": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection"
+          },
+          "submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submission Id"
+          },
           "suppression_id": {
             "anyOf": [
               {
@@ -3005,9 +3206,10 @@
         "type": "object"
       },
       "IdentityEditRevertRequest": {
+        "additionalProperties": false,
         "properties": {
           "base_detection_import_revision": {
-            "minimum": 1.0,
+            "exclusiveMinimum": 0.0,
             "title": "Base Detection Import Revision",
             "type": "integer"
           },
@@ -3015,6 +3217,42 @@
             "minimum": 0.0,
             "title": "Base Identity Revision",
             "type": "integer"
+          },
+          "expected_annotation_revision": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Annotation Revision"
+          },
+          "expected_decision_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Decision Revision"
+          },
+          "expected_submission_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Submission Id"
           }
         },
         "required": [
@@ -3156,6 +3394,403 @@
           "invite_code"
         ],
         "title": "JoinProjectRequest",
+        "type": "object"
+      },
+      "JudgmentFrameRangeOut": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "JudgmentFrameRangeOut",
+        "type": "object"
+      },
+      "JudgmentOut": {
+        "properties": {
+          "annotation_revision": {
+            "title": "Annotation Revision",
+            "type": "integer"
+          },
+          "decision_revision": {
+            "default": 0,
+            "title": "Decision Revision",
+            "type": "integer"
+          },
+          "detection_import_revision": {
+            "title": "Detection Import Revision",
+            "type": "integer"
+          },
+          "identity_revision": {
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "input": {
+            "$ref": "#/components/schemas/JudgmentSuggestionOut"
+          },
+          "judgment_status": {
+            "enum": [
+              "pending",
+              "usable",
+              "unusable"
+            ],
+            "title": "Judgment Status",
+            "type": "string"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgmentSelectionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "const": "heuristic",
+            "default": "heuristic",
+            "title": "Source",
+            "type": "string"
+          },
+          "submission_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submission Id"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "integer"
+          },
+          "workflow_status": {
+            "title": "Workflow Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "video_id",
+          "workflow_status",
+          "judgment_status",
+          "annotation_revision",
+          "detection_import_revision",
+          "identity_revision",
+          "input"
+        ],
+        "title": "JudgmentOut",
+        "type": "object"
+      },
+      "JudgmentPut": {
+        "additionalProperties": false,
+        "properties": {
+          "base_detection_import_revision": {
+            "exclusiveMinimum": 0.0,
+            "title": "Base Detection Import Revision",
+            "type": "integer"
+          },
+          "base_identity_revision": {
+            "minimum": 0.0,
+            "title": "Base Identity Revision",
+            "type": "integer"
+          },
+          "category_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Id"
+          },
+          "expected_annotation_revision": {
+            "exclusiveMinimum": 0.0,
+            "title": "Expected Annotation Revision",
+            "type": "integer"
+          },
+          "expected_decision_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Decision Revision"
+          },
+          "expected_submission_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Submission Id"
+          },
+          "judgment_status": {
+            "enum": [
+              "usable",
+              "unusable"
+            ],
+            "title": "Judgment Status",
+            "type": "string"
+          },
+          "mouse_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Ids"
+          },
+          "participant_roles": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Participant Roles"
+          }
+        },
+        "required": [
+          "expected_submission_id",
+          "expected_decision_revision",
+          "expected_annotation_revision",
+          "base_detection_import_revision",
+          "base_identity_revision",
+          "judgment_status"
+        ],
+        "title": "JudgmentPut",
+        "type": "object"
+      },
+      "JudgmentSelectionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "category_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "mouse_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Ids"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "title": "Participant Roles",
+            "type": "object"
+          }
+        },
+        "required": [
+          "category_id"
+        ],
+        "title": "JudgmentSelectionIn",
+        "type": "object"
+      },
+      "JudgmentSelectionOut": {
+        "properties": {
+          "annotation_id": {
+            "title": "Annotation Id",
+            "type": "integer"
+          },
+          "category_id": {
+            "title": "Category Id",
+            "type": "integer"
+          },
+          "mouse_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Mouse Ids",
+            "type": "array"
+          },
+          "participant_roles": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "title": "Participant Roles",
+            "type": "object"
+          }
+        },
+        "required": [
+          "annotation_id",
+          "category_id",
+          "mouse_ids",
+          "participant_roles"
+        ],
+        "title": "JudgmentSelectionOut",
+        "type": "object"
+      },
+      "JudgmentSuggestionOut": {
+        "properties": {
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "behavior": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Behavior"
+          },
+          "canonical_behavior": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Behavior"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "frame_range": {
+            "$ref": "#/components/schemas/JudgmentFrameRangeOut"
+          },
+          "mouse_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mouse Ids"
+          },
+          "participants": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Participants"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "time_range": {
+            "$ref": "#/components/schemas/JudgmentTimeRangeOut"
+          }
+        },
+        "required": [
+          "frame_range",
+          "time_range"
+        ],
+        "title": "JudgmentSuggestionOut",
+        "type": "object"
+      },
+      "JudgmentTimeRangeOut": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "JudgmentTimeRangeOut",
         "type": "object"
       },
       "LoginRequest": {
@@ -3519,7 +4154,8 @@
           "result": {
             "enum": [
               "approved",
-              "rejected"
+              "rejected",
+              "unusable"
             ],
             "title": "Result",
             "type": "string"
@@ -3576,7 +4212,8 @@
           "result": {
             "enum": [
               "approved",
-              "rejected"
+              "rejected",
+              "unusable"
             ],
             "title": "Result",
             "type": "string"
@@ -3641,6 +4278,42 @@
       "ReviewSubmissionContextIn": {
         "additionalProperties": false,
         "properties": {
+          "base_detection_import_revision": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Detection Import Revision"
+          },
+          "base_identity_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Identity Revision"
+          },
+          "expected_annotation_revision": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Annotation Revision"
+          },
           "expected_decision_revision": {
             "anyOf": [
               {
@@ -3656,6 +4329,7 @@
           "expected_submission_id": {
             "anyOf": [
               {
+                "exclusiveMinimum": 0.0,
                 "type": "integer"
               },
               {
@@ -4185,8 +4859,29 @@
         "title": "VideoCreate",
         "type": "object"
       },
+      "VideoImportBatchCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "VideoImportBatchCreate",
+        "type": "object"
+      },
       "VideoImportBatchOut": {
         "properties": {
+          "annotation_upload_state": {
+            "default": "pending",
+            "title": "Annotation Upload State",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -4225,6 +4920,15 @@
           "project_id": {
             "title": "Project Id",
             "type": "integer"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
           },
           "status": {
             "title": "Status",
@@ -4310,6 +5014,22 @@
             ],
             "title": "Detection Import Id"
           },
+          "judgment_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "usable",
+                  "unusable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judgment Status"
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -4324,6 +5044,15 @@
               }
             ],
             "title": "Revision"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
           },
           "status": {
             "enum": [
@@ -4474,6 +5203,22 @@
             "title": "Identity Revision",
             "type": "integer"
           },
+          "judgment_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "usable",
+                  "unusable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judgment Status"
+          },
           "playback_status": {
             "enum": [
               "ready",
@@ -4487,6 +5232,15 @@
           "project_id": {
             "title": "Project Id",
             "type": "integer"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "heuristic"
+            ],
+            "title": "Source",
+            "type": "string"
           },
           "status": {
             "title": "Status",
@@ -5202,6 +5956,21 @@
           },
           {
             "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "manual",
+                "heuristic"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "category_id",
             "required": false,
             "schema": {
@@ -5345,6 +6114,21 @@
             "schema": {
               "title": "Project Id",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "manual",
+                "heuristic"
+              ],
+              "title": "Source",
+              "type": "string"
             }
           }
         ],
@@ -5511,6 +6295,21 @@
               "title": "Project Id",
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "manual",
+              "enum": [
+                "manual",
+                "heuristic",
+                "all"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5556,6 +6355,21 @@
             "schema": {
               "title": "Project Id",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "manual",
+              "enum": [
+                "manual",
+                "heuristic",
+                "all"
+              ],
+              "title": "Source",
+              "type": "string"
             }
           }
         ],
@@ -5972,6 +6786,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/VideoImportBatchCreate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {
@@ -6280,6 +7111,21 @@
                 "all"
               ],
               "title": "View",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "manual",
+                "heuristic"
+              ],
+              "title": "Source",
               "type": "string"
             }
           },
@@ -8033,6 +8879,126 @@
         ]
       }
     },
+    "/api/projects/{project_id}/videos/{video_id}/judgment": {
+      "get": {
+        "operationId": "get_judgment_api_projects__project_id__videos__video_id__judgment_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgmentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Judgment",
+        "tags": [
+          "reviews"
+        ]
+      },
+      "put": {
+        "operationId": "put_judgment_api_projects__project_id__videos__video_id__judgment_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgmentPut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgmentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Judgment",
+        "tags": [
+          "reviews"
+        ]
+      }
+    },
     "/api/projects/{project_id}/videos/{video_id}/media-status": {
       "get": {
         "description": "项目成员可读：当前修订的片段生成进度与该视频对应任务。",
@@ -8715,6 +9681,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReviewSubmissionContextIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

@@ -135,7 +135,7 @@ def ctx(tmp_path):
         database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
         cleanup_enabled=False,
     )
-    app = create_app(settings=settings)
+    app = create_app(settings=settings, media_processor=FakeMediaProcessor())
     with TestClient(app) as client:
         # 必须在 create_app 之后取用：configure_engine 才会重新赋值 SessionLocal
         yield AppContext(client, db_mod.SessionLocal)

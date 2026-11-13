@@ -3,7 +3,7 @@ import type { UploadTaskPhase, UploadTaskStatus } from "./types";
 import { useUploadManager } from "./UploadManagerContext";
 
 const PHASE_LABEL: Record<UploadTaskPhase, string> = {
-  queued: "等待上传", video: "上传视频", tracks: "上传 tracks", metadata: "上传 metadata",
+  queued: "等待上传", video: "上传视频", tracks: "上传 tracks", metadata: "上传 metadata", annotation: "上传 annotation",
   completing: "校验处理中", success: "上传成功", failed: "上传失败", cleanup: "清理批次",
 };
 
@@ -57,23 +57,25 @@ export default function UploadTaskTray() {
       </div>
       <div className="upload-task-list">
         {tasks.length === 0 ? <div className="upload-tray-empty"><b>还没有上传任务</b><span>任务加入队列后会自动展开并持续显示进度。</span></div> : tasks.map((task) => <article key={task.taskId} className={`upload-task-row ${STATUS_CLASS[task.status]}`} aria-label={`${task.name}，${PHASE_LABEL[task.phase]}`}>
-          <div className="upload-task-title"><b title={task.name}>{task.kind === "batch" ? "三文件批次 · " : ""}{task.name}</b><span className="upload-task-phase">{PHASE_LABEL[task.phase]}</span></div>
+          <div className="upload-task-title"><b title={task.name}>{task.source === "heuristic" ? "启发式结果 · " : task.kind === "batch" ? "三文件批次 · " : ""}{task.name}</b><span className="upload-task-phase">{PHASE_LABEL[task.phase]}</span></div>
           <div className="upload-task-project"><span>项目</span>{task.projectName}</div>
           {(task.status === "running" || task.status === "queued") ? <div className="upload-progress-line">
             <div className="upload-task-progress" role="progressbar" aria-label={`${task.name} 总上传进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress} aria-valuetext={`${task.progress}%`}><div style={{ width: `${task.progress}%` }} /></div>
             <b aria-hidden="true">{task.progress}%</b>
           </div> : null}
-          {task.kind === "batch" && task.status === "running" && ["tracks", "metadata", "video"].includes(task.phase) ? <div className="upload-task-detail">当前文件 {task.slots?.[task.phase as "tracks" | "metadata" | "video"].percent ?? 0}% · 批次总进度 {task.progress}%</div> : null}
+          {task.kind === "batch" && task.status === "running" && ["tracks", "metadata", "annotation", "video"].includes(task.phase) ? <div className="upload-task-detail">当前文件 {task.slots?.[task.phase as "tracks" | "metadata" | "annotation" | "video"]?.percent ?? 0}% · 批次总进度 {task.progress}%</div> : null}
           {task.status === "cancelling" ? <div className="upload-task-detail" role="status">正在取消并清理服务端批次，请稍候…</div> : null}
           {task.error ? <div className="upload-task-error" role="alert">{task.error}</div> : null}
+          {task.status === "failed" && task.batchCleaned ? <div className="upload-task-detail" role="status">该失败项已清理，可重试（将创建新批次）。</div> : null}
           <div className="upload-task-actions">
             {task.status === "success" ? <button type="button" className="btn btn-sm" onClick={() => confirm(task.taskId)}>确认</button> : null}
-            {task.status === "failed" ? <><button type="button" className="btn btn-primary btn-sm" onClick={() => void retry(task.taskId)}>重试</button><button type="button" className="btn btn-danger btn-sm" onClick={() => void cancel(task.taskId)}>{task.kind === "batch" && task.batchId != null ? "取消并删除批次" : "取消"}</button></> : null}
+            {task.status === "failed" ? <><button type="button" className="btn btn-primary btn-sm" onClick={() => void retry(task.taskId)}>重试</button>{!task.batchCleaned ? <button type="button" className="btn btn-danger btn-sm" onClick={() => void cancel(task.taskId)}>{task.kind === "batch" && task.batchId != null ? "取消并删除批次" : "移除本地任务"}</button> : null}</> : null}
             {["queued", "running"].includes(task.status) ? <button type="button" className="btn btn-danger btn-sm" onClick={() => void cancel(task.taskId)}>{task.kind === "batch" && task.batchId != null ? "取消并清理" : "取消"}</button> : null}
             {task.status === "cancelling" ? <span aria-hidden="true">清理中…</span> : null}
           </div>
         </article>)}
       </div>
+      {!active && tasks.length ? <div className="upload-tray-head" role="status"><div><b>本轮处理结束：成功 {successes} 项，失败 {failed} 项</b>{tasks.filter((task) => task.status === "failed").map((task) => <span key={task.taskId}>{task.name}：{task.error}</span>)}</div></div> : null}
     </aside> : null}
   </div>;
 }

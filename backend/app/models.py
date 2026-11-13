@@ -178,6 +178,8 @@ class BehaviorCategory(Base):
 class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (
+        CheckConstraint("source IN ('manual','heuristic')", name="ck_videos_source"),
+        CheckConstraint("(source='manual' AND judgment_status IS NULL AND heuristic_input IS NULL) OR (source='heuristic' AND judgment_status IN ('pending','usable','unusable') AND judgment_status IS NOT NULL AND heuristic_input IS NOT NULL)", name="ck_videos_judgment"),
         CheckConstraint("annotation_revision >= 1", name="ck_videos_annotation_revision_min"),
         CheckConstraint(
             "display_status IN ('pending', 'processing', 'ready', 'failed')",
@@ -239,6 +241,9 @@ class Video(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="manual", server_default="manual", nullable=False)
+    judgment_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    heuristic_input: Mapped[Optional[dict]] = mapped_column(JSON(none_as_null=True), nullable=True)
     duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     fps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -389,7 +394,7 @@ class Review(Base):
     reviewer_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    result: Mapped[str] = mapped_column(String(32), nullable=False)  # approved / rejected
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     annotation_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     # v0.6 审核快照补足三类语义修订；旧审核记录迁移为 0
@@ -528,6 +533,9 @@ class VideoImportBatch(Base):
     video_upload_state: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     tracks_upload_state: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     metadata_upload_state: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="manual", server_default="manual", nullable=False)
+    annotation_upload_state: Mapped[str] = mapped_column(String(32), default="pending", server_default="pending", nullable=False)
+    annotation_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     # 上传文件路径（相对 videos_dir / detection_imports_dir）与原始文件名（Phase 1B）
     video_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     video_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -1106,7 +1114,7 @@ class Submission(Base):
         ),
         CheckConstraint("source_media_revision >= 0", name="ck_submissions_media_revision"),
         CheckConstraint(
-            "status IN ('submitted', 'withdrawn', 'approved', 'rejected', 'superseded')",
+            "status IN ('submitted', 'withdrawn', 'approved', 'rejected', 'unusable', 'superseded')",
             name="ck_submissions_status",
         ),
         CheckConstraint(

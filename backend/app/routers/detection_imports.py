@@ -58,9 +58,10 @@ from ..schemas import (
     CorrectedTracksExportOut,
     VideoImportCompletionOut,
     VideoImportBatchOut,
+    VideoImportBatchCreate,
 )
 from ..track_ids import TRACK_ID_UPPER_BOUND, is_valid_track_id, next_display_track_id
-from ..video_write_gate import video_write_gate
+from ..video_write_gate import video_write_gate, reject_heuristic
 from ..video_operation_dependency import VIDEO_OPERATION_BUSY_DETAIL
 from ..video_operation_gate import VideoOperationBusyError
 
@@ -736,6 +737,7 @@ def _insert_detection_import_data(
 )
 def create_import_batch(
     project_id: int,
+    body: VideoImportBatchCreate | None = None,
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> VideoImportBatch:
@@ -746,6 +748,7 @@ def create_import_batch(
     now = datetime.utcnow()
     batch = VideoImportBatch(
         project_id=project_id, created_by=membership.user_id,
+        source=body.source if body else "manual",
         updated_at=now,
     )
     db.add(batch)
@@ -794,8 +797,8 @@ async def upload_batch_file(
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> VideoImportBatch:
-    if role not in ("video", "tracks", "metadata"):
-        raise HTTPException(status_code=400, detail="Invalid role; use video, tracks, or metadata")
+    if role not in ("video", "tracks", "metadata", "annotation"):
+        raise HTTPException(status_code=400, detail="Invalid role; use video, tracks, metadata, or annotation")
 
     _project, membership = access
     if membership.status != "active":
@@ -803,6 +806,8 @@ async def upload_batch_file(
 
     batch = _require_batch_access(db, batch_id, project_id, membership)
     _require_uploadable_batch(batch)
+    if role == "annotation" and batch.source != "heuristic":
+        raise HTTPException(400, detail="manual batches do not accept annotation")
 
     raw_name = file.filename or ""
     if not raw_name:
@@ -812,6 +817,8 @@ async def upload_batch_file(
     except ValueError:
         raise HTTPException(status_code=400, detail="Upload filename is invalid")
     _prevent_traversal(raw_name)
+    if batch.source == "heuristic" and raw_name.lower() != {"video": "clip.mp4", "tracks": "tracks.json", "metadata": "metadata.json", "annotation": "annotation.json"}[role]:
+        raise HTTPException(400, detail="Heuristic inputs require exact four-file names")
 
     settings = request.app.state.settings
 
@@ -822,7 +829,7 @@ async def upload_batch_file(
         suffix = f".{ext}" if ext else ".mp4"
         dir_path = settings.videos_dir.resolve()
     elif role == "tracks":
-        suffix = ALLOWED_TRACKS_EXT
+        suffix = ".json" if batch.source == "heuristic" else ALLOWED_TRACKS_EXT
         dir_path = settings.detection_imports_dir.resolve()
     else:  # metadata
         suffix = ALLOWED_METADATA_EXT
@@ -964,6 +971,7 @@ def complete_import_batch(
         batch.video_upload_state,
         batch.tracks_upload_state,
         batch.metadata_upload_state,
+        batch.annotation_upload_state,
     ):
         raise HTTPException(status_code=409, detail="Import batch has a file upload in progress")
 
@@ -989,6 +997,10 @@ def complete_import_batch(
 
     if batch.status != "uploading":
         raise HTTPException(status_code=409, detail="Import batch cannot be completed in its current state")
+    from ..media_preflight import check_processor_dependencies
+    check_processor_dependencies(request.app.state.media_worker.processor)
+    if batch.source == "heuristic":
+        return _complete_heuristic(db, batch, request, membership, assignee_membership_id)
 
     if batch.video_upload_state != "uploaded" or not batch.video_path:
         raise HTTPException(status_code=400, detail="Video file must be uploaded before completing the batch")
@@ -1236,6 +1248,8 @@ def _build_ready_response(db: Session, batch: VideoImportBatch, imp: DetectionIm
             "revision": imp.revision,
             "detection_count": imp.detection_count,
             "status": "ready",
+            "source": batch.source,
+            "judgment_status": db.get(Video, batch.created_video_id).judgment_status,
             "message": "Detection import completed successfully.",
         }
     else:
@@ -1250,6 +1264,75 @@ def _build_video_only_response(batch: VideoImportBatch) -> dict:
         "status": "video_only" if batch.status == "video_only" else "ready",
         "message": "Video created. No detection data imported (tracks/metadata missing). Mouse ID features unavailable.",
     }
+
+
+def _complete_heuristic(db, batch, request, membership, assignee_membership_id):
+    from ..heuristic_judgment import prepare_input
+    from ..media import MediaDependencyError
+    for role in ("video", "tracks", "metadata", "annotation"):
+        if getattr(batch, role + "_upload_state") != "uploaded" or not getattr(batch, role + "_path"):
+            raise HTTPException(400, detail="All four heuristic files must be uploaded")
+    batch_id, project_id = batch.id, batch.project_id
+    filters = [VideoImportBatch.id == batch_id, VideoImportBatch.status == "uploading",
+               VideoImportBatch.created_video_id.is_(None)]
+    filters.extend(getattr(VideoImportBatch, role + "_upload_state") == "uploaded"
+                   for role in ("video", "tracks", "metadata", "annotation"))
+    if db.query(VideoImportBatch).filter(*filters).update(
+            {"status": "processing", "updated_at": datetime.utcnow()}, synchronize_session=False) != 1:
+        db.rollback()
+        raise HTTPException(409, detail="Import batch state changed concurrently")
+    db.commit()
+    settings = request.app.state.settings
+    try:
+        db.expire_all()
+        batch = _require_batch(db, batch_id, project_id)
+        evidence, (meta, frames, detections), tracks_name, meta_name = prepare_input(
+            batch, settings, request.app.state.media_worker.processor)
+        # First publication is one transaction. No Video exists during validation.
+        db.query(VideoImportBatch).filter_by(id=batch_id, status="processing").update(
+            {"updated_at": datetime.utcnow()}, synchronize_session=False)
+        db.expire_all()
+        batch = _require_batch(db, batch_id, project_id)
+        if batch.status != "processing" or batch.created_video_id is not None:
+            raise HTTPException(409, detail="Import batch state changed concurrently")
+        video = Video(project_id=project_id, filename="clip.mp4", storage_path=batch.video_path,
+                      source="heuristic", judgment_status="pending", heuristic_input=evidence,
+                      source_sha256=evidence["sha256"]["video"], status="uploaded", workflow_status="draft",
+                      fps=meta["fps"], width=meta["width"], height=meta["height"],
+                      duration=meta["frame_count"] / meta["fps"], detection_import_revision=1,
+                      uploaded_by=membership.user_id, assignee_membership_id=assignee_membership_id)
+        db.add(video)
+        db.flush()
+        imp = _insert_detection_import_data(db=db, video_id=video.id, revision=1, meta_info=meta,
+            tracks_rel_path=tracks_name, metadata_rel_path=meta_name, seen_frames=frames,
+            flat_detections=detections, user_id=membership.user_id,
+            detection_imports_dir=settings.detection_imports_dir)
+        batch.created_video_id, batch.status = video.id, "ready"
+        batch.updated_at = datetime.utcnow()
+        job_id = enqueue_for_video(db, video, settings)
+        db.commit()
+    except MediaDependencyError:
+        db.rollback()
+        batch = _require_batch(db, batch_id, project_id)
+        # No publication survived rollback; retain uploaded originals for retry.
+        batch.status, batch.updated_at = "uploading", datetime.utcnow()
+        db.commit()
+        raise
+    except Exception as exc:
+        db.rollback()
+        # A failed commit may have succeeded on disk; never clean a published batch.
+        db.expire_all()
+        batch = _require_batch(db, batch_id, project_id)
+        if batch.status == "ready" and batch.created_video_id:
+            return _build_ready_response(db, batch)
+        batch.status, batch.updated_at = "failed", datetime.utcnow()
+        detail = exc.detail if isinstance(exc, HTTPException) else {"code": "import_failed"}
+        batch.validation_errors = detail
+        db.commit()
+        return {"batch_id": batch_id, "source": "heuristic", "status": "failed",
+                "validation_errors": detail, "message": "Validation failed; cancel this batch and retry"}
+    submit_after_commit(request, job_id)
+    return _build_ready_response(db, batch, imp)
 
 
 @router.get(
@@ -1294,6 +1377,7 @@ async def replace_detection_import(
         raise HTTPException(status_code=403, detail="Project membership is not active")
 
     video = _require_video(db, video_id, project_id)
+    reject_heuristic(video)
     initial_active = db.query(DetectionImport).filter_by(video_id=video_id, active=True).first()
     initial_active_id = initial_active.id if initial_active else None
     initial_edit_version = initial_active.edit_version if initial_active else None
@@ -1392,6 +1476,7 @@ async def replace_detection_import(
             expected_edit_version=initial_edit_version,
         ) as state:
             video = state.video
+            reject_heuristic(video)
             assert_video_not_final_approved(db, video)
             new_revision = video.detection_import_revision + 1
             old_active = state.detection_import
@@ -1727,6 +1812,7 @@ def export_corrected_detections(
 ):
     _project, membership = access
     video = _require_video(db, video_id, project_id)
+    reject_heuristic(video, "heuristic_snapshot_export_required")
 
     imp = db.query(DetectionImport).filter(
         DetectionImport.video_id == video_id, DetectionImport.active == True

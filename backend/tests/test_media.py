@@ -400,12 +400,14 @@ def test_sqlite_engine_enables_wal_and_busy_timeout(tmp_path):
         assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 15000
 
 
-def test_media_error_truncates_stderr(monkeypatch, tmp_path):
+def test_media_error_does_not_expose_stderr(monkeypatch, tmp_path):
     proc = _proc()
 
     def fake_run(cmd, **kwargs):
         import subprocess as sp
 
+        if cmd[1:] == ["-version"]:
+            return sp.CompletedProcess(cmd, 0, "ffmpeg version test", "")
         if cmd[0] == "ffprobe":
             return sp.CompletedProcess(cmd, 0, '{"frames":[{"best_effort_timestamp_time":"0"}]}', "")
         return sp.CompletedProcess(cmd, 1, "", "E" * 10000)
@@ -416,8 +418,8 @@ def test_media_error_truncates_stderr(monkeypatch, tmp_path):
         proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
     msg = str(exc.value)
     assert "Media command failed (exit 1)" in msg
-    assert "truncated" in msg
-    assert len(msg) < 5000
+    assert "E" * 10 not in msg
+    assert len(msg) < 200
 
 
 def test_media_command_timeout(monkeypatch, tmp_path):
@@ -438,7 +440,7 @@ def test_missing_executable_reports_clearly(tmp_path):
     proc = _proc(ffmpeg_path="definitely-not-a-real-ffmpeg-binary-xyz123")
     proc.ffprobe = proc.ffmpeg
     source = tmp_path / "in.mp4"; source.write_bytes(b"x")
-    with pytest.raises(MediaCommandError, match="Media executable not found"):
+    with pytest.raises(MediaCommandError, match="media_dependency_unavailable"):
         proc.render_clip(input_path=str(source), start_frame=0, frames=25, output_path="out.mp4", fps=25.0)
 
 

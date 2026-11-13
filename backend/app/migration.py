@@ -40,7 +40,7 @@ VERSION_TABLE = "alembic_version"
 
 # 已知迁移版本（迁移脚本 migrations/versions/ 中的 revision 字面量）
 KNOWN_REVISIONS = frozenset(
-    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020"}
+    {"0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022"}
 )
 
 # 0001 baseline 建立的 6 张 P1 核心表
@@ -113,8 +113,8 @@ def _migration_backup_path(path: Path) -> Path:
 
 
 def _restore_sqlite_backup(path: Path, backup: Path) -> None:
-    for suffix in ("-wal", "-shm"):
-        Path(str(path) + suffix).unlink(missing_ok=True)
+    # Restore through SQLite so pooled readers keep valid handles and WAL is
+    # updated atomically; deleting a live WAL loses data and fails on Windows.
     with closing(sqlite3.connect(backup)) as source, closing(sqlite3.connect(path)) as target:
         source.backup(target)
 

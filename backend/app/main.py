@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import ExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import database as db_mod
 from . import models  # noqa: F401  确保表注册到 Base.metadata
@@ -16,7 +18,8 @@ from .export_jobs import ExportWorker
 from .display_proxy_jobs import DisplayProxyWorker
 from .display_proxy_observability import configure_display_proxy_observability
 from .display_proxy_processor import DisplayProxyProcessor
-from .media import FfmpegMediaProcessor, MediaProcessor
+from .media import FfmpegMediaProcessor, MediaProcessor, MediaDependencyError
+from .media_preflight import MediaUploadGate, check_processor_dependencies
 from .media_jobs import MediaWorker
 from .video_delete_service import VideoDeleteService
 from .video_operation_gate import VideoOperationGateCoordinator
@@ -103,6 +106,12 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        try:
+            check_processor_dependencies(processor)
+        except MediaDependencyError as exc:
+            if s.is_production:
+                raise
+            logging.getLogger(__name__).error("%s", exc)
         # ExitStack also rolls back already-started workers when a later startup fails.
         with ExitStack() as startup:
             # 删除恢复必须先于 worker 恢复/调度，避免残留文件被重新消费或发布。
@@ -132,6 +141,12 @@ def create_app(
     app.state.video_operation_gate = video_operation_gate
     app.state.video_delete_service = video_delete_service
     app.state.display_proxy_worker = display_worker
+    app.add_middleware(MediaUploadGate)
+
+    @app.exception_handler(MediaDependencyError)
+    async def media_dependency_unavailable(_request, exc):
+        return JSONResponse({"detail": exc.detail}, status_code=503)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origin_list,

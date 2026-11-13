@@ -272,8 +272,10 @@ export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptio
       }
 
       let msg = `上传失败（HTTP ${status}）`;
+      let rawDetail: unknown;
       try {
-        const detail = extractDetail(JSON.parse(xhr.responseText) as unknown);
+        rawDetail = JSON.parse(xhr.responseText) as unknown;
+        const detail = extractDetail(rawDetail);
         if (detail) msg = detail;
       } catch {
         // 响应体不是 JSON，保留默认文案
@@ -282,7 +284,10 @@ export function uploadFile<T>(path: string, file: Blob, options: UploadFileOptio
       if (status === 507) {
         msg = "服务器磁盘空间不足，无法保存该视频。请先清理服务器磁盘空间后重试。";
       }
-      reject(new ApiError(status, msg));
+      const metadata = rawDetail && typeof rawDetail === "object" ? rawDetail as Record<string, unknown> : {};
+      reject(new ApiError(status, msg, rawDetail,
+        typeof metadata.code === "string" ? metadata.code : undefined,
+        metadata.context && typeof metadata.context === "object" && !Array.isArray(metadata.context) ? metadata.context as Record<string, unknown> : undefined));
     });
 
     xhr.addEventListener("error", () => {

@@ -233,6 +233,8 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport, settin
         reason = None
         if category is None or category.project_id != video.project_id:
             reason = "Category does not belong to the video's project"
+        elif not category.is_active:
+            reason = "Category is disabled"
         elif ann.video_id != video.id:
             reason = "Annotation does not belong to the video"
         elif ann.confidence not in {"certain", "uncertain", "occluded"}:
@@ -323,6 +325,12 @@ def validate_annotations(db: Session, video: Video, imp: DetectionImport, settin
 def create_submission(db: Session, settings, video: Video, imp: DetectionImport, submitter_id: int,
                       *, source_identity: tuple[str, str, FileIdentity]) -> Submission:
     assert_video_not_final_approved(db, video)
+    if video.source == "heuristic":
+        if (video.judgment_status != "usable" or video.workflow_status in {"approved", "unusable"}
+                or db.query(Annotation).filter_by(video_id=video.id).count() != 1):
+            raise HTTPException(409, detail={"code": "heuristic_usable_required"})
+        if source_identity[1] != video.heuristic_input["sha256"]["video"]:
+            raise HTTPException(409, detail={"code": "heuristic_source_changed"})
     if imp.video_id != video.id or not imp.active:
         raise HTTPException(status_code=409, detail="Active detection import does not belong to video")
     if db.query(Submission.id).filter_by(video_id=video.id, status="submitted").first():
@@ -373,7 +381,8 @@ def create_submission(db: Session, settings, video: Video, imp: DetectionImport,
     ) for ann, category in rows])
     db.flush()
     db.expire(submission, ["annotations"])
-    carry_approved_decisions(db, submission)
+    if video.source != "heuristic":
+        carry_approved_decisions(db, submission)
     _fault("submission_annotations")
     video.workflow_status = "submitted"
     video.submitted_at = submission.submitted_at

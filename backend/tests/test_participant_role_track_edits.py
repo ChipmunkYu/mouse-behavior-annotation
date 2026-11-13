@@ -299,14 +299,15 @@ def test_role_submission_snapshots_are_complete_immutable_and_review_authoritati
     setup = _setup(ctx)
     headers, project_id, video_id, categories = setup
     first, second = _keys(setup)
-    ann = _annotation(ctx, setup, {first: [1], second: []})
+    ann = _annotation(ctx, setup, {first: [1], second: [2]})
     submit_url = f"/api/projects/{project_id}/videos/{video_id}/submit"
-    incomplete = ctx.client.post(submit_url, headers=headers)
-    assert incomplete.status_code == 400
-    completed = ctx.client.patch(
+    incomplete = ctx.client.patch(
         f"/api/projects/{project_id}/videos/{video_id}/annotations/{ann['id']}",
-        json={"participant_roles": {first: [1], second: [2]}}, headers=headers)
-    assert completed.status_code == 200, completed.text
+        json={"participant_roles": {first: [1], second: []}}, headers=headers)
+    assert incomplete.status_code == 400
+    current = ctx.client.get(
+        f"/api/projects/{project_id}/videos/{video_id}/annotations", headers=headers).json()[0]
+    assert current["participant_roles"] == {first: [1], second: [2]}
     assert ctx.client.post(submit_url, headers=headers).status_code == 200
 
     with ctx.session_factory() as db:

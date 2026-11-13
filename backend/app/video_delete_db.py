@@ -146,6 +146,8 @@ def _authorize(db: Session, project_id: int, video_id: int, actor_user_id: int) 
                           ProjectMembership.user_id == actor_user_id).one_or_none())
     if membership is None or membership.status != "active" or membership.role not in {"owner", "admin"}:
         raise VideoDeleteForbiddenError("An active project owner or admin is required")
+    if video.source == "heuristic":
+        raise VideoDeleteConflictError("Use unusable to end heuristic input", code="heuristic_judgment_required")
     if video.workflow_status not in {"draft", "rejected"}:
         raise VideoDeleteConflictError(
             "Only draft or rejected videos may be deleted",

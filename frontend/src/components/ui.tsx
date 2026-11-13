@@ -27,6 +27,7 @@ const STATUS_LABELS: Record<string, string> = {
   needs_transcode: "待转码",
   error: "异常",
   archived: "已归档",
+  unusable: "不可用",
   certain: "确定",
   uncertain: "不确定",
   occluded: "被遮挡",
@@ -48,6 +49,7 @@ const WORKFLOW_STATUS_LABELS: Record<string, string> = {
   submitted: "待审核",
   approved: "审核通过",
   rejected: "已驳回",
+  unusable: "不可用",
 };
 
 export function workflowStatusLabel(value: string): string {

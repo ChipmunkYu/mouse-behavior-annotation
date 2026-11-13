@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch, operationalErrorDetail } from "./client";
+import { ApiError, apiFetch, operationalErrorDetail, uploadFile } from "./client";
+import { uploadErrorMessage } from "../upload/uploadTasks";
 import { actionError, deleteError } from "../pages/VideosPage";
 import { friendlyError } from "../pages/ProjectManagementPage";
 
@@ -23,6 +24,26 @@ describe("stable operational errors", () => {
     });
     expect(operationalErrorDetail(new ApiError(409, "legacy", { detail: "legacy" }))).toBeNull();
     expect(operationalErrorDetail(new Error("plain"))).toBeNull();
+  });
+
+  it("multipart错误也保留结构化ApiError detail供上传任务安全展示", async () => {
+    const payload = { detail: { code: "invalid_tracks", validation_errors: [{ message: "帧号不合法", path: "tracks[0].frame" }] } };
+    vi.stubGlobal("localStorage", { getItem: () => null });
+    vi.stubGlobal("XMLHttpRequest", class {
+      status = 400;
+      responseText = JSON.stringify(payload);
+      upload = { addEventListener: vi.fn() };
+      listeners = new Map<string, () => void>();
+      open() {}
+      setRequestHeader() {}
+      addEventListener(name: string, callback: () => void) { this.listeners.set(name, callback); }
+      send() { this.listeners.get("load")?.(); }
+    });
+    const error = await uploadFile("/upload", new Blob(["bad"])).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).detail).toEqual(payload);
+    expect(uploadErrorMessage(error)).toContain("invalid_tracks");
+    expect(uploadErrorMessage(error)).toContain("tracks[0].frame");
   });
 
   it("preserves response details while exposing top-level operational metadata", async () => {

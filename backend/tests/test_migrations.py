@@ -44,6 +44,103 @@ from app.models import (
     VideoImportBatch,
 )
 
+
+@pytest.mark.parametrize("old_check", [False, True])
+def test_0022_upgrades_applied_0021_without_losing_rows_or_triggers(tmp_path, old_check):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    from app.authority_triggers import TRIGGERS
+
+    url = _settings(tmp_path, "forward-0022.db").resolved_database_url
+    upgrade_to(url, "0021")
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        _uid, _pid, vid = _make_full_project_with_video(db)
+    with db_mod.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TRIGGER custom_video_guard BEFORE DELETE ON videos BEGIN SELECT RAISE(ABORT,'custom'); END")
+        if old_check:
+            triggers = conn.exec_driver_sql("SELECT name,sql FROM sqlite_master WHERE type='trigger'").all()
+            for name, _sql in triggers:
+                conn.exec_driver_sql(f'DROP TRIGGER "{name}"')
+            with Operations(MigrationContext.configure(conn)).batch_alter_table("submissions") as batch:
+                batch.drop_constraint("ck_submissions_status", type_="check")
+                batch.create_check_constraint("ck_submissions_status", "status IN ('submitted','withdrawn','approved','rejected','superseded')")
+            for name, sql in triggers:
+                if name == "trg_submission_lifecycle":
+                    sql = sql.replace(",'unusable'", "")
+                conn.exec_driver_sql(sql)
+        before = conn.execute(text("SELECT * FROM videos")).all()
+    run_migrations(url)
+    run_migrations(url)
+    assert current_revision(url) == "0022"
+    with db_mod.engine.connect() as conn:
+        assert conn.execute(text("SELECT * FROM videos")).all() == before
+        assert conn.execute(text("SELECT id FROM videos WHERE id=:v"), {"v": vid}).scalar_one() == vid
+        check = next(c for c in sa_inspect(conn).get_check_constraints("submissions") if c["name"] == "ck_submissions_status")
+        assert "unusable" in check["sqltext"]
+        triggers = dict(conn.exec_driver_sql("SELECT name,sql FROM sqlite_master WHERE type='trigger'").all())
+        assert set(TRIGGERS) | {"custom_video_guard"} <= set(triggers)
+        assert "'unusable'" in triggers["trg_submission_lifecycle"]
+        assert conn.exec_driver_sql("PRAGMA quick_check").all() == [("ok",)]
+        assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+
+def test_0021_backfill_round_trip_and_input_constraints(tmp_path):
+    from sqlalchemy import text
+    from app.authority_triggers import TRIGGERS
+    url = _settings(tmp_path, "heuristic-0021.db").resolved_database_url
+    upgrade_to(url, "0020")
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        _uid, _pid, vid = _make_full_project_with_video(db)
+    upgrade_to(url, "0021")
+    with db_mod.engine.connect() as conn:
+        assert conn.execute(text("SELECT source,judgment_status,heuristic_input FROM videos WHERE id=:v"), {"v": vid}).one() == ("manual", None, None)
+        submission_status = next(c for c in sa_inspect(conn).get_check_constraints("submissions")
+                                 if c["name"] == "ck_submissions_status")
+        assert "unusable" in submission_status["sqltext"]
+        actual = set(conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'")).scalars())
+        assert set(TRIGGERS) <= actual
+        assert conn.execute(text("PRAGMA foreign_key_check")).all() == []
+    with pytest.raises(IntegrityError, match="immutable"):
+        with db_mod.engine.begin() as conn:
+            conn.execute(text("UPDATE videos SET source='heuristic' WHERE id=:v"), {"v": vid})
+    downgrade_to(url, "0020")
+    assert "source" not in {c["name"] for c in sa_inspect(db_mod.engine).get_columns("videos")}
+    upgrade_to(url, "0021")
+    with db_mod.engine.connect() as conn:
+        assert conn.execute(text("SELECT source FROM videos WHERE id=:v"), {"v": vid}).scalar_one() == "manual"
+        assert conn.execute(text("PRAGMA foreign_key_check")).all() == []
+
+@pytest.mark.parametrize("evidence", ["batch", "video"])
+def test_0021_downgrade_keeps_heuristic_evidence_and_triggers(tmp_path, evidence):
+    from sqlalchemy import text
+    from app.authority_triggers import TRIGGERS
+    url = _settings(tmp_path, "heuristic-refuse-downgrade.db").resolved_database_url
+    upgrade_to(url, "0021")
+    db_mod.configure_engine(url)
+    with db_mod.SessionLocal() as db:
+        uid, pid, _vid = _make_full_project_with_video(db)
+        if evidence == "batch":
+            db.execute(text("INSERT INTO video_import_batches(project_id,created_by,source,status,"
+                            "video_upload_state,tracks_upload_state,metadata_upload_state,created_at,updated_at) "
+                            "VALUES (:p,:u,'heuristic','uploading','pending','pending','pending',"
+                            "CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"), {"p": pid, "u": uid})
+        else:
+            db.execute(text("INSERT INTO videos(project_id,filename,status,source,judgment_status,heuristic_input,created_at) "
+                            "VALUES (:p,'clip.mp4','uploaded','heuristic','pending','{}',CURRENT_TIMESTAMP)"), {"p": pid})
+        db.commit()
+    with pytest.raises(RuntimeError, match="heuristic evidence"):
+        downgrade_to(url, "0020")
+    assert current_revision(url) == "0021"
+    with db_mod.engine.connect() as conn:
+        table = "video_import_batches" if evidence == "batch" else "videos"
+        assert conn.execute(text(f"SELECT count(*) FROM {table} WHERE source='heuristic'")).scalar_one() == 1
+        assert set(TRIGGERS) <= set(conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'")).scalars())
+        assert conn.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
 P1_TABLES = [
     "users",
     "projects",
@@ -538,7 +635,7 @@ def test_0016_historical_row_and_round_trip_preserve_data_and_triggers(tmp_path)
             "VALUES (1,'display','running',0,0,CURRENT_TIMESTAMP)"
         ))
 
-    expected_triggers = (set(AUTHORITY_TRIGGERS) - {
+    expected_triggers = ({name for name in AUTHORITY_TRIGGERS if not name.startswith("trg_heuristic_")} - {
         "trg_behavior_decision_update", "trg_behavior_decision_delete",
         "trg_behavior_reopen_update", "trg_behavior_reopen_delete",
     }) | set(ASSIGNEE_TRIGGERS)
@@ -615,7 +712,7 @@ def test_failed_0017_restores_schema_version_and_authority_triggers(tmp_path, mo
             triggers = set(conn.execute(text(
                 "SELECT name FROM sqlite_master WHERE type='trigger'"
             )).scalars())
-        assert set(TRIGGERS) - {
+        assert {name for name in TRIGGERS if not name.startswith("trg_heuristic_")} - {
             "trg_behavior_decision_update", "trg_behavior_decision_delete",
             "trg_behavior_reopen_update", "trg_behavior_reopen_delete",
         } <= triggers
@@ -624,7 +721,7 @@ def test_failed_0017_restores_schema_version_and_authority_triggers(tmp_path, mo
     assert not (tmp_path / "failed-0017.db.pre-migration").exists()
     monkeypatch.undo()
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
 
 def test_p1_old_db_upgrade_preserves_data(tmp_path):
@@ -748,7 +845,7 @@ def test_existing_0002_db_to_0004(tmp_path):
     assert _fk_options(url, "videos", "uploaded_by").get("ondelete") is None
 
     run_migrations(url)  # 0002 → head（0005）
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     assert _fk_options(url, "videos", "uploaded_by")["ondelete"] == "SET NULL"
     assert _fk_options(url, "annotations", "reviewer_id")["ondelete"] == "SET NULL"
     assert _fk_options(url, "projects", "created_by")["ondelete"] == "RESTRICT"
@@ -767,7 +864,7 @@ def test_existing_0002_db_to_0004(tmp_path):
 
     # 重复运行幂等，版本与数据不变
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         assert db.query(Video).count() == 1
         assert db.query(Annotation).count() == 1
@@ -841,7 +938,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     with db_mod.SessionLocal() as db:
         # 旧数据保留
@@ -873,7 +970,7 @@ def test_existing_0004_db_to_0005_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         assert db.query(Annotation).count() == 1
 
@@ -1065,7 +1162,7 @@ def test_empty_version_table_defect_regression(tmp_path):
     state = run_migrations(url)
     assert state == "unversioned_p1"
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     db_mod.configure_engine(url)
     with db_mod.SessionLocal() as db:
@@ -1115,7 +1212,7 @@ def test_empty_version_table_only_db_is_empty(tmp_path):
     assert inspect_state(url) == "empty"
     run_migrations(url)
     assert inspect_state(url) == "versioned"
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1186,7 +1283,7 @@ def test_current_revision_reporting(tmp_path):
     url = settings.resolved_database_url
     assert current_revision(url) is None
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
 
 def test_cli_check_distinguishes_empty_version_table(tmp_path):
@@ -1242,7 +1339,7 @@ def test_cli_check_reports_versioned_revision(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "已版本化" in proc.stdout
-    assert "0018" in proc.stdout
+    assert schema_head() in proc.stdout
 
 
 
@@ -1403,7 +1500,7 @@ def test_0004_fresh_db_adds_dedupe_and_attempts(tmp_path):
     settings = _settings(tmp_path, "v0004.db")
     url = settings.resolved_database_url
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     db_mod.configure_engine(url)
     insp = sa_inspect(db_mod.engine)
@@ -1448,7 +1545,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         job = db.query(BackgroundJob).one()
         assert job.job_type == "media"
@@ -1458,7 +1555,7 @@ def test_0003_db_upgrade_to_0004_preserves_data(tmp_path):
 
     # 重复运行幂等
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         assert db.query(BackgroundJob).count() == 1
 
@@ -1564,7 +1661,7 @@ def test_0005_category_mouse_count_data_migration(tmp_path):
             )
 
     run_migrations(url)  # 0004 → 0005：加列 + 数据迁移
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
 
     with db_mod.SessionLocal() as db:
         assert db.query(BehaviorCategory).count() == 12
@@ -1858,7 +1955,7 @@ def test_0005_downgrade_to_0004_then_upgrade(tmp_path):
 
     # 再升级回 0005：schema 恢复、数据保留、类别数据迁移重放
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         video = db.query(Video).one()
         assert video.media_revision == 1
@@ -1900,7 +1997,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         )
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -1922,7 +2019,7 @@ def test_0007_upgrades_deployed_0006_and_preserves_detection_import(tmp_path):
         assert row == (1, "imports/tracks.jsonl", "imported")
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     columns = {c["name"] for c in sa_inspect(db_mod.engine).get_columns("detection_imports")}
     assert "source_relative" in columns
     with db_mod.SessionLocal() as db:
@@ -2032,7 +2129,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
             conn.execute(text(sql), params)
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.engine.connect() as conn:
         imports = conn.execute(
             text(
@@ -2054,7 +2151,7 @@ def test_0008_backfills_current_sparse_state_and_monotonic_cursor(tmp_path):
 
     # ensure_schema/run_migrations remains idempotent and does not duplicate backfill rows.
     db_mod.ensure_schema(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM detection_state_overrides")).scalar() == 2
 
@@ -2167,7 +2264,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
     fresh_url = _settings(tmp_path, "v0010_fresh.db").resolved_database_url
     run_migrations(fresh_url)
     fresh_engine = create_engine(fresh_url)
-    assert current_revision(fresh_url) == "0018"
+    assert current_revision(fresh_url) == schema_head()
     assert {"raw_digest", "state_digest", "metadata_digest"} <= {
         column["name"] for column in inspect(fresh_engine).get_columns("detection_snapshots")
     }
@@ -2202,7 +2299,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         ))
 
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         snapshot = db.get(models.DetectionSnapshot, 93)
         assert all(len(getattr(snapshot, name)) == 64 for name in
@@ -2215,7 +2312,7 @@ def test_0010_fresh_schema_and_0009_round_trip_backfills_runtime_digests(tmp_pat
         column["name"] for column in sa_inspect(db_mod.engine).get_columns("detection_snapshots")
     })
     run_migrations(url)
-    assert current_revision(url) == "0018"
+    assert current_revision(url) == schema_head()
     with db_mod.SessionLocal() as db:
         assert validate_snapshot_integrity(db, db.get(models.DetectionSnapshot, 93)).id == 91
 

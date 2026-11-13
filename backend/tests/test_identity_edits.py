@@ -480,6 +480,7 @@ def test_two_sessions_same_base_only_first_cas_succeeds(ctx, login_headers):
         draft_detection_edits.commit_suppress(
             first, imp1, video1, track_id=1, expected_version=0, operator_id=1
         )
+        first.commit()  # Transaction ownership now belongs to the caller.
         with pytest.raises(HTTPException) as exc_info:
             draft_detection_edits.commit_suppress(
                 second, imp2, video2, track_id=2, expected_version=0, operator_id=1

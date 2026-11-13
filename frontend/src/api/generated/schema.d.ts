@@ -904,6 +904,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/videos/{video_id}/judgment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Judgment */
+        get: operations["get_judgment_api_projects__project_id__videos__video_id__judgment_get"];
+        /** Put Judgment */
+        put: operations["put_judgment_api_projects__project_id__videos__video_id__judgment_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/videos/{video_id}/media-status": {
         parameters: {
             query?: never;
@@ -1363,6 +1381,11 @@ export interface components {
          */
         BatchStatusOut: {
             /**
+             * Annotation Upload State
+             * @default pending
+             */
+            annotation_upload_state: string;
+            /**
              * Created At
              * Format: date-time
              */
@@ -1377,6 +1400,12 @@ export interface components {
             metadata_upload_state: string;
             /** Project Id */
             project_id: number;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
             /** Status */
             status: string;
             /** Tracks Upload State */
@@ -1785,6 +1814,12 @@ export interface components {
              * @default []
              */
             role_definitions: components["schemas"]["RoleDefinitionOut"][];
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
             /** Start Frame */
             start_frame: number;
             /** Start Time */
@@ -2011,12 +2046,20 @@ export interface components {
         ExportRequest: {
             /** Category Ids */
             category_ids?: number[] | null;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic" | "all";
         };
         /**
          * ExportStatusOut
          * @description 导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。
          */
         ExportStatusOut: {
+            /** Category Ids */
+            category_ids?: number[] | null;
             /** Exportable Count */
             exportable_count: number;
             latest_job?: components["schemas"]["JobOut"] | null;
@@ -2026,6 +2069,12 @@ export interface components {
             missing_count: number;
             /** Ready Count */
             ready_count: number;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic" | "all";
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2057,6 +2106,15 @@ export interface components {
              * @enum {string}
              */
             operation: "split" | "merge";
+            /**
+             * Participant Confirmation Required
+             * @default false
+             */
+            participant_confirmation_required: boolean;
+            /** Proposed Selection */
+            proposed_selection?: {
+                [key: string]: unknown;
+            } | null;
             /** Retained Display Track Id */
             retained_display_track_id?: number | null;
             /** Split Frame */
@@ -2068,6 +2126,12 @@ export interface components {
             base_detection_import_revision: number;
             /** Base Identity Revision */
             base_identity_revision: number;
+            /** Expected Annotation Revision */
+            expected_annotation_revision?: number | null;
+            /** Expected Decision Revision */
+            expected_decision_revision?: number | null;
+            /** Expected Submission Id */
+            expected_submission_id?: number | null;
             /** Frame */
             frame?: number | null;
             /**
@@ -2084,6 +2148,13 @@ export interface components {
             base_detection_import_revision: number;
             /** Base Identity Revision */
             base_identity_revision: number;
+            confirmed_selection?: components["schemas"]["JudgmentSelectionIn"] | null;
+            /** Expected Annotation Revision */
+            expected_annotation_revision?: number | null;
+            /** Expected Decision Revision */
+            expected_decision_revision?: number | null;
+            /** Expected Submission Id */
+            expected_submission_id?: number | null;
             /** Frame */
             frame?: number | null;
             /**
@@ -2134,6 +2205,13 @@ export interface components {
             affected_detection_count?: number | null;
             /** Affected Track Ids */
             affected_track_ids?: number[] | null;
+            /** Annotation Revision */
+            annotation_revision?: number | null;
+            /**
+             * Decision Revision
+             * @default 0
+             */
+            decision_revision: number;
             /** Edit Id */
             edit_id?: number | null;
             /** Freed Detection Count */
@@ -2156,6 +2234,12 @@ export interface components {
             retained_display_track_id?: number | null;
             /** Reverted Edit Id */
             reverted_edit_id?: number | null;
+            /** Selection */
+            selection?: {
+                [key: string]: unknown;
+            } | null;
+            /** Submission Id */
+            submission_id?: number | null;
             /** Suppression Id */
             suppression_id?: number | null;
         };
@@ -2165,6 +2249,12 @@ export interface components {
             base_detection_import_revision: number;
             /** Base Identity Revision */
             base_identity_revision: number;
+            /** Expected Annotation Revision */
+            expected_annotation_revision?: number | null;
+            /** Expected Decision Revision */
+            expected_decision_revision?: number | null;
+            /** Expected Submission Id */
+            expected_submission_id?: number | null;
         };
         /** InviteOut */
         InviteOut: {
@@ -2207,6 +2297,122 @@ export interface components {
         JoinProjectRequest: {
             /** Invite Code */
             invite_code: string;
+        };
+        /** JudgmentFrameRangeOut */
+        JudgmentFrameRangeOut: {
+            /** End */
+            end: number;
+            /** Start */
+            start: number;
+        };
+        /** JudgmentOut */
+        JudgmentOut: {
+            /** Annotation Revision */
+            annotation_revision: number;
+            /**
+             * Decision Revision
+             * @default 0
+             */
+            decision_revision: number;
+            /** Detection Import Revision */
+            detection_import_revision: number;
+            /** Identity Revision */
+            identity_revision: number;
+            input: components["schemas"]["JudgmentSuggestionOut"];
+            /**
+             * Judgment Status
+             * @enum {string}
+             */
+            judgment_status: "pending" | "usable" | "unusable";
+            selection?: components["schemas"]["JudgmentSelectionOut"] | null;
+            /**
+             * Source
+             * @default heuristic
+             * @constant
+             */
+            source: "heuristic";
+            /** Submission Id */
+            submission_id?: number | null;
+            /** Video Id */
+            video_id: number;
+            /** Workflow Status */
+            workflow_status: string;
+        };
+        /** JudgmentPut */
+        JudgmentPut: {
+            /** Base Detection Import Revision */
+            base_detection_import_revision: number;
+            /** Base Identity Revision */
+            base_identity_revision: number;
+            /** Category Id */
+            category_id?: number | null;
+            /** Expected Annotation Revision */
+            expected_annotation_revision: number;
+            /** Expected Decision Revision */
+            expected_decision_revision: number | null;
+            /** Expected Submission Id */
+            expected_submission_id: number | null;
+            /**
+             * Judgment Status
+             * @enum {string}
+             */
+            judgment_status: "usable" | "unusable";
+            /** Mouse Ids */
+            mouse_ids?: number[] | null;
+            /** Participant Roles */
+            participant_roles?: {
+                [key: string]: number[];
+            } | null;
+        };
+        /** JudgmentSelectionIn */
+        JudgmentSelectionIn: {
+            /** Category Id */
+            category_id: number;
+            /** Mouse Ids */
+            mouse_ids?: number[] | null;
+            /** Participant Roles */
+            participant_roles?: {
+                [key: string]: number[];
+            };
+        };
+        /** JudgmentSelectionOut */
+        JudgmentSelectionOut: {
+            /** Annotation Id */
+            annotation_id: number;
+            /** Category Id */
+            category_id: number;
+            /** Mouse Ids */
+            mouse_ids: number[];
+            /** Participant Roles */
+            participant_roles: {
+                [key: string]: number[];
+            };
+        };
+        /** JudgmentSuggestionOut */
+        JudgmentSuggestionOut: {
+            /** Actor Id */
+            actor_id?: number | null;
+            /** Behavior */
+            behavior?: string | null;
+            /** Canonical Behavior */
+            canonical_behavior?: string | null;
+            /** Confidence */
+            confidence?: string | null;
+            frame_range: components["schemas"]["JudgmentFrameRangeOut"];
+            /** Mouse Ids */
+            mouse_ids?: number[] | null;
+            /** Participants */
+            participants?: unknown[] | null;
+            /** Target Id */
+            target_id?: number | null;
+            time_range: components["schemas"]["JudgmentTimeRangeOut"];
+        };
+        /** JudgmentTimeRangeOut */
+        JudgmentTimeRangeOut: {
+            /** End */
+            end: number;
+            /** Start */
+            start: number;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -2345,7 +2551,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "approved" | "rejected";
+            result: "approved" | "rejected" | "unusable";
         };
         /** ReviewOut */
         ReviewOut: {
@@ -2376,7 +2582,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "approved" | "rejected";
+            result: "approved" | "rejected" | "unusable";
             /** Reviewer */
             reviewer?: string | null;
             /** Reviewer Id */
@@ -2393,6 +2599,12 @@ export interface components {
         };
         /** ReviewSubmissionContextIn */
         ReviewSubmissionContextIn: {
+            /** Base Detection Import Revision */
+            base_detection_import_revision?: number | null;
+            /** Base Identity Revision */
+            base_identity_revision?: number | null;
+            /** Expected Annotation Revision */
+            expected_annotation_revision?: number | null;
             /** Expected Decision Revision */
             expected_decision_revision?: number | null;
             /** Expected Submission Id */
@@ -2578,8 +2790,22 @@ export interface components {
             /** Width */
             width?: number | null;
         };
+        /** VideoImportBatchCreate */
+        VideoImportBatchCreate: {
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
+        };
         /** VideoImportBatchOut */
         VideoImportBatchOut: {
+            /**
+             * Annotation Upload State
+             * @default pending
+             */
+            annotation_upload_state: string;
             /**
              * Created At
              * Format: date-time
@@ -2595,6 +2821,12 @@ export interface components {
             metadata_upload_state: string;
             /** Project Id */
             project_id: number;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
             /** Status */
             status: string;
             /** Tracks Upload State */
@@ -2621,10 +2853,18 @@ export interface components {
             detection_count?: number | null;
             /** Detection Import Id */
             detection_import_id?: number | null;
+            /** Judgment Status */
+            judgment_status?: ("pending" | "usable" | "unusable") | null;
             /** Message */
             message: string;
             /** Revision */
             revision?: number | null;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
             /**
              * Status
              * @enum {string}
@@ -2675,6 +2915,8 @@ export interface components {
              * @default 0
              */
             identity_revision: number;
+            /** Judgment Status */
+            judgment_status?: ("pending" | "usable" | "unusable") | null;
             /**
              * Playback Status
              * @enum {string}
@@ -2682,6 +2924,12 @@ export interface components {
             playback_status: "ready" | "pending" | "failed" | "unavailable";
             /** Project Id */
             project_id: number;
+            /**
+             * Source
+             * @default manual
+             * @enum {string}
+             */
+            source: "manual" | "heuristic";
             /** Status */
             status: string;
             /**
@@ -3146,6 +3394,7 @@ export interface operations {
     list_clips_api_projects__project_id__clips_get: {
         parameters: {
             query?: {
+                source?: "all" | "manual" | "heuristic";
                 category_id?: number | null;
                 video_id?: number | null;
                 annotator_id?: number | null;
@@ -3184,7 +3433,9 @@ export interface operations {
     };
     clip_categories_api_projects__project_id__clips_categories_get: {
         parameters: {
-            query?: never;
+            query?: {
+                source?: "all" | "manual" | "heuristic";
+            };
             header?: never;
             path: {
                 project_id: number;
@@ -3282,7 +3533,9 @@ export interface operations {
     };
     download_export_api_projects__project_id__export_download_get: {
         parameters: {
-            query?: never;
+            query?: {
+                source?: "manual" | "heuristic" | "all";
+            };
             header?: never;
             path: {
                 project_id: number;
@@ -3313,7 +3566,9 @@ export interface operations {
     };
     export_status_api_projects__project_id__export_status_get: {
         parameters: {
-            query?: never;
+            query?: {
+                source?: "manual" | "heuristic" | "all";
+            };
             header?: never;
             path: {
                 project_id: number;
@@ -3573,7 +3828,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["VideoImportBatchCreate"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {
@@ -3732,6 +3991,7 @@ export interface operations {
         parameters: {
             query?: {
                 view?: "mine" | "unassigned" | "all";
+                source?: "all" | "manual" | "heuristic";
                 workflow_status?: string | null;
                 assignee_membership_id?: number | null;
             };
@@ -4630,6 +4890,74 @@ export interface operations {
             };
         };
     };
+    get_judgment_api_projects__project_id__videos__video_id__judgment_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgmentOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_judgment_api_projects__project_id__videos__video_id__judgment_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: number;
+                video_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgmentPut"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgmentOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     media_status_api_projects__project_id__videos__video_id__media_status_get: {
         parameters: {
             query?: never;
@@ -4981,7 +5309,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ReviewSubmissionContextIn"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

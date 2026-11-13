@@ -54,8 +54,13 @@ def check_identity_edit(
     db: Session = Depends(get_db),
 ) -> dict:
     _require_editor(access[1])
-    _require_video(db, video_id, project_id)
+    video = _require_video(db, video_id, project_id)
     detection_import = _get_active_import(db, video_id)
+    if video.source == "heuristic":
+        from ..heuristic_judgment import check_context
+        check_context(db, video, detection_import, body, access[1])
+        result, _selection = _heuristic_preview(db, video, detection_import, body)
+        return result
     if body.operation == "split":
         if len(body.track_ids) != 1:
             raise HTTPException(status_code=400, detail="Split requires exactly one track_id")
@@ -90,22 +95,30 @@ def commit_identity_edit(
         project_id=project_id,
         video_id=video_id,
         require_active_import=True,
+        allow_submitted=True,
         operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
         video, detection_import = state.video, state.detection_import
+        if video.source == "heuristic":
+            return _commit_heuristic_identity(db, video, detection_import, body, access[1], request.app.state.settings)
+        if video.workflow_status == "submitted":
+            raise HTTPException(409, detail="Withdraw before editing")
         if body.operation == "split":
             if len(body.track_ids) != 1 or body.frame is None:
                 raise HTTPException(status_code=400, detail="Split requires exactly one track_id and frame")
-            return commit_split(
+            result = commit_split(
                 db, detection_import, video, track_id=body.track_ids[0], frame=body.frame,
                 expected_version=body.base_identity_revision, operator_id=access[1].user_id,
             )
-        return commit_merge(
-            db, detection_import, video, track_ids=body.track_ids,
-            expected_version=body.base_identity_revision, operator_id=access[1].user_id,
-        )
+        else:
+            result = commit_merge(
+                db, detection_import, video, track_ids=body.track_ids,
+                expected_version=body.base_identity_revision, operator_id=access[1].user_id,
+            )
+        db.commit()
+        return result
 
 
 @router.get("/api/projects/{project_id}/videos/{video_id}/identity-edits/history", response_model=list[IdentityEditHistoryOut])
@@ -157,10 +170,15 @@ def revert_identity_edit(
     _require_editor(access[1])
     with video_write_gate(
         db, project_id=project_id, video_id=video_id, require_active_import=True,
+        allow_submitted=True,
         operation_gate=request.app.state.video_operation_gate,
         expected_detection_revision=body.base_detection_import_revision,
         expected_edit_version=body.base_identity_revision,
     ) as state:
+        if state.video.source == "heuristic":
+            return _revert_heuristic_identity(db, state.video, state.detection_import, body, edit_id, access[1], request.app.state.settings)
+        if state.video.workflow_status == "submitted":
+            raise HTTPException(409, detail="Withdraw before editing")
         latest = (
             db.query(DraftIdentityEdit)
             .filter(DraftIdentityEdit.detection_import_id == state.detection_import.id)
@@ -170,7 +188,129 @@ def revert_identity_edit(
             raise HTTPException(status_code=409, detail="Only the latest draft edit can be undone")
         if latest.operation not in ("split", "merge"):
             raise HTTPException(status_code=409, detail="Latest draft edit must use its matching endpoint")
-        return undo_latest(
+        result = undo_latest(
             db, state.detection_import, state.video, requested_edit_id=edit_id,
             expected_operation=latest.operation, expected_version=body.base_identity_revision,
         )
+        db.commit()
+        return result
+
+
+def _selection_payload(value):
+    return {k: v for k, v in value.items() if k != "annotation_id"}
+
+
+def _heuristic_preview(db, video, imp, body):
+    from ..heuristic_judgment import selection
+    from ..models import BehaviorCategory
+    import copy
+    current = selection(db, video)
+    if body.operation == "split":
+        if len(body.track_ids) != 1:
+            raise HTTPException(400, detail="Split requires one track")
+        result = split_preview(db, imp, body.track_ids[0], body.frame)
+    else:
+        result = merge_preview(db, imp, body.track_ids)
+    proposed = copy.deepcopy(current)
+    ambiguous = False
+    if current:
+        category = db.get(BehaviorCategory, current["category_id"])
+        def project(ids):
+            nonlocal ambiguous
+            if body.operation == "merge":
+                return sorted({result["retained_display_track_id"] if i in body.track_ids else i for i in ids})
+            old = body.track_ids[0]
+            if old not in ids:
+                return ids
+            boundary = video.heuristic_input["event_frame_range"]
+            if boundary["start"] < body.frame <= boundary["end"]:
+                ambiguous = True
+                return ids
+            return sorted(result["new_display_track_id"] if i == old and boundary["start"] >= body.frame else i for i in ids)
+        proposed["mouse_ids"] = project(current["mouse_ids"])
+        proposed["participant_roles"] = {k: project(v) for k, v in current["participant_roles"].items()}
+        if category.participant_mode == "role_based":
+            from ..participant_roles import canonicalize_participant_roles, ParticipantRoleError
+            try:
+                roles, ids, status = canonicalize_participant_roles(category.role_definitions, proposed["participant_roles"])
+                ambiguous |= status != "valid"
+                proposed["participant_roles"], proposed["mouse_ids"] = roles, ids
+            except ParticipantRoleError:
+                ambiguous = True
+        else:
+            count = len(proposed["mouse_ids"])
+            ambiguous |= count < category.mouse_count_min or category.mouse_count_max is not None and count > category.mouse_count_max
+    result.update(participant_confirmation_required=ambiguous,
+                  proposed_selection=_selection_payload(proposed) if proposed else None)
+    return result, proposed
+
+
+def _apply_projected(db, video, imp, value, membership, settings):
+    from ..heuristic_judgment import apply_selection
+    from ..schemas import JudgmentSelectionIn
+    from ..models import BehaviorCategory
+    payload = _selection_payload(value)
+    if db.get(BehaviorCategory, payload["category_id"]).participant_mode == "role_based":
+        payload.pop("mouse_ids", None)
+    apply_selection(db, video, imp, JudgmentSelectionIn(**payload), membership, settings)
+
+
+def _commit_heuristic_identity(db, video, imp, body, membership, settings):
+    from ..heuristic_judgment import check_context, conflict, selection, judgment_out, replace_attempt
+    from ..submission_service import resolve_and_hash_source
+    old = check_context(db, video, imp, body, membership)
+    source = resolve_and_hash_source(settings, video) if old else None
+    before = selection(db, video)
+    preview, proposed = _heuristic_preview(db, video, imp, body)
+    if preview["participant_confirmation_required"] and body.confirmed_selection is None:
+        conflict("participant_confirmation_required")
+    if body.confirmed_selection:
+        if before is None or body.confirmed_selection.category_id != before["category_id"]:
+            raise HTTPException(422, detail="Identity confirmation cannot change category")
+        proposed = body.confirmed_selection.model_dump(exclude_unset=True)
+    if body.operation == "split":
+        result = commit_split(db, imp, video, track_id=body.track_ids[0], frame=body.frame,
+                              expected_version=body.base_identity_revision, operator_id=membership.user_id)
+    else:
+        result = commit_merge(db, imp, video, track_ids=body.track_ids,
+                              expected_version=body.base_identity_revision, operator_id=membership.user_id)
+    if proposed:
+        _apply_projected(db, video, imp, proposed, membership, settings)
+    after = selection(db, video)
+    edit = db.get(DraftIdentityEdit, result["edit_id"])
+    edit.params = {**edit.params, "heuristic_selection": {"before": before, "after": after}}
+    video.annotation_revision += 1
+    replace_attempt(db, settings, video, imp, membership, old, source)
+    db.commit()
+    context = judgment_out(db, video)
+    result.update({k: context[k] for k in ("annotation_revision", "selection", "submission_id", "decision_revision")})
+    result["needs_mouse_ids_annotation_ids"] = []
+    return result
+
+
+def _revert_heuristic_identity(db, video, imp, body, edit_id, membership, settings):
+    from ..heuristic_judgment import check_context, conflict, selection, judgment_out, replace_attempt
+    from ..submission_service import resolve_and_hash_source, validate_annotations
+    old = check_context(db, video, imp, body, membership)
+    edit = db.query(DraftIdentityEdit).filter_by(detection_import_id=imp.id).order_by(DraftIdentityEdit.applied_edit_version.desc()).first()
+    if edit is None or edit.id != edit_id or edit.operation not in {"merge", "split"}:
+        conflict("identity_undo_not_latest")
+    images = (edit.params or {}).get("heuristic_selection")
+    if not images or selection(db, video) != images["after"]:
+        conflict("identity_selection_after_image_changed")
+    source = resolve_and_hash_source(settings, video) if old else None
+    before = images["before"]
+    if before is None and selection(db, video) is not None:
+        conflict("identity_selection_after_image_changed")
+    result = undo_latest(db, imp, video, requested_edit_id=edit_id, expected_operation=edit.operation,
+                         expected_version=body.base_identity_revision)
+    if before:
+        _apply_projected(db, video, imp, before, membership, settings)
+        validate_annotations(db, video, imp, settings)
+    video.annotation_revision += 1
+    replace_attempt(db, settings, video, imp, membership, old, source)
+    db.commit()
+    context = judgment_out(db, video)
+    result.update({k: context[k] for k in ("annotation_revision", "selection", "submission_id", "decision_revision")})
+    result["needs_mouse_ids_annotation_ids"] = []
+    return result

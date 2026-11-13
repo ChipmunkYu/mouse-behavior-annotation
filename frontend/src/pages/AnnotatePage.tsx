@@ -11,7 +11,6 @@ import {
   listVideos,
   submitVideoForReview,
   updateAnnotation,
-  checkIdentityEdit,
   commitIdentityEdit,
   createSuppression,
   deleteDistanceCalibration,
@@ -44,13 +43,17 @@ import { MediaLoadProgress } from "../components/MediaLoadProgress";
 import Timeline from "../components/Timeline";
 import DetectionOverlay, { DEFAULT_OVERLAY_OPTIONS, type OverlayFrameData, type OverlayOptions } from "../components/DetectionOverlay";
 import MeasurementOverlay, { type MeasurementSegment, type MeasurementToolMode, type VideoCalibration } from "../components/MeasurementOverlay";
+import { MouseIdsPanel, RoleSlotsPanel, IdentityPanel, tracksForOverlayFrame } from "../components/AnnotationTrackPanels";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { clampFrame, formatDate, formatTime, formatTimeShort, frameToEndTime, frameToStartTime } from "../utils/format";
 import { getAdjacentVideos, sortVideosForNavigation } from "../utils/videoNavigation";
-import { getInitiallyUnlockedRoleKeys, isRoleAccessible } from "../utils/roleNavigation";
+import { getInitiallyUnlockedRoleKeys } from "../utils/roleNavigation";
 import { useMediaSource } from "../media";
 import { isFeedbackMarked, latestVisibleRejection, rejectionComment, resolveFeedbackSelection, resolveFeedbackTarget, sortFeedbackItems } from "./annotateReviewFeedback";
 import { markFeedbackModified } from "./feedbackMarkApi";
+import { useRoleAssignment } from "../components/useRoleAssignment";
+import { identityEditPreview } from "../utils/identityEditPreview";
+import HeuristicJudgmentPanel from "./HeuristicJudgmentPanel";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type WorkspaceMode = "behavior" | "identity" | "calibrate" | "measure";
@@ -136,23 +139,7 @@ export function mergePinnedTracks(
     .filter((item): item is CorrectedTrackSummary => item != null && !seen.has(item.display_track_id) && !!seen.add(item.display_track_id));
 }
 
-export function tracksForOverlayFrame(
-  items: CorrectedTrackSummary[],
-  frameData: Pick<OverlayFrameData, "status" | "detections">,
-  selectedTrackIds: number[],
-  showAll: boolean,
-  search: string,
-): CorrectedTrackSummary[] {
-  const complete = frameData.status === "complete";
-  const visibleIds = new Set(frameData.detections.map((item) => item.display_track_id));
-  const withVisibility = items.map((item) => ({
-    ...item,
-    visible_in_current_frame: complete ? visibleIds.has(item.display_track_id) : null,
-  }));
-  return showAll || search || !complete
-    ? withVisibility
-    : withVisibility.filter((item) => item.visible_in_current_frame || selectedTrackIds.includes(item.display_track_id));
-}
+export { tracksForOverlayFrame } from "../components/AnnotationTrackPanels";
 
 /**
  * 数字键只覆盖稳定显示顺序中的前 10 个启用类别。
@@ -894,69 +881,6 @@ function SubmitReviewControl({
   );
 }
 
-function MouseIdsPanel({ tracks, selected, category, disabled, navigationActive, focusIndex, onFocusIndex, onExitNavigation, onToggle }: {
-  tracks: CorrectedTrackSummary[];
-  selected: number[];
-  category: Category | null;
-  disabled: boolean;
-  navigationActive: boolean;
-  focusIndex: number;
-  onFocusIndex: (index: number) => void;
-  onExitNavigation: () => void;
-  onToggle: (id: number) => void;
-}) {
-  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const min = category?.mouse_count_min ?? 1;
-  const max = category?.mouse_count_max ?? null;
-  const valid = selected.length >= min && (max == null || selected.length <= max);
-  const rule = max == null ? `至少 ${min} 个对象` : min === max ? `恰好 ${min} 个对象` : `${min}–${max} 个对象`;
-  useEffect(() => {
-    if (navigationActive) itemRefs.current[focusIndex]?.scrollIntoView({ block: "nearest" });
-  }, [focusIndex, navigationActive]);
-  return <Card title="参与对象" className={`mouse-ids-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className={valid ? "mouse-count valid" : "mouse-count"}>{selected.length} / {rule}</span>}>
-    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘选择中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
-    {selected.length ? <div className="selected-mice">{selected.map((id) => <button key={id} disabled={disabled} className="mouse-chip selected" onClick={() => onToggle(id)}>track ID {id} ×</button>)}</div> : null}
-    <div className="mouse-id-list">{tracks.map((track, index) => <button ref={(node) => { itemRefs.current[index] = node; }} data-participant-item key={track.display_track_id} disabled={disabled} className={`${selected.includes(track.display_track_id) ? "mouse-id-item selected" : "mouse-id-item"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(track.display_track_id); }}><b>track ID {track.display_track_id}</b><span>{track.visible_in_current_frame ? "当前可见" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>)}</div>
-    {!valid && category ? <div className="mouse-rule-warning">“{category.name}”需要{rule}，当前选择不符合规则。</div> : null}
-  </Card>;
-}
-
-function RoleSlotsPanel({ category, assignments, pendingIds, activeKey, unlocked, tracks, disabled, message, onActivate, onTrack, onRemove, onRemovePending }: {
-  category: Category; assignments: Record<string, number[]>; pendingIds: number[]; activeKey: string | null; unlocked: Set<string>; tracks: CorrectedTrackSummary[]; disabled: boolean; message: string | null;
-  onActivate: (key: string) => void; onTrack: (id: number) => void; onRemove: (key: string, id: number) => void; onRemovePending: (id: number) => void;
-}) {
-  const roles = [...category.role_definitions].sort((a, b) => a.role_sort_order - b.role_sort_order);
-  const trackRole = new Map<number, string>(); roles.forEach((r) => (assignments[r.key] ?? []).forEach((id) => trackRole.set(id, r.name)));
-  return <Card title="参与对象角色" className="role-slots-panel" extra={<span className="role-slot-legend">按角色分配 · 不会自动切换</span>}>
-    {pendingIds.length ? <div className="pending-role-tracks" role="status"><b>待分配：</b>先选择角色槽位，再点击 Track。{pendingIds.map((id) => <button type="button" key={id} disabled={disabled} className="role-track-chip" onClick={() => onRemovePending(id)}>Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">从待分配中移除</span></button>)}</div> : null}
-    <div className="role-slots" role="list" aria-label="参与对象角色槽位">{roles.map((role) => { const ids = assignments[role.key] ?? []; const complete = ids.length >= role.min_count && (role.max_count == null || ids.length <= role.max_count); const accessible = isRoleAccessible(roles, assignments, unlocked, role.key); return <button type="button" role="listitem" key={role.key} disabled={disabled || !accessible} title={accessible ? `切换到“${role.name}”` : "请先完成所有前序角色的最少数量"} className={`role-slot${activeKey === role.key ? " active" : ""}${complete ? " complete" : " incomplete"}${!accessible ? " locked" : ""}`} onClick={() => onActivate(role.key)} aria-pressed={activeKey === role.key} aria-label={`${role.name}，${complete ? "已完成" : "未完成"}，已选 ${ids.length}`}><span className="role-slot-index">{accessible ? (complete ? "✓" : "!") : "🔒"}</span><span className="role-slot-main"><b>{role.name}</b><small>{ids.length} / {role.max_count == null ? `至少 ${role.min_count}` : role.min_count === role.max_count ? `${role.min_count}` : `${role.min_count}–${role.max_count}`} · {complete ? "已完成" : accessible ? "可点击切换" : "前序完成后可进入"}</small></span>{activeKey === role.key ? <span className="role-active-label">当前</span> : null}</button>; })}</div>
-    <div className="role-slot-chips">{roles.map((role) => (assignments[role.key] ?? []).map((id) => <button type="button" key={`${role.key}-${id}`} disabled={disabled} className="role-track-chip" onClick={() => onRemove(role.key, id)}><b>{role.name}</b> · Track {id}<span aria-hidden="true"> ×</span><span className="visually-hidden">移除</span></button>))}{Object.values(assignments).every((ids) => ids.length === 0) ? <span className="muted">先选择角色槽位，再点击视频框或下方 Track。</span> : null}</div>
-    <div className="mouse-id-list">{tracks.map((track) => { const assigned = trackRole.get(track.display_track_id); const pending = pendingIds.includes(track.display_track_id); return <button type="button" key={track.display_track_id} disabled={disabled || !activeKey} className={`mouse-id-item${assigned || pending ? " selected" : ""}`} onClick={() => onTrack(track.display_track_id)}><b>Track {track.display_track_id}</b><span>{assigned ? `已分配：${assigned}` : pending ? "待分配 · 点击加入当前角色" : track.visible_in_current_frame ? "当前可见 · 点击加入" : `${track.first_frame ?? "?"}–${track.last_frame ?? "?"}`}</span></button>; })}</div>
-    {message ? <div className="mouse-rule-warning" role="status">{message}</div> : null}
-  </Card>;
-}
-
-function IdentityPanel({ tracks, selected, frame, search, showAll, busy, suppressions, canRevertSuppression, canRevertIdentity, canUndoLatest, undoBoundary, navigationActive, focusIndex, onFocusIndex, onExitNavigation, onSearch, onShowAll, onToggle, onSplit, onMerge, onSuppressTrack, onUndoLatest, onRevertSuppression, onRevertIdentity }: {
-  tracks: CorrectedTrackSummary[]; selected: number[]; frame: number; search: string; showAll: boolean; busy: boolean; suppressions: DetectionSuppression[]; canRevertSuppression: boolean; canRevertIdentity: boolean;
-  canUndoLatest: boolean; undoBoundary: string; navigationActive: boolean; focusIndex: number;
-  onFocusIndex: (index: number) => void; onExitNavigation: () => void;
-  onSearch: (s: string) => void; onShowAll: (v: boolean) => void; onToggle: (id: number) => void; onSplit: () => void; onMerge: () => void; onSuppressTrack: () => void; onUndoLatest: () => void; onRevertSuppression: (id?: number) => void; onRevertIdentity: () => void;
-}) {
-  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  useEffect(() => {
-    if (navigationActive) itemRefs.current[focusIndex]?.scrollIntoView({ block: "nearest" });
-  }, [focusIndex, navigationActive]);
-  return <Card title="track 修正" className={`identity-panel${navigationActive ? " keyboard-nav" : ""}`} extra={<span className="identity-frame mono">帧 {frame}</span>}>
-    {navigationActive ? <div className="participant-nav-status" role="status"><span>键盘导航中：↑/↓ 移动，Enter 选择，T 退出</span><button type="button" className="btn-link" onClick={onExitNavigation}>退出 [T / Esc]</button></div> : null}
-    <div className="identity-filter"><div className="segmented"><button className={!showAll ? "active" : ""} onClick={() => onShowAll(false)}>当前帧可见</button><button className={showAll ? "active" : ""} onClick={() => onShowAll(true)}>全部 track ID</button></div><input className="input" placeholder="搜索 track ID" aria-label="搜索 track ID" value={search} onChange={(e) => onSearch(e.target.value)} /></div>
-    <div className="identity-track-list">{tracks.map((t, index) => <button ref={(node) => { itemRefs.current[index] = node; }} key={t.display_track_id} className={`${selected.includes(t.display_track_id) ? "identity-track selected" : "identity-track"}${navigationActive && focusIndex === index ? " keyboard-focused" : ""}`} onClick={() => { onFocusIndex(index); onToggle(t.display_track_id); }}><span className="track-id mono">track ID {t.display_track_id}</span><span>{t.visible_in_current_frame ? "● 当前可见" : `${t.first_frame ?? "?"} → ${t.last_frame ?? "?"}`}</span><span className="flex-spacer" /><span>{t.detection_count} 框</span></button>)}</div>
-    <div className="identity-actions"><button className="btn btn-primary" disabled={busy || selected.length !== 1} onClick={onSplit}>从当前帧 Split</button><button className="btn btn-primary" disabled={busy || selected.length < 2} onClick={onMerge}>Merge 所选</button></div>
-    <div className="identity-danger-zone"><button className="btn btn-sm btn-danger" disabled={busy || selected.length !== 1} onClick={onSuppressTrack}>忽略整个 track [Delete]</button><button className="btn btn-sm" disabled={busy || !canUndoLatest} onClick={onUndoLatest}>撤销上一次 track 修正 [Ctrl+Z]</button><button className="btn btn-sm" disabled={busy || !canRevertSuppression} onClick={() => onRevertSuppression()}>撤销上一次忽略</button><button className="btn btn-sm" disabled={busy || !canRevertIdentity} onClick={onRevertIdentity}>撤销上一次 Split / Merge</button></div>
-    <div className="frame-preview">{undoBoundary}</div>
-    {suppressions.length ? <div className="identity-track-list">{suppressions.map((s) => <div key={s.id} className="identity-track"><span>忽略记录 #{s.id}</span><span>{s.frozen_detection_count} 个检测</span><span className="flex-spacer" /><button className="btn btn-sm" disabled={busy} onClick={() => onRevertSuppression(s.id)}>撤销</button></div>)}</div> : null}
-  </Card>;
-}
-
 function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
   mode: WorkspaceMode;
   categoryShortcuts: Array<{ key: string; category: Category }>;
@@ -996,6 +920,31 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
 
 /* ================= 标注工作台主页面 ================= */
 export default function AnnotatePage() {
+  const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
+  const pid = Number(projectId);
+  const vid = Number(videoId);
+  const routeKey = `${pid}:${vid}`;
+  const [entry, setEntry] = useState<{ key: string; video: Video; project: Project | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setError(null);
+    Promise.all([listVideos(pid, { view: "all" }), listProjects()]).then(([videos, projects]) => {
+      if (!active) return;
+      const video = videos.find((item) => item.id === vid);
+      if (!video) throw new Error("未找到当前视频");
+      setEntry({ key: routeKey, video, project: projects.find((item) => item.id === pid) ?? null });
+    }).catch((error: unknown) => { if (active) setError(error instanceof Error ? error.message : "加载任务来源失败"); });
+    return () => { active = false; };
+  }, [pid, vid, routeKey, retry]);
+  if (error) return <Card><div className="error-box" role="alert">{error}<button className="btn" onClick={() => setRetry((value) => value + 1)}>重试</button></div></Card>;
+  if (entry?.key !== routeKey) return <Loading text="加载任务来源…" />;
+  if (entry.video.source !== "heuristic") return <ManualAnnotatePage key={routeKey} />;
+  return <div className="container"><div className="annotate-header"><Link className="btn btn-sm" to={`/projects/${pid}/videos`}>← 视频库</Link><h1>{entry.video.filename} / 判断</h1></div><HeuristicJudgmentPanel key={routeKey} projectId={pid} video={entry.video} project={entry.project} /></div>;
+}
+
+function ManualAnnotatePage() {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
   const pid = Number(projectId);
   const vid = Number(videoId);
@@ -1244,30 +1193,11 @@ export default function AnnotatePage() {
   );
   const trackRoleLabels = useMemo(() => { const map: Record<number, string> = {}; roleDefinitions.forEach((role) => (participantRoles[role.key] ?? []).forEach((id) => { map[id] = role.name; })); return map; }, [participantRoles, roleDefinitions]);
 
-  const activateRole = useCallback((key: string) => {
-    const index = roleDefinitions.findIndex((r) => r.key === key);
-    if (index < 0) return;
-    const allowed = isRoleAccessible(roleDefinitions, participantRoles, unlockedRoleKeys, key);
-    if (!allowed) { setRoleMessage("请先补全前序角色的最少参与对象，再进入这个角色。"); return; }
-    setUnlockedRoleKeys((keys) => new Set([...keys, key])); setActiveRoleKey(key); setRoleMessage(null);
-  }, [participantRoles, roleDefinitions, unlockedRoleKeys]);
-
-  const toggleRoleTrack = useCallback(async (id: number) => {
-    if (measurementTool !== "select") { setHint("参考标定或距离测量模式下不能选择 Track"); return; }
-    const role = roleDefinitions.find((r) => r.key === activeRoleKey);
-    if (!role) { setRoleMessage("请先选择一个角色槽位。"); return; }
-    const currentKey = roleDefinitions.find((r) => (participantRoles[r.key] ?? []).includes(id))?.key;
-    if (currentKey === role.key) { setParticipantRoles((prev) => ({ ...prev, [role.key]: (prev[role.key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`${role.name}已移除 Track ${id}，已放回待分配。`); return; }
-    if ((participantRoles[role.key] ?? []).length >= (role.max_count ?? Number.POSITIVE_INFINITY)) { setRoleMessage(`${role.name}已达到最多 ${role.max_count} 个参与对象，请先移除后再添加。`); return; }
-    if (currentKey) {
-      const oldRole = roleDefinitions.find((r) => r.key === currentKey)!;
-      const ok = await confirm({ title: `移至“${role.name}”？`, message: <>Track {id} 当前属于“<b>{oldRole.name}</b>”。确认后会从原角色移除，并一次性加入当前角色。</>, confirmLabel: "移至当前角色" });
-      if (!ok) { setRoleMessage(`Track ${id} 仍保留在“${oldRole.name}”。`); return; }
-    }
-    setParticipantRoles((prev) => { const next: Record<string, number[]> = {}; roleDefinitions.forEach((r) => { next[r.key] = (prev[r.key] ?? []).filter((x) => x !== id); }); next[role.key] = [...next[role.key], id].sort((a, b) => a - b); return next; });
-    setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id));
-    setRoleMessage(`Track ${id} 已分配给“${role.name}”。`);
-  }, [activeRoleKey, confirm, measurementTool, participantRoles, roleDefinitions]);
+  const { activateRole, toggleRoleTrack, removeRoleTrack } = useRoleAssignment({
+    roleDefinitions, participantRoles, activeRoleKey, unlockedRoleKeys, setParticipantRoles,
+    setSelectedMouseIds, setActiveRoleKey, setUnlockedRoleKeys, setRoleMessage, confirm,
+    beforeToggle: () => { if (measurementTool !== "select") { setHint("参考标定或距离测量模式下不能选择 Track"); return false; } return true; },
+  });
 
   const selectCategory = useCallback(async (category: Category) => {
     if (video?.workflow_status === "approved") { setHint("视频已最终通过；请先由审核人重新打开审核"); return; }
@@ -2035,9 +1965,7 @@ export default function AnnotatePage() {
     };
     setIdentityBusy(true); setErrorMsg(null);
     try {
-      const check = await checkIdentityEdit(pid, vid, request);
-      if (check.conflicts?.length) { setErrorMsg(`${check.message ?? "角色分配冲突"}：${check.conflicts.map((c) => `标注 #${c.annotation_id} · 帧 ${c.start_frame}–${c.end_frame} / ${c.start_time}–${c.end_time} 秒 · ${c.role_name ?? c.role_key} · Track ${c.track_id}`).join("；")}`); return; }
-      if (check.conflict_frames?.length) { setErrorMsg(`Merge 冲突：帧 ${check.conflict_frames.slice(0, 12).join("、")} 同一 track ID 将对应多个框，请先忽略误检框`); return; }
+      const check = await identityEditPreview(pid, vid, request);
       const ok = await confirm({
         title: operation === "split" ? `Split track ID ${identitySelectedMouseIds[0]}？` : `Merge ${identitySelectedMouseIds.length} 个 track？`,
         message: <>{operation === "split" ? <>从帧 <b>{currentFrame}</b> 起生成新 track ID，前后分别有 {check.detections_before} / {check.detections_after} 个检测。</> : <>保留 track ID <b>{check.retained_display_track_id}</b>，影响 {check.affected_detection_count} 个检测。</>}</>,
@@ -2908,7 +2836,7 @@ export default function AnnotatePage() {
               <CategoryPanel categories={displayCategories} activeCategory={activeCategory} shortcuts={categoryShortcutById} onSelect={selectCategory} disabled={!videoReady || video?.workflow_status === "approved"} />
             </div>
             <div ref={participantSectionRef} tabIndex={-1} className={draftErrorFields.has("participants") ? "draft-field-error" : undefined} aria-invalid={draftErrorFields.has("participants") || undefined} aria-describedby={draftErrorFields.has("participants") ? "draft-error-summary" : undefined}>
-              {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport || video?.workflow_status === "approved"} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={(key, id) => { setParticipantRoles((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((x) => x !== id) })); setSelectedMouseIds((ids) => [...new Set([...ids, id])].sort((a, b) => a - b)); setRoleMessage(`已移除 Track ${id}，已放回待分配。`); }} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport || video?.workflow_status === "approved"} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
+              {activeCategory?.participant_mode === "role_based" ? <RoleSlotsPanel category={activeCategory} assignments={participantRoles} pendingIds={selectedMouseIds} activeKey={activeRoleKey} unlocked={unlockedRoleKeys} tracks={tracks} disabled={!detectionImport || video?.workflow_status === "approved"} message={roleMessage} onActivate={activateRole} onTrack={(id) => void toggleRoleTrack(id)} onRemove={removeRoleTrack} onRemovePending={(id) => setSelectedMouseIds((ids) => ids.filter((trackId) => trackId !== id))} /> : <MouseIdsPanel tracks={tracks} selected={selectedMouseIds} category={activeCategory} disabled={!detectionImport || video?.workflow_status === "approved"} navigationActive={participantNavigationActive} focusIndex={participantFocusIndex} onFocusIndex={setParticipantFocusIndex} onExitNavigation={() => { setParticipantNavigationActive(false); blurActiveButton(); setHint("已退出参与对象键盘选择；已选参与对象保持不变"); }} onToggle={toggleMouseId} />}
             </div>
           </div> : workspaceMode === "identity" ? <div id="identity-panel" className="workspace-panel" role="tabpanel" aria-labelledby="identity-tab">{visibleIdentityEditFeedback ? <div key={visibleIdentityEditFeedback.key} className="identity-edit-feedback" role="status" aria-live="polite"><span className="feedback-text">{visibleIdentityEditFeedback.text}</span><button type="button" className="identity-edit-feedback-close" aria-label="关闭" onClick={() => setIdentityEditFeedback(null)}>×</button></div> : null}<IdentityPanel tracks={tracks} selected={identitySelectedMouseIds} frame={currentFrame} search={identitySearch} showAll={showAllTracks} busy={identityBusy} suppressions={activeSuppressions} canRevertSuppression={lastSuppressionId != null} canRevertIdentity={lastIdentityEditId != null} canUndoLatest={undoHistory.length > 0} undoBoundary={undoHistory.length ? `当前页面会话可统一撤销 ${undoHistory.length} 步；按实际操作时间撤销最近一步。` : "当前页面会话没有可统一撤销的记录；刷新前的 Split / Merge 历史无法恢复。"} navigationActive={identityNavigationActive} focusIndex={identityFocusIndex} onFocusIndex={setIdentityFocusIndex} onExitNavigation={() => { setIdentityNavigationActive(false); setHint("已退出 track 列表键盘导航；已选 track 保持不变"); }} onSearch={setIdentitySearch} onShowAll={setShowAllTracks} onToggle={toggleIdentityMouseId} onSplit={() => void runIdentityEdit("split")} onMerge={() => void runIdentityEdit("merge")} onSuppressTrack={() => void suppressTrack()} onUndoLatest={() => void undoLatestTrackEdit()} onRevertSuppression={(id) => void revertLastSuppression(id)} onRevertIdentity={() => void revertLastIdentity()} /></div> : null}
           <AnnotationList

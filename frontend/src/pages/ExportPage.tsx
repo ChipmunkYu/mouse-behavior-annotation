@@ -12,7 +12,7 @@
  * - 下载：与视频流同理用带 Bearer 的请求拉取 blob，文件名以 Content-Disposition 为准
  * - 1366×768：左右双列（统计/范围/任务 | 内容预览），窄屏自动堆叠为单列
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   createExport,
@@ -29,6 +29,7 @@ import type {
   ExportStatus,
   Job,
   Project,
+  SourceScope,
 } from "../api/types";
 import { EXPORT_RETENTION_DAYS, JOB_LABELS, ROLE_LABELS } from "../api/types";
 import { Card, EmptyState, Loading } from "../components/ui";
@@ -474,6 +475,9 @@ export default function ExportPage() {
   const pid = Number(projectId);
 
   const [project, setProject] = useState<Project | null>(null);
+  const [source, setSource] = useState<SourceScope>("manual");
+  const scopeRef = useRef("");
+  scopeRef.current = `${pid}:${source}`;
   const [categories, setCategories] = useState<Category[]>([]);
   const [counts, setCounts] = useState<ClipCategoryCount[]>([]);
   const [status, setStatus] = useState<ExportStatus | null>(null);
@@ -502,39 +506,46 @@ export default function ExportPage() {
   /* ---------- 状态与元数据加载 ---------- */
   const loadStatus = useCallback(
     async (silent = false) => {
+      const requestedScope = `${pid}:${source}`;
       if (!silent) setLoading(true);
       try {
-        const st = await getExportStatus(pid);
+        const st = await getExportStatus(pid, source);
+        if (scopeRef.current !== requestedScope) return;
+        if ((st.source ?? "manual") !== source) throw new ApiError(409, "导出来源与当前选择不一致，请刷新；不会提供其他来源的下载。");
         setStatus(st);
         setStatusError(null);
       } catch (err) {
+        if (scopeRef.current !== requestedScope) return;
         if (!silent) {
           setStatusError(err instanceof Error ? err.message : "加载导出状态失败");
         }
       } finally {
-        if (!silent) setLoading(false);
+        if (!silent && scopeRef.current === requestedScope) setLoading(false);
       }
     },
-    [pid]
+    [pid, source]
   );
 
   const loadMeta = useCallback(async () => {
+    const requestedScope = `${pid}:${source}`;
     try {
       const [projs, cnts, cats] = await Promise.all([
         listProjects(),
-        listClipCategories(pid),
+        listClipCategories(pid, source),
         listCategories(pid),
       ]);
+      if (scopeRef.current !== requestedScope) return;
       setProject(projs.find((p) => p.id === pid) ?? null);
       setCounts(cnts);
       setCategories(cats);
     } catch {
       // 元数据失败不阻塞状态加载；界面自动退化为无颜色 / 无计数
     }
-  }, [pid]);
+  }, [pid, source]);
 
   useEffect(() => {
     setSelected([]);
+    setStatus(null);
     setExportError(null);
     setDownloadError(null);
     setNotice(null);
@@ -577,13 +588,14 @@ export default function ExportPage() {
     setNotice(null);
     try {
       const job = await createExport(pid, {
+        source,
         category_ids: selected.length > 0 ? selected : undefined,
       });
       // 先用返回的 Job 立即渲染任务卡，轮询随后接管最新状态
       setStatus((prev) =>
         prev
-          ? { ...prev, latest_job: job }
-          : { latest_job: job, exportable_count: 0, ready_count: 0, missing_count: 0, missing_clips: [] }
+          ? { ...prev, latest_job: job, source, category_ids: selected }
+          : { latest_job: job, source, category_ids: selected, exportable_count: 0, ready_count: 0, missing_count: 0, missing_clips: [] }
       );
       setNotice("导出任务已发起，正在后台打包，请稍候…");
       void loadStatus(true);
@@ -598,7 +610,7 @@ export default function ExportPage() {
     } finally {
       setExporting(false);
     }
-  }, [pid, exporting, busy, selected, loadStatus]);
+  }, [pid, exporting, busy, selected, loadStatus, source]);
 
   /* ---------- 下载导出包（Bearer blob，与视频流同理） ---------- */
   const handleDownload = useCallback(async () => {
@@ -606,7 +618,7 @@ export default function ExportPage() {
     setDownloading(true);
     setDownloadError(null);
     try {
-      const { blob, filename } = await fetchExportDownload(pid);
+      const { blob, filename } = await fetchExportDownload(pid, source);
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = filename;
@@ -621,7 +633,7 @@ export default function ExportPage() {
     } finally {
       setDownloading(false);
     }
-  }, [pid, downloading]);
+  }, [pid, downloading, source]);
   return (
     <div className="container export-page">
       <div className="page-header">
@@ -650,6 +662,7 @@ export default function ExportPage() {
         <div className="ok-box" role="status">✓ {notice}</div>
       ) : null}
       {statusError ? <div className="error-box" role="alert">⚠ {statusError}</div> : null}
+      <label className="field">导出来源<select className="select" aria-label="导出来源" value={source} disabled={exporting || downloading} onChange={(event) => { setStatus(null); setSource(event.target.value as SourceScope); }}><option value="manual">人工</option><option value="heuristic">启发式</option><option value="all">全部</option></select><span>默认仅人工；选择全部才会混合。统计、任务与下载使用同一来源范围。</span></label>
 
       <div className="export-body">
         <div className="export-col">
@@ -667,6 +680,7 @@ export default function ExportPage() {
             exportError={exportError}
           />
           <Card title="导出任务">
+            {status?.latest_job ? <p className="field-hint">此任务来源：{({ manual: "人工", heuristic: "启发式", all: "全部" })[status.source ?? "manual"]} · 类别：{status.category_ids?.length ? status.category_ids.map((id) => categoryById.get(id)?.name ?? `#${id}`).join("、") : "全部类别"}</p> : null}
             <JobPanel
               status={status}
               pid={pid}

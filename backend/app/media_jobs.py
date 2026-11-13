@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -218,6 +219,8 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
     - 成功后更新 clip 的 clip_path / thumbnail_path / status=ready / error / generated_at。
     - 返回本次成功落盘的最终文件列表（供失效清理跟踪）。
     """
+    if video.source == "heuristic":
+        raise MediaCommandError("heuristic media requires final immutable snapshot")
     input_path = resolve_input_path(settings, video)
     name = f"clip_{clip.annotation_id}_rev{clip.source_revision}"
     render_id = uuid.uuid4().hex
@@ -275,6 +278,29 @@ def render_clip_files(processor, settings, video: Video, annotation: Annotation,
     return created
 
 
+def verify_heuristic_media(processor, video, submission, annotation, input_path):
+    import math
+    evidence = video.heuristic_input
+    snapshot = submission.detection_snapshot
+    if (video.workflow_status != "approved" or video.judgment_status != "usable" or submission.status != "approved"
+            or annotation.submission_id != submission.id
+            or {"start": annotation.start_frame, "end": annotation.end_frame} != evidence["event_frame_range"]
+            or annotation.crop_region is not None or submission.source_video_sha256 != evidence["sha256"]["video"]):
+        raise MediaCommandError("heuristic media is not a final fixed-boundary asset")
+    from .file_identity import hash_file_handle
+    digest, _identity = hash_file_handle(input_path)
+    if digest != evidence["sha256"]["video"]:
+        raise MediaCommandError("heuristic input SHA-256 changed")
+    expected = evidence["media"]
+    measured = processor.probe_clip(str(input_path), expected=expected)
+    if (any(getattr(snapshot, key) != expected[key] or measured.get(key) != expected[key]
+            for key in ("width", "height", "frame_count"))
+            or not math.isclose(snapshot.fps, expected["fps"], rel_tol=1e-6)
+            or not math.isclose(measured.get("fps", 0), expected["fps"], rel_tol=1e-6)
+            or abs(measured.get("duration", -1) - expected["frame_count"] / expected["fps"]) > 1 / expected["fps"]):
+        raise MediaCommandError("heuristic input media changed")
+
+
 def render_submission_clip_files(processor, settings, submission: Submission,
                                   annotation: SubmissionAnnotation, clip: Clip,
                                   *, input_path: Path) -> list[Path]:
@@ -294,9 +320,13 @@ def render_submission_clip_files(processor, settings, submission: Submission,
             start_frame=annotation.start_frame, end_frame=annotation.end_frame,
             fps=snapshot.fps, frame_count=snapshot.frame_count,
             width=snapshot.width, height=snapshot.height, crop_region=annotation.crop_region)
-        processor.render_clip(input_path=str(input_path), start_frame=annotation.start_frame,
-                              frames=plan.frame_count, output_path=str(temp_clip),
-                              crop=plan.crop, fps=snapshot.fps)
+        if submission.video.source == "heuristic":
+            verify_heuristic_media(processor, submission.video, submission, annotation, input_path)
+            shutil.copyfile(input_path, temp_clip)
+        else:
+            processor.render_clip(input_path=str(input_path), start_frame=annotation.start_frame,
+                                  frames=plan.frame_count, output_path=str(temp_clip),
+                                  crop=plan.crop, fps=snapshot.fps)
         processor.render_thumbnail(input_path=str(input_path), at=plan.thumbnail_at,
                                    output_path=str(temp_thumb), crop=plan.crop)
         os.replace(temp_clip, final_clip); created.append(final_clip)
@@ -478,6 +508,8 @@ def claim_and_render_submission_clip(
 
 
 def ensure_pending_clips(db: Session, video: Video) -> int:
+    if video.source == "heuristic":
+        raise MediaCommandError("heuristic media requires final immutable snapshot")
     """为视频当前修订的全部标注幂等创建 pending Clip 行（唯一约束兜底并发重复）。"""
     stmt = sqlite_insert(Clip)
     created = 0
@@ -729,6 +761,9 @@ def enqueue_submission_media(db: Session, submission: Submission,
     whose own Clip is newly created or needs (re)generation are listed in the owning
     job payload; an empty set creates no job. Caller owns transaction.
     """
+    if submission.video.source == "heuristic" and (submission.status != "approved"
+            or submission.video.workflow_status != "approved" or submission.video.judgment_status != "usable"):
+        return []
     targets: dict[int, dict] = {}
 
     def require_generation(submission_id: int, project_id: int, snapshot_id: int) -> None:

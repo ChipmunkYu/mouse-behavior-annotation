@@ -266,6 +266,8 @@ class VideoOut(BaseModel):
     id: int
     project_id: int
     filename: str
+    source: Literal["manual", "heuristic"] = "manual"
+    judgment_status: Optional[Literal["pending", "usable", "unusable"]] = None
     duration: Optional[float] = None
     fps: Optional[float] = None
     width: Optional[int] = None
@@ -440,7 +442,7 @@ class AnnotationOut(BaseModel):
 
 # ---------- 审核 ----------
 class ReviewCreate(BaseModel):
-    result: Literal["approved", "rejected"]
+    result: Literal["approved", "rejected", "unusable"]
     comment: Optional[str] = None
     expected_submission_id: int = Field(gt=0)
     expected_decision_revision: int = Field(ge=0)
@@ -466,8 +468,82 @@ class BehaviorReopenIn(BaseModel):
 
 class ReviewSubmissionContextIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    expected_submission_id: Optional[int] = None
-    expected_decision_revision: Optional[int] = Field(default=None, ge=0)
+    expected_submission_id: Optional[StrictPositiveBusinessInt] = None
+    expected_decision_revision: Optional[StrictNonNegativeBusinessInt] = None
+    expected_annotation_revision: Optional[StrictPositiveBusinessInt] = None
+    base_detection_import_revision: Optional[StrictPositiveBusinessInt] = None
+    base_identity_revision: Optional[StrictNonNegativeBusinessInt] = None
+
+
+class JudgmentSelectionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category_id: StrictPositiveBusinessInt
+    mouse_ids: Optional[list[StrictNonNegativeBusinessInt]] = None
+    participant_roles: dict[str, list[StrictNonNegativeBusinessInt]] = Field(default_factory=dict)
+
+
+class JudgmentPut(ReviewSubmissionContextIn):
+    judgment_status: Literal["usable", "unusable"]
+    expected_annotation_revision: StrictPositiveBusinessInt
+    base_detection_import_revision: StrictPositiveBusinessInt
+    base_identity_revision: StrictNonNegativeBusinessInt
+    expected_submission_id: Optional[StrictPositiveBusinessInt]
+    expected_decision_revision: Optional[StrictNonNegativeBusinessInt]
+    category_id: Optional[StrictPositiveBusinessInt] = None
+    mouse_ids: Optional[list[StrictNonNegativeBusinessInt]] = None
+    participant_roles: Optional[dict[str, list[StrictNonNegativeBusinessInt]]] = None
+
+    @model_validator(mode="after")
+    def selection_for_usable(self):
+        selection_fields = {"category_id", "mouse_ids", "participant_roles"}
+        if self.judgment_status == "unusable" and selection_fields & self.model_fields_set:
+            raise ValueError("unusable does not accept a selection")
+        if self.judgment_status == "usable" and self.category_id is None:
+            raise ValueError("usable requires category_id")
+        return self
+
+
+class JudgmentSelectionOut(BaseModel):
+    annotation_id: int
+    category_id: int
+    mouse_ids: list[int]
+    participant_roles: dict[str, list[int]]
+
+
+class JudgmentFrameRangeOut(BaseModel):
+    start: int
+    end: int
+
+
+class JudgmentTimeRangeOut(BaseModel):
+    start: float
+    end: float
+
+
+class JudgmentSuggestionOut(BaseModel):
+    behavior: Optional[str] = None
+    canonical_behavior: Optional[str] = None
+    confidence: Optional[str] = None
+    mouse_ids: Optional[list[int]] = None
+    participants: Optional[list[Any]] = None
+    actor_id: Optional[int] = None
+    target_id: Optional[int] = None
+    frame_range: JudgmentFrameRangeOut
+    time_range: JudgmentTimeRangeOut
+
+
+class JudgmentOut(BaseModel):
+    video_id: int
+    source: Literal["heuristic"] = "heuristic"
+    workflow_status: str
+    judgment_status: Literal["pending", "usable", "unusable"]
+    annotation_revision: int
+    detection_import_revision: int
+    identity_revision: int
+    input: JudgmentSuggestionOut
+    selection: Optional[JudgmentSelectionOut] = None
+    submission_id: Optional[int] = None
+    decision_revision: int = 0
 
 
 class BehaviorReviewDecisionOut(BaseModel):
@@ -527,7 +603,7 @@ class ReviewOut(BaseModel):
     project_id: int
     video_id: int
     reviewer_id: Optional[int] = None
-    result: Literal["approved", "rejected"]
+    result: Literal["approved", "rejected", "unusable"]
     comment: Optional[str] = None
     annotation_revision: int
     detection_import_revision: int = 0
@@ -585,6 +661,7 @@ class ClipItem(BaseModel):
     clip_id: Optional[int] = None
     annotation_id: int
     video_id: int
+    source: Literal["manual", "heuristic"] = "manual"
     video_filename: str
     category_id: int
     category_name: str
@@ -623,6 +700,7 @@ class ExportRequest(BaseModel):
     """导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。"""
 
     category_ids: Optional[list[StrictBusinessInt]] = None
+    source: Literal["manual", "heuristic", "all"] = "manual"
 
 
 class MissingClipOut(BaseModel):
@@ -637,6 +715,8 @@ class ExportStatusOut(BaseModel):
     """导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。"""
 
     latest_job: Optional[JobOut] = None
+    source: Literal["manual", "heuristic", "all"] = "manual"
+    category_ids: Optional[list[int]] = None
     exportable_count: int
     ready_count: int
     missing_count: int
@@ -646,24 +726,28 @@ class ExportStatusOut(BaseModel):
 # ---------- 身份编辑（Phase 2） ----------
 
 class IdentityEditCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_annotation_revision: Optional[StrictPositiveBusinessInt] = None
+    expected_submission_id: Optional[StrictPositiveBusinessInt] = None
+    expected_decision_revision: Optional[StrictNonNegativeBusinessInt] = None
     operation: Literal["split", "merge"]
-    track_ids: list[int] = Field(min_length=1)
-    frame: Optional[int] = None
-    base_identity_revision: int = Field(ge=0)
-    base_detection_import_revision: int = Field(ge=1)
+    track_ids: list[StrictNonNegativeBusinessInt] = Field(min_length=1)
+    frame: Optional[StrictNonNegativeBusinessInt] = None
+    base_identity_revision: StrictNonNegativeBusinessInt
+    base_detection_import_revision: StrictPositiveBusinessInt
 
 
-class IdentityEditCommitRequest(BaseModel):
-    operation: Literal["split", "merge"]
-    track_ids: list[int] = Field(min_length=1)
-    frame: Optional[int] = None
-    base_identity_revision: int = Field(ge=0)
-    base_detection_import_revision: int = Field(ge=1)
+class IdentityEditCommitRequest(IdentityEditCheckRequest):
+    confirmed_selection: Optional[JudgmentSelectionIn] = None
 
 
 class IdentityEditRevertRequest(BaseModel):
-    base_identity_revision: int = Field(ge=0)
-    base_detection_import_revision: int = Field(ge=1)
+    model_config = ConfigDict(extra="forbid")
+    expected_annotation_revision: Optional[StrictPositiveBusinessInt] = None
+    expected_submission_id: Optional[StrictPositiveBusinessInt] = None
+    expected_decision_revision: Optional[StrictNonNegativeBusinessInt] = None
+    base_identity_revision: StrictNonNegativeBusinessInt
+    base_detection_import_revision: StrictPositiveBusinessInt
 
 
 # ---------- 检测抑制（Phase 2） ----------
@@ -685,6 +769,8 @@ class VideoImportBatchOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    source: Literal["manual", "heuristic"] = "manual"
+    annotation_upload_state: str = "pending"
     project_id: int
     created_by: Optional[int] = None
     status: str
@@ -811,6 +897,8 @@ class DetectionSuppressionOut(BaseModel):
 class BatchStatusOut(BaseModel):
     """批次状态（含文件上传状态与已创建视频 ID）。"""
     id: int
+    source: Literal["manual", "heuristic"] = "manual"
+    annotation_upload_state: str = "pending"
     project_id: int
     created_by: Optional[int] = None
     status: str
@@ -830,6 +918,8 @@ class BatchStatusOut(BaseModel):
 
 class VideoImportCompletionOut(BaseModel):
     batch_id: int
+    source: Literal["manual", "heuristic"] = "manual"
+    judgment_status: Optional[Literal["pending", "usable", "unusable"]] = None
     video_id: Optional[int] = None
     created_video_id: Optional[int] = None
     detection_import_id: Optional[int] = None
@@ -911,6 +1001,8 @@ class TrackRoleConflictOut(BaseModel):
 
 
 class IdentityEditCheckOut(BaseModel):
+    participant_confirmation_required: bool = False
+    proposed_selection: Optional[dict[str, Any]] = None
     operation: Literal["split", "merge"]
     old_display_track_id: Optional[int] = None
     new_display_track_id: Optional[int] = None
@@ -926,6 +1018,10 @@ class IdentityEditCheckOut(BaseModel):
 
 
 class IdentityEditResultOut(BaseModel):
+    annotation_revision: Optional[int] = None
+    selection: Optional[dict[str, Any]] = None
+    submission_id: Optional[int] = None
+    decision_revision: int = 0
     identity_revision: int
     edit_id: Optional[int] = None
     suppression_id: Optional[int] = None
@@ -1000,3 +1096,8 @@ class PageOut(BaseModel):
     page: int
     page_size: int
     pages: int
+
+
+class VideoImportBatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["manual", "heuristic"] = "manual"

@@ -3,7 +3,7 @@ import { cancelImportBatch, getImportBatch } from "../api";
 import { ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { UNAUTHORIZED_EVENT } from "../auth/events";
-import { batchSucceeded, executeUploadTask } from "./uploadTasks";
+import { batchSucceeded, executeUploadTask, uploadErrorMessage } from "./uploadTasks";
 import type { EnqueueBatchInput, EnqueueVideoInput, UploadTask } from "./types";
 
 const MAX_CONCURRENT_TASKS = 2;
@@ -27,7 +27,7 @@ function resetForRetry(task: UploadTask): UploadTask {
   const slots = task.slots && Object.fromEntries(
     Object.entries(task.slots).map(([role, slot]) => [role, { ...slot, percent: 0 }]),
   ) as UploadTask["slots"];
-  return { ...task, slots, batchId: null, status: "queued", phase: "queued", progress: 0, error: null };
+  return { ...task, slots, batchId: null, batchCleaned: false, status: "queued", phase: "queued", progress: 0, error: null };
 }
 
 function ignoreMissingBatch(error: unknown): void {
@@ -41,6 +41,7 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
   const tasksRef = useRef<UploadTask[]>([]);
   const activeRuns = useRef(new Map<string, AbortController>());
   const stopping = useRef(false);
+  const queueSequence = useRef(0);
 
   const changeTasks = useCallback((change: (tasks: UploadTask[]) => UploadTask[]) => {
     setTasks((current) => {
@@ -68,13 +69,16 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
   }, [changeTasks]);
 
   const enqueueBatch = useCallback((input: EnqueueBatchInput) => {
+    const sequence = ++queueSequence.current;
     changeTasks((current) => [...current, {
       taskId: makeTaskId(), kind: "batch", projectId: input.projectId, projectName: input.projectName,
-      assigneeMembershipId: input.assigneeMembershipId, name: input.files.video.name,
+      source: input.source ?? "manual",
+      assigneeMembershipId: input.assigneeMembershipId, name: `${input.displayName || input.files.video.name} · #${sequence}`,
       slots: {
         tracks: { file: input.files.tracks, percent: 0 },
         metadata: { file: input.files.metadata, percent: 0 },
         video: { file: input.files.video, percent: 0 },
+        ...(input.files.annotation ? { annotation: { file: input.files.annotation, percent: 0 } } : {}),
       },
       status: "queued", phase: "queued", progress: 0, error: null, batchId: null,
     }]);
@@ -128,15 +132,20 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
 
     updateTask(id, (current) => ({ ...current, status: "cancelling", phase: "cleanup", error: null }));
     try {
+      const batch = await getImportBatch(task.projectId, task.batchId);
+      if (batchSucceeded(batch, task.source)) { markSuccess(id, task.projectId); return; }
+      if (batch.status === "video_only") throw new Error("启发式批次意外退化为仅视频，已发布批次禁止清理，请联系管理员");
+      if (batch.status === "processing") throw new Error("服务端仍在处理，暂不清理，请稍后重试");
       await cancelImportBatch(task.projectId, task.batchId).catch(ignoreMissingBatch);
       removeTask(id);
     } catch (error) {
+      if (error instanceof ApiError && error.status === 404) { removeTask(id); return; }
       updateTask(id, (current) => ({
         ...current, status: "failed", phase: "failed",
-        error: error instanceof Error ? `批次删除失败：${error.message}` : "批次删除失败，请重试",
+        error: `批次删除失败，清理待重试：${uploadErrorMessage(error)}`,
       }));
     }
-  }, [removeTask, updateTask]);
+  }, [removeTask, updateTask, markSuccess]);
 
   const retry = useCallback(async (id: string) => {
     const task = tasksRef.current.find((item) => item.taskId === id);
@@ -149,10 +158,12 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
     updateTask(id, (current) => ({ ...current, status: "cancelling", phase: "cleanup", error: null }));
     try {
       const batch = await getImportBatch(task.projectId, task.batchId);
-      if (batchSucceeded(batch)) {
+      if (batchSucceeded(batch, task.source)) {
         markSuccess(id, task.projectId);
         return;
       }
+      if (batch.status === "video_only") throw new Error("启发式批次意外退化为仅视频，已发布批次禁止清理，请联系管理员");
+      if (batch.status === "processing") throw new Error("服务端仍在处理，请稍后重试查询");
       await cancelImportBatch(task.projectId, task.batchId).catch(ignoreMissingBatch);
       updateTask(id, resetForRetry);
     } catch (error) {
@@ -162,7 +173,7 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
       }
       updateTask(id, (current) => ({
         ...current, status: "failed", phase: "failed",
-        error: error instanceof Error ? error.message : "批次状态查询失败，请重试",
+        error: `批次状态查询或清理待重试：${uploadErrorMessage(error)}`,
       }));
     }
   }, [markSuccess, updateTask]);
@@ -187,7 +198,11 @@ export function UploadManagerProvider({ children }: { children: ReactNode }) {
     stopping.current = true;
     activeRuns.current.forEach((controller) => controller.abort());
     const batches = tasksRef.current.filter((task) => task.kind === "batch" && task.status !== "success" && task.batchId != null);
-    await Promise.allSettled(batches.map((task) => cancelImportBatch(task.projectId, task.batchId!).catch(ignoreMissingBatch)));
+    await Promise.allSettled(batches.map(async (task) => {
+      const batch = await getImportBatch(task.projectId, task.batchId!).catch((error: unknown) => { ignoreMissingBatch(error); return null; });
+      if (!batch || ["ready", "video_only", "processing"].includes(batch.status)) return;
+      await cancelImportBatch(task.projectId, task.batchId!).catch(ignoreMissingBatch);
+    }));
     stopLocally();
   }, [stopLocally]);
 
