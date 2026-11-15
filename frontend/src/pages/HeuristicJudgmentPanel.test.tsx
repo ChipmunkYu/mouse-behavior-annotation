@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Category, Judgment, Project, Video } from "../api/types";
+import type { Category, CorrectedTrackSummary, Judgment, Project, Video } from "../api/types";
 import { ApiError } from "../api/client";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -12,7 +12,7 @@ vi.mock("../api", () => mocks);
 vi.mock("../media", () => ({ useMediaSource: (input: { videoId: number | null }) => { mocks.media(input); return { status: input.videoId == null ? "idle" : "ready", reload: vi.fn(), cancel: vi.fn() }; } }));
 vi.mock("../components/ConfirmDialog", () => ({ useConfirm: () => [null, mocks.confirm] }));
 vi.mock("../components/DetectionOverlay", () => ({ default: (props: unknown) => { mocks.overlay(props); return null; } }));
-import HeuristicJudgmentPanel, { judgmentSelection, judgmentVersions } from "./HeuristicJudgmentPanel";
+import HeuristicJudgmentPanel, { initialJudgmentDraft, judgmentSelection, judgmentVersions } from "./HeuristicJudgmentPanel";
 
 const unordered: Category = { id: 7, project_id: 1, group: "社交", name: "测试类别", sort_order: 1, is_active: true, participant_mode: "unordered", mouse_count_min: 1, mouse_count_max: 3, role_definitions: [] };
 const roleBased: Category = { ...unordered, id: 8, name: "角色类别", participant_mode: "role_based", mouse_count_min: 2, role_definitions: [{ key: "role_project_actor", name: "发起鼠", min_count: 1, max_count: 1, role_sort_order: 0 }, { key: "role_project_target", name: "接受鼠", min_count: 1, max_count: 1, role_sort_order: 1 }] };
@@ -68,6 +68,67 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
+describe('初始建议安全预填', () => {
+  const tracks = [12, 31].map((display_track_id) => ({ display_track_id, detection_count: 10 } as CorrectedTrackSummary));
+  const contact: Category = { ...roleBased, id: 913, name: 'Snout-head_contact', role_definitions: [
+    { key: 'arbitrary-target-uuid', name: 'Head_contacted', min_count: 1, max_count: 1, role_sort_order: 0 },
+    { key: 'arbitrary-actor-uuid', name: 'Snout_contacting', min_count: 1, max_count: 1, role_sort_order: 1 },
+  ] };
+  const draft = (input: Partial<Judgment['input']> = {}, categories = [contact], value: Partial<Judgment> = {}) => initialJudgmentDraft({ ...pending(), input: { ...pending().input, behavior: 'Snout-head contact', canonical_behavior: 'nose_head_contact', participants: [], ...input }, ...value }, categories, tracks);
+
+  it.each([
+    ['locomotion', 'Moving'], ['stationary', 'Static'], ['理毛', 'Grooming'], ['climb_wall', 'Rearing'],
+    ['接近', 'Approach'], ['一起', 'Together'], ['chase', 'Chasing'], ['attack_review', 'Attack'],
+    ['nose_head_contact', 'Snout-head_contact'], ['nose_tail', 'Snout-rear_contact'], ['huddle', 'Huddling'],
+    ['社会聚集', 'Social clustering'], ['dispersal_review', 'Dispersal'], ['群体同步运动', 'Group locomotion'], ['孤立行为', 'Isolation'],
+  ])('显式语义别名 %s → %s，使用实时任意类别ID', (behavior, name) => {
+    expect(draft({ behavior, canonical_behavior: null }, [{ ...unordered, id: 705, name }])).toEqual({ categoryId: 705, mouseIds: [12, 31], roles: {} });
+  });
+
+  it('selection优先；非首次draft+pending不消费input', () => {
+    const selection = { annotation_id: 1, category_id: 999, mouse_ids: [31], participant_roles: { saved_key: [31] } };
+    expect(draft({}, [contact], { selection })).toEqual({ categoryId: 999, mouseIds: [31], roles: { saved_key: [31] } });
+    for (const value of [{ workflow_status: 'rejected' }, { workflow_status: 'submitted' }, { judgment_status: 'usable' as const }]) expect(draft({}, [contact], value)).toEqual({ categoryId: null, mouseIds: [], roles: {} });
+  });
+
+  it('未知别名、冲突标签、多重匹配与禁用类别均不猜配', () => {
+    for (const input of [{ behavior: 'unknown' }, { canonical_behavior: 'chase' }]) expect(draft(input).categoryId).toBeNull();
+    expect(draft({}, [contact, { ...contact, id: 777, name: '鼻头接触' }]).categoryId).toBeNull();
+    expect(draft({}, [{ ...contact, is_active: false }]).categoryId).toBeNull();
+    expect(draft({ behavior: null, canonical_behavior: 'nose_head_contact' }).categoryId).toBe(913);
+  });
+
+  it.each([
+    ['Approach', 'approach', 'Approaching', 'Approached'], ['Chasing', 'chase', 'Chasing', 'Chased'],
+    ['Attack', 'attack', 'Attacker', 'Attacked'], ['Snout-head_contact', 'nose_head', 'Snout_contacting', 'Head_contacted'],
+    ['Snout-rear_contact', 'nose_tail_contact', 'Snout_contacting', 'Rear_contacted'],
+  ])('%s按实际角色name映射key，角色数组顺序无关', (name, canonical_behavior, actorName, targetName) => {
+    const category = { ...contact, name, role_definitions: contact.role_definitions.map((role, index) => ({ ...role, name: index ? actorName : targetName })) };
+    const expected = { 'arbitrary-actor-uuid': [31], 'arbitrary-target-uuid': [12] };
+    expect(draft({ behavior: name, canonical_behavior, actor_id: 31, target_id: 12 }, [category]).roles).toEqual(expected);
+    expect(draft({ behavior: name, canonical_behavior, participants: [{ role_name: targetName, track_ids: [12] }, { role_name: actorName, track_ids: [31] }] }, [category]).roles).toEqual(expected);
+  });
+
+  it('项目key与角色名一致可赋值；字段冲突、重复占用、超容量均清空角色而保留合法参与鼠', () => {
+    expect(draft({ participants: [{ role_key: 'arbitrary-actor-uuid', role_name: 'Snout_contacting', track_ids: [31] }] }).roles).toEqual({ 'arbitrary-actor-uuid': [31] });
+    for (const input of [
+      { participants: [{ role_key: 'arbitrary-actor-uuid', role_name: 'Head_contacted', track_ids: [31] }] },
+      { actor_id: 12, participants: [{ role_name: 'Snout_contacting', track_ids: [31] }] },
+      { actor_id: 12, target_id: 12 },
+      { participants: [{ role_name: 'Snout_contacting', track_ids: [12, 31] }] },
+      { participants: [{ role_key: 'unknown', role_name: 'Snout_contacting', track_ids: [31] }] },
+    ]) expect(draft(input)).toEqual({ categoryId: 913, mouseIds: [12, 31], roles: {} });
+  });
+
+  it('缺角色、未知参与者结构和-1不推断角色；merge后的旧ID不复用', () => {
+    expect(draft({ actor_id: -1, target_id: -1, participants: [null, 12, 'actor', [], { actor_id: 12 }, { role_name: 'unknown', track_ids: [31] }, { role_key: false, track_ids: '12' }] })).toEqual({ categoryId: 913, mouseIds: [12, 31], roles: {} });
+    expect(draft({ mouse_ids: [], actor_id: 31, target_id: 404, participants: [{ role_name: 'Head_contacted', track_ids: [12, -1, '31', true, 404] }] })).toEqual({ categoryId: 913, mouseIds: [12, 31], roles: { 'arbitrary-actor-uuid': [31], 'arbitrary-target-uuid': [12] } });
+    const value: Judgment = { ...pending(), input: { ...pending().input, behavior: 'nose_head_contact', actor_id: 12, target_id: 31 } };
+    expect(initialJudgmentDraft(value, [contact], tracks.filter((track) => track.display_track_id !== 12))).toEqual({ categoryId: 913, mouseIds: [31], roles: { 'arbitrary-target-uuid': [31] } });
+    expect(draft({ actor_id: 31, target_id: 12 }, [{ ...contact, role_definitions: contact.role_definitions.map((role) => ({ ...role, name: '未知角色' })) }]).roles).toEqual({});
+  });
+});
+
 describe("启发式判断面板", () => {
   it.each([false, true])("常驻摘要即时反映草稿、角色和空值，切换模式仍显示（复核=%s）", async (review) => {
     await render(review);
@@ -75,7 +136,7 @@ describe("启发式判断面板", () => {
     expect(summary.closest('.judgment-side-header')).not.toBeNull();
     expect(summary.closest('[role="tabpanel"]')).toBeNull();
     expect(summary.textContent).toBe('行为类别：未选择参与对象：未选择');
-    expect(summary.textContent).not.toContain('Track 12'); // input中的原始建议不是草稿。
+    expect(summary.textContent).not.toContain('Track 12'); // 未知别名不会猜配。
     await selectCategory(7); await checkTrack(12); await checkTrack(31);
     expect(summary.textContent).toBe('行为类别：测试类别参与对象：Track 12、Track 31');
     await checkTrack(12);
@@ -123,7 +184,7 @@ describe("启发式判断面板", () => {
     expect(mocks.putJudgment).not.toHaveBeenCalled();
   });
 
-  it("同名原建议也不选类别、参与鼠或角色；无旧快捷键和通用标注操作", async () => {
+  it("未知别名即使同名也不猜配；无旧快捷键和通用标注操作", async () => {
     await render();
     expect(container.querySelector("select")?.value).toBe("");
     expect(container.textContent).toContain("测试类别");
@@ -153,6 +214,86 @@ describe("启发式判断面板", () => {
     expect(mocks.submitVideoForReview.mock.calls[0][2]).toMatchObject({ expected_annotation_revision: 2 });
     expect(container.textContent).toContain("已提交复核，尚未最终通过");
     expect([...container.querySelectorAll('button')].some((button) => button.textContent === '通过')).toBe(false);
+  });
+
+  it("首次已知类别预填参与鼠而不写接口；人工修改经异步刷新及模式切换仍保留", async () => {
+    mocks.listCategories.mockResolvedValue([{ ...unordered, name: "Together" }]);
+    mocks.getJudgment.mockResolvedValue({ ...pending(), input: { ...pending().input, behavior: "一起" } });
+    function Refreshable() {
+      const [refreshKey, setRefreshKey] = useState(0);
+      return <><button onClick={() => setRefreshKey((key) => key + 1)}>刷新上下文</button><HeuristicJudgmentPanel projectId={1} video={video} project={project} refreshKey={String(refreshKey)} /></>;
+    }
+    await act(async () => root.render(<RouterProvider router={createMemoryRouter([{ path: "/", element: <Refreshable /> }])} />));
+    expect(container.querySelector("select")?.value).toBe("7");
+    expect(container.querySelectorAll('.mouse-id-item.selected')).toHaveLength(2);
+    expect(container.textContent).not.toContain('有未保存的修改');
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+    expect(mocks.submitVideoForReview).not.toHaveBeenCalled();
+    await checkTrack(12);
+    let resolve!: (value: Judgment) => void;
+    mocks.getJudgment.mockImplementationOnce(() => new Promise<Judgment>((done) => { resolve = done; }));
+    await click('刷新上下文');
+    await act(async () => resolve({ ...pending(), selection: { annotation_id: 10, category_id: 7, mouse_ids: [12], participant_roles: {} } }));
+    expect(container.querySelectorAll('.mouse-id-item.selected')).toHaveLength(1);
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toContain('Track 31');
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).not.toContain('Track 12');
+    await click('Track 修正'); await click('行为信息');
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toContain('Track 31');
+    expect(container.textContent).toContain('有未保存的修改');
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+    expect(mocks.submitVideoForReview).not.toHaveBeenCalled();
+  });
+
+  it("首次有向角色缺失保留待分配，不猜方向；人工分配遇409仍保留项目角色key", async () => {
+    mocks.listCategories.mockResolvedValue([{ ...roleBased, name: "Snout-head_contact", role_definitions: roleBased.role_definitions.map((role, index) => ({ ...role, name: index ? "Head_contacted" : "Snout_contacting" })) }]);
+    const value = { ...pending(), input: { ...pending().input, behavior: "Snout-head_contact", canonical_behavior: "nose_head_contact", participants: [], actor_id: -1, target_id: -1 } };
+    mocks.getJudgment.mockResolvedValue(value);
+    mocks.putJudgment.mockRejectedValueOnce(new ApiError(409, "版本冲突"));
+    await render();
+    expect(container.querySelector('select')?.value).toBe('8');
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toContain('待分配：Track 12、Track 31');
+    expect(container.querySelector('.role-slot-chips .role-track-chip')).toBeNull();
+    expect([...container.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === '通过')?.disabled).toBe(true);
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+    await checkTrack(31, 0); await checkTrack(12, 1);
+    await click('通过');
+    expect(mocks.putJudgment).toHaveBeenCalledOnce();
+    expect(mocks.putJudgment.mock.calls[0][2].participant_roles).toEqual({ role_project_actor: [31], role_project_target: [12] });
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toContain('Snout_contacting：Track 31Head_contacted：Track 12');
+    expect(mocks.submitVideoForReview).not.toHaveBeenCalled();
+  });
+
+  it("现有selection覆盖已知input，首次已知方向仅预填不保存", async () => {
+    const category = { ...roleBased, name: 'Approach', role_definitions: roleBased.role_definitions.map((role, index) => ({ ...role, name: index ? 'Approached' : 'Approaching' })) };
+    const value: Judgment = { ...pending(), input: { ...pending().input, behavior: 'approach', actor_id: 31, target_id: 12 } };
+    mocks.listCategories.mockResolvedValue([unordered, category]);
+    mocks.getJudgment.mockResolvedValue({ ...value, selection: { annotation_id: 10, category_id: 7, mouse_ids: [12], participant_roles: {} } });
+    await render();
+    expect(container.querySelector('select')?.value).toBe('7');
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toBe('行为类别：测试类别参与对象：Track 12');
+    await act(async () => root.unmount()); root = createRoot(container);
+    mocks.getJudgment.mockResolvedValue(value);
+    await render();
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).toBe('行为类别：ApproachApproaching：Track 31Approached：Track 12');
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+    expect(mocks.submitVideoForReview).not.toHaveBeenCalled();
+  });
+
+  it("首次预填后的merge刷新不重新消费input或复用旧ID", async () => {
+    mocks.listCategories.mockResolvedValue([{ ...unordered, name: 'Together' }]);
+    mocks.getJudgment.mockResolvedValue({ ...pending(), input: { ...pending().input, behavior: 'Together' } });
+    mocks.checkIdentityEdit.mockResolvedValue({ operation: 'merge', retained_display_track_id: 31 });
+    mocks.commitIdentityEdit.mockImplementation(async () => { mocks.getCorrectedTracks.mockResolvedValue({ items: [{ display_track_id: 31 }], pages: 1 }); });
+    await render();
+    expect(container.querySelector('select')?.value).toBe('7');
+    await click('Track 修正');
+    await act(async () => { container.querySelectorAll<HTMLButtonElement>('.identity-track').forEach((button) => button.click()); });
+    await click('Merge 所选'); await click('确认执行');
+    await click('行为信息');
+    expect(container.querySelector('select')?.value).toBe('');
+    expect(container.querySelector('[aria-label="当前行为摘要"]')?.textContent).not.toContain('Track 12');
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+    expect(mocks.submitVideoForReview).not.toHaveBeenCalled();
   });
 
   it("首次判断可直接不可用，保留证据、无删除、无复核提交且不可恢复", async () => {

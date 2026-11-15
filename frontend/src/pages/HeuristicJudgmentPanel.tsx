@@ -47,6 +47,75 @@ export function judgmentSelectionError(category: Category | undefined, mouseIds:
   return null;
 }
 
+type JudgmentDraft = { categoryId: number | null; mouseIds: number[]; roles: Record<string, number[]> };
+const labelKey = (label: string) => label.trim().toLowerCase().replace(/[\s_-]+/g, "_");
+// Explicit expert aliases, including the production Project 2 display names; never category IDs or role keys.
+const behaviorAliases = [
+  ["locomotion", "moving", "移动"], ["static", "stationary", "静止"], ["grooming", "理毛"],
+  ["rearing", "climb_wall", "站立攀爬", "爬墙"], ["approach", "接近"], ["together", "一起"],
+  ["chasing", "chase", "追逐"], ["attack", "attack_review", "攻击", "攻击行为"],
+  ["snout_head_contact", "nose_head_contact", "nose_head", "鼻头接触"],
+  ["snout_rear_contact", "nose_tail_contact", "nose_tail", "鼻尾接触"],
+  ["huddling", "huddle", "扎堆", "扎堆行为"], ["social_clustering", "社会聚集"],
+  ["dispersal", "dispersal_review", "群体分散"], ["group_locomotion", "群体同步运动"],
+  ["isolation", "孤立", "孤立行为"],
+];
+const directionalRoles: Record<string, [string[], string[]]> = {
+  approach: [["approaching", "主动接近"], ["approached", "被接近"]],
+  chasing: [["chasing", "追逐"], ["chased", "被追逐"]],
+  attack: [["attacker", "攻击"], ["attacked", "被攻击"]],
+  snout_head_contact: [["snout_contacting", "鼻部探测方"], ["head_contacted", "头部被接触方"]],
+  snout_rear_contact: [["snout_contacting", "鼻部探测方"], ["rear_contacted", "后躯被接触方"]],
+};
+
+/** Only an unsaved initial draft may consume input; every ID is checked against current corrected tracks. */
+export function initialJudgmentDraft(value: Judgment, categories: Category[], tracks: CorrectedTrackSummary[]): JudgmentDraft {
+  if (value.selection) return { categoryId: value.selection.category_id, mouseIds: value.selection.mouse_ids, roles: value.selection.participant_roles };
+  const empty: JudgmentDraft = { categoryId: null, mouseIds: [], roles: {} };
+  if (value.workflow_status !== "draft" || value.judgment_status !== "pending") return empty;
+  const labels = [value.input.behavior, value.input.canonical_behavior].filter((label): label is string => typeof label === "string" && !!label.trim());
+  const aliases = labels.map((label) => behaviorAliases.find((group) => group.includes(labelKey(label))));
+  if (!aliases.length || aliases.some((group) => !group || group !== aliases[0])) return empty;
+  const matches = categories.filter((category) => category.is_active && aliases[0]!.includes(labelKey(category.name)));
+  if (matches.length !== 1) return empty;
+  const category = matches[0];
+  const valid = new Set(tracks.map((track) => track.display_track_id));
+  const legalId = (id: unknown): id is number => typeof id === "number" && Number.isSafeInteger(id) && id >= 0 && valid.has(id);
+  const legalIds = (ids: unknown): number[] => Array.isArray(ids) ? [...new Set(ids.filter(legalId))] : [];
+  const mouseIds = new Set(legalIds(value.input.mouse_ids));
+  const roles: Record<string, number[]> = {};
+  const names = directionalRoles[aliases[0]![0]];
+  const semanticRole = (label: string) => names?.findIndex((group) => group.includes(labelKey(label)));
+  const roleFor = (label: string) => {
+    const index = labelKey(label) === "actor" ? 0 : labelKey(label) === "target" ? 1 : semanticRole(label);
+    const found = category.role_definitions.filter((role) => role.key === label || (index != null && index >= 0 && semanticRole(role.name) === index));
+    return found.length === 1 ? found[0].key : null;
+  };
+  let conflict = false;
+  const assign = (key: string | null, ids: number[]) => {
+    if (!key || !ids.length) return;
+    if (roles[key] && (roles[key].length !== ids.length || roles[key].some((id) => !ids.includes(id)))) conflict = true;
+    roles[key] = ids;
+  };
+  for (const [label, id] of [["actor", value.input.actor_id], ["target", value.input.target_id]] as const) {
+    if (legalId(id)) { mouseIds.add(id); if (category.participant_mode === "role_based") assign(roleFor(label), [id]); }
+  }
+  for (const participant of Array.isArray(value.input.participants) ? value.input.participants : []) {
+    if (!participant || typeof participant !== "object" || Array.isArray(participant)) continue;
+    const entry = participant as Record<string, unknown>;
+    const ids = legalIds(entry.track_ids);
+    ids.forEach((id) => mouseIds.add(id));
+    if (category.participant_mode !== "role_based" || !ids.length) continue;
+    const labels = [entry.role_key, entry.role_name].filter((label) => label != null);
+    const keys = labels.map((label) => typeof label === "string" ? roleFor(label) : null);
+    if (keys.length && keys.some((key) => !key || key !== keys[0])) { conflict = true; continue; }
+    assign(keys[0] ?? null, ids);
+  }
+  const assigned = Object.values(roles).flat();
+  if (new Set(assigned).size !== assigned.length || category.role_definitions.some((role) => role.max_count != null && (roles[role.key]?.length ?? 0) > role.max_count)) conflict = true;
+  return { categoryId: category.id, mouseIds: [...mouseIds].sort((a, b) => a - b), roles: conflict ? {} : roles };
+}
+
 type Props = {
   projectId: number;
   video: Video;
@@ -133,7 +202,8 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
   const loadGeneration = useRef(0);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const actionLock = useRef(false);
-  const retainedDraft = useRef<{ categoryId: number | null; mouseIds: number[]; roles: Record<string, number[]> } | null>(null);
+  const retainedDraft = useRef<JudgmentDraft | null>(null);
+  const initialized = useRef(false);
   const [confirmDialog, confirm] = useConfirm();
   const blocker = useBlocker(dirty && !busy);
   const media = useMediaSource({ videoId: videoElement ? video.id : null, surface: review ? "review" : "annotate", videoRef });
@@ -152,10 +222,10 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
   const selectionError = judgmentSelectionError(category, mouseIds, roles);
   const frame = Math.max(0, Math.floor(currentTime * (video.fps || 30)));
 
-  const applyJudgment = useCallback((value: Judgment) => {
+  const applyJudgment = useCallback((value: Judgment, draft?: JudgmentDraft) => {
     retainedDraft.current = null;
-    setJudgment(value); setCategoryId(value.selection?.category_id ?? null);
-    setMouseIds(value.selection?.mouse_ids ?? []); setRoles(value.selection?.participant_roles ?? {});
+    setJudgment(value); setCategoryId(draft ? draft.categoryId : value.selection?.category_id ?? null);
+    setMouseIds(draft ? draft.mouseIds : value.selection?.mouse_ids ?? []); setRoles(draft ? draft.roles : value.selection?.participant_roles ?? {});
     setDirty(false); setPreview(null); setExplicitConfirmation(false);
   }, []);
 
@@ -166,7 +236,9 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
     ]);
     if (!mounted.current || generation !== loadGeneration.current) return;
     const draft = retainedDraft.current;
-    applyJudgment(value); setCategories(cats);
+    const initial = !initialized.current ? initialJudgmentDraft(value, cats, tracks) : undefined;
+    initialized.current = true;
+    applyJudgment(value, initial); setCategories(cats);
     if (draft && (["draft", "rejected"].includes(value.workflow_status) || (review && value.workflow_status === "submitted"))) {
       retainedDraft.current = draft; setCategoryId(draft.categoryId); setMouseIds(draft.mouseIds); setRoles(draft.roles); setDirty(true);
     }
@@ -214,7 +286,10 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
     await onChanged?.();
   }
 
-  function changed() { setDirty(true); setPreview(null); }
+  function changed(patch: Partial<JudgmentDraft>) {
+    retainedDraft.current = { ...(retainedDraft.current ?? { categoryId, mouseIds, roles }), ...patch };
+    setDirty(true); setPreview(null);
+  }
 
   async function saveUsable() {
     if (!judgment || !category || selectionError || !canEdit) return;
@@ -332,8 +407,8 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
       </div>
       {workspaceMode === "behavior" ? <div id={`${tabPrefix}-behavior-panel`} className="workspace-panel" role="tabpanel" aria-labelledby={`${tabPrefix}-behavior-tab`}>
       <fieldset disabled={!canEdit || busy || preview != null} className="judgment-fields"><legend>人工确认</legend>
-        <label className="field" htmlFor={`judgment-category-${video.id}`}>项目类别<select id={`judgment-category-${video.id}`} className="select" value={categoryId ?? ""} onChange={(event) => { setCategoryId(event.target.value ? Number(event.target.value) : null); setMouseIds([]); setRoles({}); changed(); }}><option value="">请选择，不采用上游标签自动配对</option>{categories.filter((item) => item.is_active || item.id === categoryId).map((item) => <option key={item.id} value={item.id} disabled={!item.is_active}>{item.group} / {item.name}{item.is_active ? "" : "（已停用）"}</option>)}</select></label>
-        {category ? <ParticipantChoices key={`${category.id}:${dataVersion}`} category={category} tracks={tracks} onTrackHandler={participantTrackHandler} mouseIds={mouseIds} roles={roles} disabled={!canEdit || busy || preview != null} onMouseIds={(ids) => { setMouseIds(ids); changed(); }} onRoles={(value) => { setRoles(value); changed(); }} /> : <p className="field-hint">初始不选择类别或角色；请根据画面人工确认，不按鼠 ID 顺序推测。</p>}
+        <label className="field" htmlFor={`judgment-category-${video.id}`}>项目类别<select id={`judgment-category-${video.id}`} className="select" value={categoryId ?? ""} onChange={(event) => { const categoryId = event.target.value ? Number(event.target.value) : null; setCategoryId(categoryId); setMouseIds([]); setRoles({}); changed({ categoryId, mouseIds: [], roles: {} }); }}><option value="">请选择项目类别</option>{categories.filter((item) => item.is_active || item.id === categoryId).map((item) => <option key={item.id} value={item.id} disabled={!item.is_active}>{item.group} / {item.name}{item.is_active ? "" : "（已停用）"}</option>)}</select></label>
+        {category ? <ParticipantChoices key={`${category.id}:${dataVersion}`} category={category} tracks={tracks} onTrackHandler={participantTrackHandler} mouseIds={mouseIds} roles={roles} disabled={!canEdit || busy || preview != null} onMouseIds={(ids) => { setMouseIds(ids); changed({ mouseIds: ids }); }} onRoles={(value) => { setRoles(value); changed({ roles: value }); }} /> : <p className="field-hint">未能唯一匹配已知类别，请根据画面人工选择；不按鼠 ID 顺序推测角色。</p>}
       </fieldset>
       {canEdit ? <><div className="field-hint" role="status">{busy ? "保存中…" : selectionError ?? (dirty ? "有未保存的修改" : "类别及参与关系已选择")}</div>{review && submitted ? <button className="btn btn-primary" disabled={busy || !!selectionError || preview != null} onClick={() => void saveUsable()}>保存修改并刷新快照</button> : null}{dirty ? <div className="judgment-actions">{!submitted ? <button className="btn" disabled={busy || !!selectionError || preview != null} onClick={() => void saveUsable()}>保存修改</button> : null}<button className="btn" disabled={busy} onClick={() => applyJudgment(judgment)}>放弃未保存修改</button></div> : null}</> : <p className="field-hint">{readOnlyMessage}</p>}
       {!review && submitted ? <div className="judgment-actions"><button className="btn" disabled={busy} onClick={() => void (async () => { if (!await confirm({ title: "撤回本次提交？", message: "未完成期间可以撤回后重新判断；旧快照与决定会保留。", confirmLabel: "撤回提交" })) return; await run(async () => { await withdrawVideo(pid, video.id, judgmentVersions(judgment)); await load(); await onChanged?.(); }); })()}>撤回提交</button>{project?.can_review ? <Link className="btn" to={`/projects/${pid}/review?video=${video.id}`}>进入复核</Link> : null}</div> : null}
