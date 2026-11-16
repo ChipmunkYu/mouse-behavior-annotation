@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useState } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,11 +7,11 @@ import type { Category, CorrectedTrackSummary, Judgment, Project, Video } from "
 import { ApiError } from "../api/client";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const mocks = vi.hoisted(() => ({ getJudgment: vi.fn(), listCategories: vi.fn(), getCorrectedTracks: vi.fn(), getIdentityEditHistory: vi.fn(), putJudgment: vi.fn(), submitVideoForReview: vi.fn(), withdrawVideo: vi.fn(), checkIdentityEdit: vi.fn(), commitIdentityEdit: vi.fn(), revertIdentityEdit: vi.fn(), confirm: vi.fn(), overlay: vi.fn(), media: vi.fn(), getBehaviorReviewState: vi.fn(), putBehaviorDecision: vi.fn(), createVideoReview: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getCurrentDetectionImport: vi.fn(), getDetections: vi.fn(), getJudgment: vi.fn(), listCategories: vi.fn(), getCorrectedTracks: vi.fn(), getIdentityEditHistory: vi.fn(), putJudgment: vi.fn(), submitVideoForReview: vi.fn(), withdrawVideo: vi.fn(), checkIdentityEdit: vi.fn(), commitIdentityEdit: vi.fn(), revertIdentityEdit: vi.fn(), confirm: vi.fn(), overlay: vi.fn(), media: vi.fn(), getBehaviorReviewState: vi.fn(), putBehaviorDecision: vi.fn(), createVideoReview: vi.fn() }));
 vi.mock("../api", () => mocks);
 vi.mock("../media", () => ({ useMediaSource: (input: { videoId: number | null }) => { mocks.media(input); return { status: input.videoId == null ? "idle" : "ready", reload: vi.fn(), cancel: vi.fn() }; } }));
 vi.mock("../components/ConfirmDialog", () => ({ useConfirm: () => [null, mocks.confirm] }));
-vi.mock("../components/DetectionOverlay", () => ({ default: (props: unknown) => { mocks.overlay(props); return null; } }));
+vi.mock("../components/DetectionOverlay", () => ({ default: (props: unknown) => mocks.overlay(props) ?? null }));
 import HeuristicJudgmentPanel, { initialJudgmentDraft, judgmentSelection, judgmentVersions } from "./HeuristicJudgmentPanel";
 
 const unordered: Category = { id: 7, project_id: 1, group: "社交", name: "测试类别", sort_order: 1, is_active: true, participant_mode: "unordered", mouse_count_min: 1, mouse_count_max: 3, role_definitions: [] };
@@ -66,7 +66,7 @@ beforeEach(() => {
   });
   mocks.putJudgment.mockImplementation(async (_pid, _vid, input) => ({ ...pending(), judgment_status: input.judgment_status, workflow_status: input.judgment_status === "unusable" ? "unusable" : "draft", annotation_revision: 2, selection: input.judgment_status === "unusable" ? null : { annotation_id: 10, category_id: input.category_id, mouse_ids: input.mouse_ids ?? [12, 31], participant_roles: input.participant_roles } }));
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('初始建议安全预填', () => {
   const tracks = [12, 31].map((display_track_id) => ({ display_track_id, detection_count: 10 } as CorrectedTrackSummary));
@@ -130,6 +130,79 @@ describe('初始建议安全预填', () => {
 });
 
 describe("启发式判断面板", () => {
+  it.each([false, true])("沿用人工页默认框命中、空白播放与画布外播放/时间轴（复核=%s）", async (review) => {
+    const { default: DetectionOverlay } = await vi.importActual<typeof import("../components/DetectionOverlay")>("../components/DetectionOverlay");
+    mocks.overlay.mockImplementation((props) => createElement(DetectionOverlay, props));
+    mocks.listCategories.mockResolvedValue([{ ...unordered, name: "Huddling" }]);
+    mocks.getJudgment.mockResolvedValue(review ? reviewJudgment() : { ...pending(), input: { ...pending().input, behavior: "huddle" } });
+    mocks.getCurrentDetectionImport.mockResolvedValue({ id: 1, revision: 1, status: "active", fps: 30, width: 100, height: 100 });
+    mocks.getDetections.mockResolvedValue({ detections: [0, 15].map((frame_index) => ({ detection_id: frame_index, frame_index, display_track_id: 12, box_xyxy_px: [10, 10, 30, 30] })), total: 2 });
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(100);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    let paused = true;
+    vi.spyOn(HTMLMediaElement.prototype, "paused", "get").mockImplementation(() => paused);
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function (this: HTMLMediaElement) { paused = false; this.dispatchEvent(new Event("play")); return Promise.resolve(); });
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(function (this: HTMLMediaElement) { paused = true; this.dispatchEvent(new Event("pause")); });
+    await render(review);
+    const element = container.querySelector("video")!;
+    const canvas = container.querySelector("canvas")!;
+    Object.defineProperty(element, "duration", { configurable: true, value: 5 });
+    await act(async () => element.dispatchEvent(new Event("durationchange")));
+    const progress = container.querySelector<HTMLElement>('[aria-label="时间轴"]')!;
+    vi.spyOn(progress, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
+    const seek = async (time: number) => {
+      await act(async () => progress.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: time / 5 * 100 })));
+      expect(element.currentTime).toBe(time);
+      await act(async () => element.dispatchEvent(new Event("timeupdate")));
+    };
+    expect(canvas.classList.contains("interactive")).toBe(true); // 与人工页相同，默认点击检测框选鼠。
+    expect(container.textContent).not.toContain("画面选鼠");
+    expect(element.controls).toBe(false);
+    expect(container.querySelector('input[type="range"]')).toBeNull();
+    expect(progress.closest(".video-wrap")).toBeNull();
+    const controls = container.querySelector(".judgment-frame-controls")!;
+    expect(controls.closest(".video-wrap")).toBeNull();
+    expect([...controls.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["▶ 播放 [Space]", "⟨ 退一帧 [←]", "进一帧 [→] ⟩"]);
+    await act(async () => canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 80, clientY: 80 })));
+    expect(play).toHaveBeenCalledOnce();
+    await click("⏸ 暂停 [Space]");
+    expect(pause).toHaveBeenCalled();
+    await seek(0.5);
+    const selectedBefore = container.querySelectorAll(".mouse-id-item.selected").length;
+    await act(async () => canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 20, clientY: 20 })));
+    expect(container.querySelectorAll(".mouse-id-item.selected").length).not.toBe(selectedBefore);
+    expect(play).toHaveBeenCalledOnce(); // 命中鼠框不播放；空白才转发给视频。
+    await click("▶ 播放 [Space]");
+    expect(play).toHaveBeenCalledTimes(2);
+    await seek(1);
+    expect(paused).toBe(false);
+    await click("进一帧 [→] ⟩");
+    expect(element.currentTime).toBeCloseTo(1 + 1 / 30);
+    await click("⟨ 退一帧 [←]");
+    expect(element.currentTime).toBeCloseTo(1);
+    expect(paused).toBe(false); // 人工页逐帧不强制暂停。
+    await act(async () => element.dispatchEvent(new Event("timeupdate")));
+    expect(controls.querySelector(".mono")?.textContent).toContain("帧 30");
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", bubbles: true })));
+    expect(paused).toBe(true);
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { code: "ArrowRight", shiftKey: true, bubbles: true })));
+    expect(element.currentTime).toBeCloseTo(1 + 10 / 30);
+    await act(async () => container.querySelector("select")!.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", bubbles: true })));
+    expect(paused).toBe(true);
+    await click("放弃未保存修改");
+    await click("Track 修正");
+    await seek(0.5);
+    await act(async () => canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 20, clientY: 20 })));
+    expect(container.querySelector(".identity-track.selected")?.textContent).toContain("12");
+    await click("行为信息");
+    expect(canvas.classList.contains("interactive")).toBe(true);
+    expect(mocks.putJudgment).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("常驻摘要即时反映草稿、角色和空值，切换模式仍显示（复核=%s）", async (review) => {
     await render(review);
     const summary = container.querySelector('[aria-label="当前行为摘要"]')!;
@@ -171,7 +244,7 @@ describe("启发式判断面板", () => {
     expect(side.querySelector('.identity-panel')).not.toBeNull();
     expect(container.querySelector('.judgment-fields')).toBeNull();
     expect(main.querySelector('video')).toBe(videoElement);
-    expect([...main.querySelectorAll('.judgment-player-controls button')].map((button) => button.textContent)).toEqual(['前一帧', '后一帧', '通过', '不可用']);
+    expect([...main.querySelectorAll('.judgment-player-controls button')].map((button) => button.textContent)).toEqual(['▶ 播放 [Space]', '⟨ 退一帧 [←]', '进一帧 [→] ⟩', '通过', '不可用']);
     expect(side.textContent).not.toContain('不可用');
     await click('行为信息');
     expect(container.querySelector('select')?.value).toBe('7');
@@ -206,8 +279,8 @@ describe("启发式判断面板", () => {
     await checkTrack(31, 0); await checkTrack(12, 1);
     const pass = [...container.querySelectorAll("button")].find((button) => button.textContent === "通过")!;
     expect(pass.closest('.judgment-player-controls')).not.toBeNull();
-    expect(pass.closest('.judgment-player-controls')?.textContent).toContain("前一帧");
-    expect(pass.closest('.judgment-player-controls')?.textContent).toContain("后一帧");
+    expect(pass.closest('.judgment-player-controls')?.textContent).toContain("退一帧");
+    expect(pass.closest('.judgment-player-controls')?.textContent).toContain("进一帧");
     await click("通过");
     expect(mocks.putJudgment.mock.calls[0][2]).toEqual({ judgment_status: "usable", category_id: 8, participant_roles: { role_project_actor: [31], role_project_target: [12] }, ...judgmentVersions(pending()) });
     expect(mocks.putJudgment.mock.calls[0][2]).not.toHaveProperty("mouse_ids");

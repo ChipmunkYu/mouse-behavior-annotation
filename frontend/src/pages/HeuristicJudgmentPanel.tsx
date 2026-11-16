@@ -6,6 +6,7 @@ import type { Category, CorrectedTrackSummary, IdentityEditCheckRequest, Identit
 import { Card, EmptyState, Loading, WorkflowBadge } from "../components/ui";
 import { useConfirm } from "../components/ConfirmDialog";
 import DetectionOverlay, { type OverlayFrameData } from "../components/DetectionOverlay";
+import Timeline from "../components/Timeline";
 import { MouseIdsPanel, RoleSlotsPanel, IdentityPanel, tracksForOverlayFrame } from "../components/AnnotationTrackPanels";
 import { ParticipantSummary } from "../components/ParticipantSummary";
 import { useRoleAssignment } from "../components/useRoleAssignment";
@@ -185,6 +186,8 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
   const [notice, setNotice] = useState<string | null>(null);
   const [reviewFeedback, setReviewFeedback] = useState("");
   const [currentTime, setCurrentTime] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
   const [identityIds, setIdentityIds] = useState<number[]>([]);
   const [preview, setPreview] = useState<{ request: IdentityEditCheckRequest; result: IdentityEditCheckResponse } | null>(null);
   const [confirmedIds, setConfirmedIds] = useState<number[]>([]);
@@ -221,6 +224,40 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
   const canEdit = Boolean(!disabled && contextReady && judgment && project && !terminal && (submitted ? review && project.can_review : ["draft", "rejected"].includes(judgment.workflow_status)));
   const selectionError = judgmentSelectionError(category, mouseIds, roles);
   const frame = Math.max(0, Math.floor(currentTime * (video.fps || 30)));
+  const timelineDuration = duration > 0 ? duration : video.duration && video.duration > 0 ? video.duration : null;
+
+  function togglePlay() {
+    const element = videoRef.current;
+    if (!element || media.status !== "ready") return;
+    if (element.paused) void element.play().catch(() => setError("播放失败，请重试。"));
+    else element.pause();
+  }
+
+  // 与 AnnotatePage 相同：逐帧和时间轴跳转不改变播放/暂停状态。
+  function step(direction: -1 | 1, frames = 1) {
+    const element = videoRef.current;
+    if (!element) return;
+    const fps = video.fps && video.fps > 0 ? video.fps : 30;
+    element.currentTime = Math.min(Math.max(0, element.currentTime + direction * frames / fps), element.duration || Number.MAX_VALUE);
+  }
+
+  function seekTo(time: number) {
+    const element = videoRef.current;
+    if (element) element.currentTime = Math.min(Math.max(0, time), element.duration || time);
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (media.status !== "ready" || document.querySelector(".modal-overlay") || (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, button, [contenteditable=true]"))) return;
+      if (!["Space", "ArrowLeft", "ArrowRight"].includes(event.code)) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.code === "Space") togglePlay();
+      else step(event.code === "ArrowLeft" ? -1 : 1, event.shiftKey ? 10 : 1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [media.status, video.fps]);
 
   const applyJudgment = useCallback((value: Judgment, draft?: JudgmentDraft) => {
     retainedDraft.current = null;
@@ -374,19 +411,25 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
     <section className="annotate-main judgment-main" aria-label="视频主区">
     <Card className="player-card" title={review ? "启发式结果复核" : "启发式结果判断"} extra={<WorkflowBadge value={judgment.workflow_status} revision={judgment.annotation_revision} />}>
       <div className="video-wrap judgment-player">
-        <video ref={attachVideo} controls playsInline preload="metadata" className={media.status === "ready" ? "" : "media-player-pending"} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} />
-        {media.status === "ready" && videoElement ? <DetectionOverlay projectId={pid} videoId={video.id} video={videoElement} showOnlySelected={false} interactive={canEdit && !busy && preview == null && (workspaceMode === "identity" ? !dirty : !!category)} onToggleTrack={(id) => workspaceMode === "identity" ? toggleIdentityTrack(id) : participantTrackHandler.current?.(id)} onFrameData={setFrameData} currentTime={currentTime} fallbackFps={video.fps} selectedIds={workspaceMode === "identity" ? identityIds : selectedIds} trackRoleLabels={roleLabels} refreshKey={dataVersion} /> : null}
+        <video ref={attachVideo} playsInline preload="metadata" className={media.status === "ready" ? "" : "media-player-pending"} title="点击播放 / 暂停 [Space]" onClick={togglePlay} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} />
+        {media.status === "ready" && videoElement ? <DetectionOverlay projectId={pid} videoId={video.id} video={videoElement} showOnlySelected={false} interactive onToggleTrack={(id) => { if (canEdit && !busy && preview == null && (workspaceMode === "identity" ? !dirty : !!category)) { if (workspaceMode === "identity") toggleIdentityTrack(id); else participantTrackHandler.current?.(id); } }} onFrameData={setFrameData} currentTime={currentTime} fallbackFps={video.fps} selectedIds={workspaceMode === "identity" ? identityIds : selectedIds} trackRoleLabels={roleLabels} refreshKey={dataVersion} /> : null}
         <MediaLoadProgress state={media} onCancel={media.cancel} />
         {media.status === "pending" || media.status === "failed" || media.status === "cancelled" ? <div className="media-status-overlay"><EmptyState compact title="播放资源暂不可用" hint={media.message} /><button className="btn btn-sm" onClick={media.reload}>重试</button></div> : null}
       </div>
       <div className="player-controls judgment-player-controls">
-        <div className="judgment-frame-controls">{([-1, 1] as const).map((direction) => <button key={direction} className="btn btn-sm" disabled={media.status !== "ready"} onClick={() => { const element = videoRef.current; if (element) { element.pause(); element.currentTime = Math.max(0, Math.min(element.duration, element.currentTime + direction / (video.fps || 30))); setCurrentTime(element.currentTime); } }}>{direction === -1 ? "前一帧" : "后一帧"}</button>)}<span className="mono">{formatTime(currentTime)} · 帧 {frame}</span></div>
+        <div className="judgment-frame-controls">
+          <button type="button" className="btn btn-sm" disabled={media.status !== "ready"} onClick={(event) => { event.currentTarget.blur(); togglePlay(); }}>{playing ? "⏸ 暂停 [Space]" : "▶ 播放 [Space]"}</button>
+          <button type="button" className="btn btn-sm" disabled={media.status !== "ready"} onClick={(event) => { event.currentTarget.blur(); step(-1); }}>⟨ 退一帧 [←]</button>
+          <button type="button" className="btn btn-sm" disabled={media.status !== "ready"} onClick={(event) => { event.currentTarget.blur(); step(1); }}>进一帧 [→] ⟩</button>
+          <span className="mono">{formatTime(currentTime)} · 帧 {frame}</span>
+        </div>
         {review || canEdit ? <div className="judgment-disposition-actions" aria-label={review ? "启发式复核决策" : "启发式判断处置"}>
           {review ? <><button className="btn btn-primary" disabled={!canEdit || !submitted || !project?.can_review || busy || dirty || preview != null} onClick={() => void decideReview("approved")}>通过</button><button className="btn btn-danger" disabled={!canEdit || !submitted || !project?.can_review || busy || dirty || preview != null} onClick={() => void decideReview("unusable")}>不可用</button><button className="btn" disabled={!canEdit || !submitted || !project?.can_review || busy || dirty || preview != null || !reviewFeedback.trim()} onClick={() => void decideReview("rejected")}>退回</button></> : !submitted ? <><button className="btn btn-primary" disabled={busy || !!selectionError || preview != null} onClick={() => void pass()}>通过</button><button className="btn btn-danger" disabled={busy || preview != null} onClick={() => void markUnusable()}>不可用</button></> : null}
         </div> : null}
       </div>
+      {timelineDuration && timelineDuration > 0 ? <div style={{ padding: "0 10px 10px" }}><Timeline duration={timelineDuration} currentTime={currentTime} annotations={[]} categoryById={new Map(categories.map((item) => [item.id, item]))} draftStartTime={judgment.input.time_range.start} draftEndTime={judgment.input.time_range.end} draftStartFrame={judgment.input.frame_range.start} draftEndFrame={judgment.input.frame_range.end} draftColor={category?.color} onSeek={seekTo} /></div> : <div className="frame-preview" style={{ padding: "0 10px 10px", color: "var(--text-3)" }}>暂无时长信息，时间轴不可用（可在视频库中补充 duration 元数据）</div>}
       {review && submitted ? <div className="field review-comment-field"><label htmlFor={`heuristic-review-feedback-${video.id}`}>退回原因（退回时必填）</label><textarea id={`heuristic-review-feedback-${video.id}`} className="textarea" rows={2} value={reviewFeedback} disabled={!canEdit || busy} placeholder="填写本次复核意见；退回必须说明原因" onChange={(event) => setReviewFeedback(event.target.value)} /></div> : null}
-      <div className="judgment-boundary" role="note">事件起止只读：帧 {judgment.input.frame_range.start}–{judgment.input.frame_range.end} · {formatTime(judgment.input.time_range.start)}–{formatTime(judgment.input.time_range.end)}。仅修改类别、参与鼠、项目角色及当前片段的 ID；不新增或删除行为。</div>
+      <div className="judgment-boundary" role="note">事件起止只读：帧 {judgment.input.frame_range.start}–{judgment.input.frame_range.end} · {formatTime(judgment.input.time_range.start)}–{formatTime(judgment.input.time_range.end)}。</div>
     </Card>
     </section>
     <aside className="annotate-side judgment-side" aria-label="判断工作栏">
@@ -408,7 +451,7 @@ export default function HeuristicJudgmentPanel({ projectId: pid, video, project,
       {workspaceMode === "behavior" ? <div id={`${tabPrefix}-behavior-panel`} className="workspace-panel" role="tabpanel" aria-labelledby={`${tabPrefix}-behavior-tab`}>
       <fieldset disabled={!canEdit || busy || preview != null} className="judgment-fields"><legend>人工确认</legend>
         <label className="field" htmlFor={`judgment-category-${video.id}`}>项目类别<select id={`judgment-category-${video.id}`} className="select" value={categoryId ?? ""} onChange={(event) => { const categoryId = event.target.value ? Number(event.target.value) : null; setCategoryId(categoryId); setMouseIds([]); setRoles({}); changed({ categoryId, mouseIds: [], roles: {} }); }}><option value="">请选择项目类别</option>{categories.filter((item) => item.is_active || item.id === categoryId).map((item) => <option key={item.id} value={item.id} disabled={!item.is_active}>{item.group} / {item.name}{item.is_active ? "" : "（已停用）"}</option>)}</select></label>
-        {category ? <ParticipantChoices key={`${category.id}:${dataVersion}`} category={category} tracks={tracks} onTrackHandler={participantTrackHandler} mouseIds={mouseIds} roles={roles} disabled={!canEdit || busy || preview != null} onMouseIds={(ids) => { setMouseIds(ids); changed({ mouseIds: ids }); }} onRoles={(value) => { setRoles(value); changed({ roles: value }); }} /> : <p className="field-hint">未能唯一匹配已知类别，请根据画面人工选择；不按鼠 ID 顺序推测角色。</p>}
+        {category ? <ParticipantChoices key={`${category.id}:${dataVersion}`} category={category} tracks={tracks} onTrackHandler={participantTrackHandler} mouseIds={mouseIds} roles={roles} disabled={!canEdit || busy || preview != null} onMouseIds={(ids) => { setMouseIds(ids); changed({ mouseIds: ids }); }} onRoles={(value) => { setRoles(value); changed({ roles: value }); }} /> : null}
       </fieldset>
       {canEdit ? <><div className="field-hint" role="status">{busy ? "保存中…" : selectionError ?? (dirty ? "有未保存的修改" : "类别及参与关系已选择")}</div>{review && submitted ? <button className="btn btn-primary" disabled={busy || !!selectionError || preview != null} onClick={() => void saveUsable()}>保存修改并刷新快照</button> : null}{dirty ? <div className="judgment-actions">{!submitted ? <button className="btn" disabled={busy || !!selectionError || preview != null} onClick={() => void saveUsable()}>保存修改</button> : null}<button className="btn" disabled={busy} onClick={() => applyJudgment(judgment)}>放弃未保存修改</button></div> : null}</> : <p className="field-hint">{readOnlyMessage}</p>}
       {!review && submitted ? <div className="judgment-actions"><button className="btn" disabled={busy} onClick={() => void (async () => { if (!await confirm({ title: "撤回本次提交？", message: "未完成期间可以撤回后重新判断；旧快照与决定会保留。", confirmLabel: "撤回提交" })) return; await run(async () => { await withdrawVideo(pid, video.id, judgmentVersions(judgment)); await load(); await onChanged?.(); }); })()}>撤回提交</button>{project?.can_review ? <Link className="btn" to={`/projects/${pid}/review?video=${video.id}`}>进入复核</Link> : null}</div> : null}
