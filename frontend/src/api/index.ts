@@ -144,6 +144,10 @@ export function listCategorySchemeAudit(projectId: number | string): Promise<Cat
 }
 
 // ---------- 视频 ----------
+export function getVideo(projectId: number | string, videoId: number | string): Promise<Video> {
+  return apiOperation<paths["/api/projects/{project_id}/videos/{video_id}"]["get"]>(`/projects/${projectId}/videos/${videoId}`);
+}
+
 export function listVideos(projectId: number | string, params: VideoListParams = {}): Promise<Video[]> {
   const qs = new URLSearchParams();
   if (params.source) qs.set("source", params.source);

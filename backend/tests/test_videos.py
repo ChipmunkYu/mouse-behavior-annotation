@@ -54,6 +54,57 @@ def test_create_and_list_video(ctx, login_headers):
     )
 
 
+def test_unusable_heuristic_hidden_but_history_and_assignment_totals_retained(ctx, login_headers):
+    headers = login_headers()
+    pid = ctx.client.post("/api/projects", json={"name": "不可用历史"}, headers=headers).json()["id"]
+    base = f"/api/projects/{pid}/videos"
+    with ctx.session_factory() as db:
+        membership = db.query(ProjectMembership).filter_by(project_id=pid).one()
+        mid = membership.id
+        rows = [
+            Video(project_id=pid, filename=f"{source}-{status}.mp4", source=source,
+                  judgment_status=("unusable" if status == "unusable" else "pending") if source == "heuristic" else None,
+                  heuristic_input={} if source == "heuristic" else None,
+                  workflow_status=status, assignee_membership_id=mid)
+            for source, status in (("heuristic", "unusable"), ("heuristic", "draft"),
+                                   ("manual", "draft"), ("manual", "unusable"))
+        ]
+        db.add_all(rows)
+        db.commit()
+        hidden_id, *visible_ids = [row.id for row in rows]
+
+    for query in ("", "?view=all", "?view=mine"):
+        response = ctx.client.get(base + query, headers=headers)
+        assert response.status_code == 200
+        assert {item["id"] for item in response.json()} == set(visible_ids)
+    for query in ("?source=heuristic&workflow_status=unusable", "?view=mine&workflow_status=unusable"):
+        response = ctx.client.get(base + query, headers=headers)
+        assert hidden_id not in {item["id"] for item in response.json()}
+    assert ctx.client.get(base + "?view=unassigned", headers=headers).json() == []
+
+    detail = ctx.client.get(f"{base}/{hidden_id}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["workflow_status"] == "unusable"
+    assert detail.json()["assignee_membership_id"] == mid
+    stats = ctx.client.get(f"/api/projects/{pid}/assignment-stats", headers=headers).json()
+    assert stats["total"] == 4
+    assert next(item for item in stats["by_assignee"] if item["assignee_membership_id"] == mid)["total"] == 4
+
+    other_pid = ctx.client.post("/api/projects", json={"name": "另一项目"}, headers=headers).json()["id"]
+    assert ctx.client.get(f"/api/projects/{other_pid}/videos/{hidden_id}", headers=headers).status_code == 404
+    assert ctx.client.get(f"{base}/999999", headers=headers).status_code == 404
+    assert ctx.client.get(f"{base}/{hidden_id}").status_code == 401
+    outsider_id = ctx.create_user("history-outsider")
+    outsider_headers = login_headers(username="history-outsider", password="pw123")
+    assert ctx.client.get(f"{base}/{hidden_id}", headers=outsider_headers).status_code == 403
+    ctx.add_member(pid, outsider_id, role="viewer")
+    assert ctx.client.get(f"{base}/{hidden_id}", headers=outsider_headers).status_code == 403
+    with ctx.session_factory() as db:
+        retained = db.get(Video, hidden_id)
+        assert retained.workflow_status == "unusable"
+        assert retained.assignee_membership_id == mid
+
+
 def test_put_and_delete_distance_calibration(ctx, login_headers):
     headers = login_headers()
     project = ctx.client.post("/api/projects", json={"name": "标定项目"}, headers=headers).json()

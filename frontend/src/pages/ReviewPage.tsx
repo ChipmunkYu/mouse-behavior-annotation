@@ -12,6 +12,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   createVideoReview,
   getBehaviorReviewState,
+  getVideo,
   listCategories,
   listProjects,
   listReviewQueue,
@@ -386,32 +387,52 @@ export default function ReviewPage() {
     setSelectedVideo(v);
     focusMainAfterSelectionRef.current = true;
     setQueueOpen((open) => nextReviewQueueOpen(open, "select"));
-    setSearchParams({ video: String(v.id) }, { replace: true });
+    setSearchParams((params) => { const next = new URLSearchParams(params); next.set("video", String(v.id)); return next; }, { replace: true });
   }, [clearBehaviorNoticeTimer, setSearchParams, heuristicEditing]);
 
-  const refreshHeuristic = useCallback(async () => {
+  const refreshHeuristic = useCallback(async (afterChange = false) => {
     if (selectedId == null) return;
     const operationId = selectedId;
     setReviewDisabled(true);
-    const [state, videos, history] = await Promise.all([getBehaviorReviewState(pid, operationId), listVideos(pid, { view: "all" }), listVideoReviews(pid, operationId)]);
+    const updated = await getVideo(pid, operationId);
     if (selectedVideoRef.current?.id !== operationId) return;
-    setReviewState(state); setAnnotations(state.annotations);
-    setFeedbackDrafts(Object.fromEntries(state.annotations.map((item) => [item.id, item.decision.feedback ?? ""])));
+    if (afterChange && updated.workflow_status === "unusable") {
+      selectedVideoRef.current = null;
+      setSelectedVideo(null); setSelectedId(null); setHeuristicEditing(false);
+      setSearchParams((params) => { const next = new URLSearchParams(params); next.delete("video"); return next; }, { replace: true });
+      setErrorMsg(null); setNotice("已标记不可用，已移出任务列表；原视频及工作记录保留。");
+      await loadQueue();
+      return;
+    }
+    const [state, history] = await Promise.all([getBehaviorReviewState(pid, operationId).catch((error) => {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }), listVideoReviews(pid, operationId)]);
+    if (selectedVideoRef.current?.id !== operationId) return;
+    setReviewState(state); setAnnotations(state?.annotations ?? []);
+    setFeedbackDrafts(Object.fromEntries((state?.annotations ?? []).map((item) => [item.id, item.decision.feedback ?? ""])));
     setFocusedAnnotationId(null); setReviews(history);
-    const updated = videos.find((item) => item.id === operationId);
-    if (updated) setSelectedVideo(updated);
+    setSelectedVideo(updated);
     setReviewDisabled(false);
     await loadQueue();
-  }, [pid, selectedId, loadQueue]);
+  }, [pid, selectedId, loadQueue, setSearchParams]);
 
   useEffect(() => {
     const requested = searchParams.get("video");
     if (requested == null) return;
     const requestedId = Number(requested);
-    if (!Number.isInteger(requestedId) || requestedId === selectedId) return;
+    if (!canReview || !Number.isInteger(requestedId) || requestedId === selectedId) return;
     const requestedVideo = reviewVideos.find((video) => video.id === requestedId);
-    if (requestedVideo) selectVideo(requestedVideo);
-  }, [reviewVideos, searchParams, selectVideo, selectedId]);
+    if (requestedVideo) { selectVideo(requestedVideo); return; }
+    // 明确直链可读历史；详情不能补回任务/历史列表。
+    let cancelled = false;
+    void getVideo(pid, requestedId).then((video) => {
+      if (!cancelled) selectVideo(video);
+    }).catch((error: unknown) => {
+      if (!cancelled) setErrorMsg(error instanceof Error ? error.message : "加载视频历史失败");
+    });
+    return () => { cancelled = true; };
+  }, [pid, canReview, reviewVideos, searchParams, selectVideo, selectedId]);
 
   function closeQueue(returnFocus = true) {
     setQueueOpen((open) => nextReviewQueueOpen(open, "close"));
@@ -898,7 +919,7 @@ export default function ReviewPage() {
             ) : (
               <>
                 <h2 ref={mainHeadingRef} className="review-current-heading" tabIndex={-1}>{selectedVideo?.filename ?? `视频 #${selectedId}`}</h2>
-                {heuristic && selectedVideo ? <HeuristicJudgmentPanel key={selectedVideo.id} projectId={pid} video={selectedVideo} project={project} review disabled={reviewBusy || decisionBusyId != null || reviewDisabled} refreshKey={`${reviewState?.submission_id}:${reviewState?.decision_revision}:${selectedVideo.workflow_status}`} onChanged={refreshHeuristic} onEditingChange={setHeuristicEditing} /> : <>
+                {heuristic && selectedVideo ? <HeuristicJudgmentPanel key={selectedVideo.id} projectId={pid} video={selectedVideo} project={project} review disabled={reviewBusy || decisionBusyId != null || reviewDisabled} refreshKey={`${reviewState?.submission_id}:${reviewState?.decision_revision}:${selectedVideo.workflow_status}`} onChanged={() => refreshHeuristic(true)} onEditingChange={setHeuristicEditing} /> : <>
                 <div className="card review-player">
                   <div className="video-wrap">
                     <video

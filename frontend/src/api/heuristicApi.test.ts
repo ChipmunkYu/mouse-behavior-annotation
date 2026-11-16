@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkIdentityEdit, commitIdentityEdit, createExport, createImportBatch, fetchExportDownload, getExportStatus, getJudgment, listClipCategories, listClips, listVideos, putJudgment, revertIdentityEdit, submitVideoForReview, withdrawVideo } from ".";
+import { checkIdentityEdit, commitIdentityEdit, createExport, createImportBatch, fetchExportDownload, getExportStatus, getJudgment, getVideo, listClipCategories, listClips, listVideos, putJudgment, revertIdentityEdit, submitVideoForReview, withdrawVideo } from ".";
 import type { JudgmentVersions } from "./types";
 
 afterEach(() => vi.restoreAllMocks());
@@ -8,6 +8,13 @@ const versions: JudgmentVersions = { expected_annotation_revision: 3, base_detec
 function mockFetch() { return vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ id: 1 }), { status: 200, headers: { "Content-Type": "application/json" } })); }
 
 describe("启发式请求契约", () => {
+  it("历史详情直接读取项目内单视频，不从列表推断存在性", async () => {
+    const fetch = mockFetch();
+    await getVideo(2, 49);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toMatch(/\/projects\/2\/videos\/49$/);
+  });
+
   it("显式 batch source、判断和生命周期 CAS 不混用旧 annotation 写接口", async () => {
     const fetch = mockFetch();
     await createImportBatch(2, undefined, "heuristic");

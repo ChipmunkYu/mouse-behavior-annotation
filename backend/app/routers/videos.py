@@ -272,7 +272,11 @@ def list_videos(
     access: tuple = Depends(project_access),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    query = db.query(Video).filter(Video.project_id == project_id, Video.workflow_status != "archived")
+    query = db.query(Video).filter(
+        Video.project_id == project_id,
+        Video.workflow_status != "archived",
+        ~((Video.source == "heuristic") & (Video.workflow_status == "unusable")),
+    )
     if source != "all":
         query = query.filter(Video.source == source)
     if view == "mine":
@@ -701,6 +705,21 @@ def behavior_stats(project_id: int, access: tuple = Depends(project_access),
     items.sort(key=lambda item: (item.possible_total,
                                  by_category[item.category_id].sort_order, item.category_id))
     return BehaviorStatsOut(items=items)
+
+
+@router.get("/api/projects/{project_id}/videos/{video_id}", response_model=VideoOut)
+def get_video(
+    project_id: int,
+    video_id: int,
+    request: Request,
+    access: tuple = Depends(project_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    """读取单视频元数据，包括已判不可用视频的历史入口。"""
+    video = db.query(Video).filter_by(id=video_id, project_id=project_id).one_or_none()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found in this project")
+    return public_video(video, request.app.state.settings)
 
 
 def _authorized_video_path(

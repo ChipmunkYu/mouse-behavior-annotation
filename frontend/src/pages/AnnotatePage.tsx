@@ -9,6 +9,7 @@ import {
   listProjects,
   listVideoReviews,
   listVideos,
+  getVideo,
   submitVideoForReview,
   updateAnnotation,
   commitIdentityEdit,
@@ -921,6 +922,7 @@ function ShortcutHelp({ mode, categoryShortcuts, onClose }: {
 /* ================= 标注工作台主页面 ================= */
 export default function AnnotatePage() {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
+  const navigate = useNavigate();
   const pid = Number(projectId);
   const vid = Number(videoId);
   const routeKey = `${pid}:${vid}`;
@@ -930,10 +932,8 @@ export default function AnnotatePage() {
   useEffect(() => {
     let active = true;
     setError(null);
-    Promise.all([listVideos(pid, { view: "all" }), listProjects()]).then(([videos, projects]) => {
+    Promise.all([getVideo(pid, vid), listProjects()]).then(([video, projects]) => {
       if (!active) return;
-      const video = videos.find((item) => item.id === vid);
-      if (!video) throw new Error("未找到当前视频");
       setEntry({ key: routeKey, video, project: projects.find((item) => item.id === pid) ?? null });
     }).catch((error: unknown) => { if (active) setError(error instanceof Error ? error.message : "加载任务来源失败"); });
     return () => { active = false; };
@@ -941,7 +941,11 @@ export default function AnnotatePage() {
   if (error) return <Card><div className="error-box" role="alert">{error}<button className="btn" onClick={() => setRetry((value) => value + 1)}>重试</button></div></Card>;
   if (entry?.key !== routeKey) return <Loading text="加载任务来源…" />;
   if (entry.video.source !== "heuristic") return <ManualAnnotatePage key={routeKey} />;
-  return <div className="container"><div className="annotate-header"><Link className="btn btn-sm" to={`/projects/${pid}/videos`}>← 视频库</Link><h1>{entry.video.filename} / 判断</h1></div><HeuristicJudgmentPanel key={routeKey} projectId={pid} video={entry.video} project={entry.project} /></div>;
+  return <div className="container"><div className="annotate-header"><Link className="btn btn-sm" to={`/projects/${pid}/videos`}>← 视频库</Link><h1>{entry.video.filename} / 判断</h1></div><HeuristicJudgmentPanel key={routeKey} projectId={pid} video={entry.video} project={entry.project} onChanged={async () => {
+    const updated = await getVideo(pid, vid);
+    if (updated.workflow_status === "unusable") navigate(`/projects/${pid}/videos`);
+    else setEntry({ key: routeKey, video: updated, project: entry.project });
+  }} /></div>;
 }
 
 function ManualAnnotatePage() {
