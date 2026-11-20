@@ -1,0 +1,73 @@
+{
+  "passed": true,
+  "target": "cbc0d227c11a8e4e8a6459859112e3b8b9ab0b17",
+  "stage": "complete",
+  "runs": [
+    {
+      "label": "first-category",
+      "job_id": 2073,
+      "seconds": 68.687,
+      "zip_bytes": 3659717,
+      "zip_sha256": "89e51e08f5e2ff90cc569d6b810cdd6d00f568c416201e4afbc92bc67d2e155a",
+      "member_sha256": {
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/annotation.json": "c383eb7f32560ec5e36da579ae55461907cf6260b3ed7d0e9f561fd179b779f8",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/clip.mp4": "f610184bc6030a8d8038ba05333fc48efa9450a05ace2582cb2568c77af695d4",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/metadata.json": "6d346ae0eafa53e9d1e056ded0e8bb429a03b3baf9053dd9a2a1f54642027132",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/tracks.json": "9bc541ee09ba172383704d0c51ecb02bb8445b5b3eda9c4d6049cd6b70bba1cb",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/annotation.json": "49f35a8cc90c95177595948b6572609b30e9e1380557c079f6b843d54e14e3ce",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/clip.mp4": "2cf29327ac6b5a9f622c27dbb6cd8fea37414b0e97de3add85548d753c7b7dbe",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/metadata.json": "c3c4cff42782ffcf2e5bf4312e61f1d7c0d3f8d1f15e2026553892ab1133dc60",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/tracks.json": "41ca3fd59e9a475f1859aab0365e731f2559791504dcef63c247c50a9d77042a",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/annotation.json": "5983a4ba2364661aeb13b17b9f3534f91a2e14fec593f0b0e295d895b7d5d394",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/clip.mp4": "7d05fa25ccfbaca3576b39cf69082ff74d5b7bc202d4f505852ca33224166729",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/metadata.json": "28d3aabcda42d2de0dcdc7281519b39eccafb75cdbfae0d52ecccb4bf21248ab",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/tracks.json": "5838be3a3ca23e574f70d0f117ce0ae15e2dcc612c67aab0f9b60b724408961a"
+      },
+      "preparation": {
+        "total_count": 3,
+        "ready_count": 3,
+        "failed_count": 0,
+        "deferred_count": 0
+      }
+    },
+    {
+      "label": "repeat-category",
+      "job_id": 2074,
+      "seconds": 3.22,
+      "zip_bytes": 3659717,
+      "zip_sha256": "7479078d33fa4250c0f5247e09ac18e6f293e08a1e12fa5aaf65dded7e5fb268",
+      "member_sha256": {
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/annotation.json": "c383eb7f32560ec5e36da579ae55461907cf6260b3ed7d0e9f561fd179b779f8",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/clip.mp4": "f610184bc6030a8d8038ba05333fc48efa9450a05ace2582cb2568c77af695d4",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/metadata.json": "6d346ae0eafa53e9d1e056ded0e8bb429a03b3baf9053dd9a2a1f54642027132",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/tracks.json": "9bc541ee09ba172383704d0c51ecb02bb8445b5b3eda9c4d6049cd6b70bba1cb",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/annotation.json": "49f35a8cc90c95177595948b6572609b30e9e1380557c079f6b843d54e14e3ce",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/clip.mp4": "2cf29327ac6b5a9f622c27dbb6cd8fea37414b0e97de3add85548d753c7b7dbe",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/metadata.json": "c3c4cff42782ffcf2e5bf4312e61f1d7c0d3f8d1f15e2026553892ab1133dc60",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/tracks.json": "41ca3fd59e9a475f1859aab0365e731f2559791504dcef63c247c50a9d77042a",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/annotation.json": "5983a4ba2364661aeb13b17b9f3534f91a2e14fec593f0b0e295d895b7d5d394",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/clip.mp4": "7d05fa25ccfbaca3576b39cf69082ff74d5b7bc202d4f505852ca33224166729",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/metadata.json": "28d3aabcda42d2de0dcdc7281519b39eccafb75cdbfae0d52ecccb4bf21248ab",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/tracks.json": "5838be3a3ca23e574f70d0f117ce0ae15e2dcc612c67aab0f9b60b724408961a"
+      },
+      "preparation": {
+        "total_count": 3,
+        "ready_count": 3,
+        "failed_count": 0,
+        "deferred_count": 0
+      }
+    }
+  ],
+  "conflicts": [],
+  "category_id": 28,
+  "expected_items": 3,
+  "frames": 421,
+  "source_count": 1,
+  "frontend_sha256": {
+    "/": "7df73f3c537216054594e965013503b4a9fd29d57a5c358f12e87b578035bef8",
+    "/assets/index-BCLXK3Ju.css": "b07317ff4ee3ac9e9c04b5ba943d7c7cbdeb05baf2924f9f1957490d8989ce32",
+    "/assets/index-CVVOP32V.js": "64c50e211d291ebabf2d8b6759a1cd99f32c891065753dad5f37f8413ea2c56a"
+  },
+  "unauthenticated_status": 401,
+  "seconds": 72.646
+}

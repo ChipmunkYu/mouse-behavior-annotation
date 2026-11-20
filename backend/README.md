@@ -6,7 +6,7 @@
 
 > 行为级审核、锁定/撤销、跨轮次沿用、退回处理和 legacy/purge 的现行合同见[行为级审核 API 契约](../docs/behavior-review-api.md)。schema head 由 Alembic 迁移图动态确定，不代表生产已升级。
 
-导出准备配置 `CONTEXT_CACHE_MAX_BYTES`、`EXPORT_DISK_RESERVE_BYTES`、`CONTEXT_PREWARM_ENABLED` 的默认值见 `.env.example` / `.env.production.example`；两步优化、非硬配额与禁用语义见[设计顶部「2026-11-18 当前增量」](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md#1-状态范围与目标)。2026-11-20 已完成网站服务器隔离实例的 Linux、真实 FFmpeg、历史资产及公开 HTTP 自动验收，详见[隔离验收记录](../deploy/2026-11-20｜部署：导出缓存隔离验收.md)；尚未发布生产。
+导出准备配置 `CONTEXT_CACHE_MAX_BYTES`、`EXPORT_DISK_RESERVE_BYTES`、`CONTEXT_PREWARM_ENABLED` 的默认值见 `.env.example` / `.env.production.example`；两步优化、非硬配额与禁用语义见[设计顶部「2026-11-18 当前增量」](../docs/设计/检测状态、提交审核与独立行为视频片段导出设计.md#1-状态范围与目标)。2026-11-20 已上线并完成代表性生产检查，版本、回滚与证据见[生产发布记录](../deploy/2026-11-20｜部署：导出缓存生产发布.md)。
 
 > 视频 `workflow_status=archived` 的后台失效终态、隐藏/写保护/新导出边界与只读候选报告见[视频历史隐藏归档](../docs/设计/2026-10-21｜决策：视频历史隐藏归档.md)。本地实现不表示已执行数据归档或生产发布。
 
