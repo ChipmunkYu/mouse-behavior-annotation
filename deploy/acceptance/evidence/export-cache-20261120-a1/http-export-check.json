@@ -1,0 +1,76 @@
+{
+  "passed": true,
+  "scope": "Project 2 manual public HTTP category export, automatic",
+  "runs": [
+    {
+      "label": "cold-category",
+      "job_id": 2071,
+      "ready_seconds": 70.33943202532828,
+      "zip_bytes": 3659717,
+      "zip_sha256": "a48dc6e21302097e464484212b84bc2990b54d59b3298ad5f41390f42aa0e9cb",
+      "member_sha256": {
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/annotation.json": "c383eb7f32560ec5e36da579ae55461907cf6260b3ed7d0e9f561fd179b779f8",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/clip.mp4": "f610184bc6030a8d8038ba05333fc48efa9450a05ace2582cb2568c77af695d4",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/metadata.json": "6d346ae0eafa53e9d1e056ded0e8bb429a03b3baf9053dd9a2a1f54642027132",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/tracks.json": "9bc541ee09ba172383704d0c51ecb02bb8445b5b3eda9c4d6049cd6b70bba1cb",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/annotation.json": "49f35a8cc90c95177595948b6572609b30e9e1380557c079f6b843d54e14e3ce",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/clip.mp4": "2cf29327ac6b5a9f622c27dbb6cd8fea37414b0e97de3add85548d753c7b7dbe",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/metadata.json": "c3c4cff42782ffcf2e5bf4312e61f1d7c0d3f8d1f15e2026553892ab1133dc60",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/tracks.json": "41ca3fd59e9a475f1859aab0365e731f2559791504dcef63c247c50a9d77042a",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/annotation.json": "5983a4ba2364661aeb13b17b9f3534f91a2e14fec593f0b0e295d895b7d5d394",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/clip.mp4": "7d05fa25ccfbaca3576b39cf69082ff74d5b7bc202d4f505852ca33224166729",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/metadata.json": "28d3aabcda42d2de0dcdc7281519b39eccafb75cdbfae0d52ecccb4bf21248ab",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/tracks.json": "5838be3a3ca23e574f70d0f117ce0ae15e2dcc612c67aab0f9b60b724408961a"
+      },
+      "observed_phases": [
+        "building",
+        "completed",
+        "queued"
+      ],
+      "preparation": {
+        "state": "ready",
+        "total_count": 3,
+        "ready_count": 3,
+        "failed_count": 0,
+        "deferred_count": 0
+      }
+    },
+    {
+      "label": "warm-category",
+      "job_id": 2072,
+      "ready_seconds": 3.1230039186775684,
+      "zip_bytes": 3659717,
+      "zip_sha256": "e55b16eae880ba461c48972cce8cc17de74403adb013ae8adc0f2d9dd15b83db",
+      "member_sha256": {
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/annotation.json": "c383eb7f32560ec5e36da579ae55461907cf6260b3ed7d0e9f561fd179b779f8",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/clip.mp4": "f610184bc6030a8d8038ba05333fc48efa9450a05ace2582cb2568c77af695d4",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/metadata.json": "6d346ae0eafa53e9d1e056ded0e8bb429a03b3baf9053dd9a2a1f54642027132",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_004594-004775/tracks.json": "9bc541ee09ba172383704d0c51ecb02bb8445b5b3eda9c4d6049cd6b70bba1cb",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/annotation.json": "49f35a8cc90c95177595948b6572609b30e9e1380557c079f6b843d54e14e3ce",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/clip.mp4": "2cf29327ac6b5a9f622c27dbb6cd8fea37414b0e97de3add85548d753c7b7dbe",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/metadata.json": "c3c4cff42782ffcf2e5bf4312e61f1d7c0d3f8d1f15e2026553892ab1133dc60",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005739-005771/tracks.json": "41ca3fd59e9a475f1859aab0365e731f2559791504dcef63c247c50a9d77042a",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/annotation.json": "5983a4ba2364661aeb13b17b9f3534f91a2e14fec593f0b0e295d895b7d5d394",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/clip.mp4": "7d05fa25ccfbaca3576b39cf69082ff74d5b7bc202d4f505852ca33224166729",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/metadata.json": "28d3aabcda42d2de0dcdc7281519b39eccafb75cdbfae0d52ecccb4bf21248ab",
+        "Dispersal_WIN_20260919_19_28_18_Pro_part004_005899-006104/tracks.json": "5838be3a3ca23e574f70d0f117ce0ae15e2dcc612c67aab0f9b60b724408961a"
+      },
+      "observed_phases": [
+        "building",
+        "completed",
+        "queued"
+      ],
+      "preparation": {
+        "state": "ready",
+        "total_count": 3,
+        "ready_count": 3,
+        "failed_count": 0,
+        "deferred_count": 0
+      }
+    }
+  ],
+  "category_id": 28,
+  "expected_items": 3,
+  "authentication": "short-lived candidate-only owner token in memory; no password/login modification",
+  "unauthenticated_status": 401
+}

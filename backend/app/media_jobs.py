@@ -158,7 +158,7 @@ def resolve_input_path(settings, video: Video) -> Path:
     return path
 
 
-def stage_submission_input(settings, submission: Submission, job_id: int) -> Path:
+def stage_submission_input(settings, submission: Submission, job_id: int, *, reserve_check=None) -> Path:
     """Copy/hash one verified open source handle into a job-private staging file."""
     key = validate_storage_key(submission.source_storage_key)
     root = settings.videos_dir.resolve()
@@ -170,11 +170,15 @@ def stage_submission_input(settings, submission: Submission, job_id: int) -> Pat
     staging = root / f".submission-media-job-{job_id}-{uuid.uuid4().hex}.staging"
     digest = hashlib.sha256()
     try:
+        if reserve_check:
+            reserve_check(root, submission.source_file_size)
         with path.open("rb") as source, staging.open("xb") as target:
             before = stream_identity(source)
             if expected.device and expected.inode and before != expected:
                 raise MediaCommandError("immutable submission source file identity mismatch")
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                if reserve_check:
+                    reserve_check(root, len(chunk))
                 digest.update(chunk)
                 target.write(chunk)
             target.flush()

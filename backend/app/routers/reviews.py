@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import project_access
 from ..media_jobs import enqueue_submission_media
+from ..context_cache import enqueue_prewarm
+from ..export_jobs import asset_rows
 from ..models import (
     Annotation, BehaviorReviewDecision, BehaviorReviewReopen, DetectionImport,
     DraftIdentityEdit, Review, Submission, SubmissionAnnotation, Video,
@@ -466,6 +468,10 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
         job_ids = ([job.id for job in enqueue_submission_media(
             db, submission, request.app.state.settings)]
             if state.video.source != "heuristic" or body.result == "approved" else [])
+        db.flush()
+        prewarm_ids = enqueue_prewarm(db, request.app.state.settings,
+            [row for row in asset_rows(db, project_id, None, source="all")
+             if row[1].video_id == video_id])
         db.commit(); db.refresh(review)
         result = _to_review_out(review)
     for job_id in job_ids:
@@ -473,6 +479,11 @@ def create_review(project_id: int, video_id: int, body: ReviewCreate, request: R
             request.app.state.media_worker.schedule(job_id)
         except Exception:
             logger.exception("Schedule immutable media job %s failed; queued row remains recoverable", job_id)
+    if prewarm_ids:
+        try:
+            request.app.state.export_worker.wake()
+        except Exception:
+            logger.exception("Context prewarm wake failed; committed queue remains recoverable")
     return result
 
 

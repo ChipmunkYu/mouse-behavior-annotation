@@ -21,11 +21,12 @@ from .cleanup_io import (
 from .import_batch_cleanup import BatchCleanupConflict, cleanup_import_batch
 from .display_proxy_jobs import JOB_TYPE_DISPLAY_PROXY, display_proxy_names
 from .models import Annotation, BackgroundJob, Clip, Video, VideoImportBatch
+from .context_cache import CACHE_LOCK, PINNED_KEYS, cache_root, evict_cache
 
 TERMINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
 _VIDEO_TEMP = re.compile(r"^[0-9a-fA-F]{32}\.part$")
-_CLIP_TEMP = re.compile(r"^\.clip_\d+_rev\d+\.[0-9a-fA-F]{32}\.mp4\.part$")
-_THUMB_TEMP = re.compile(r"^\.clip_\d+_rev\d+\.[0-9a-fA-F]{32}\.jpg\.part$")
+_CLIP_TEMP = re.compile(r"^\.clip_\d+_rev(?:sub)?\d+\.[0-9a-fA-F]{32}\.mp4\.part$")
+_THUMB_TEMP = re.compile(r"^\.clip_\d+_rev(?:sub)?\d+\.[0-9a-fA-F]{32}\.jpg\.part$")
 _EXPORT_STAGING = re.compile(r"^\.export(?:-\d+|_\d+_\d+)\.staging$")
 _EXPORT_TEMP_ZIP = re.compile(r"^\.export(?:-\d+|_\d+_\d+)\.tmp\.zip$")
 _SUBMISSION_STAGING = re.compile(
@@ -197,9 +198,8 @@ def _remove_known_temp(
 def _valid_export_path(job: BackgroundJob, settings, now: datetime) -> Path | None:
     if (
         job.job_type != "export"
-        or job.status != "succeeded"
-        or job.expires_at is None
-        or job.expires_at <= now
+        or (job.status in TERMINAL_JOB_STATUSES and (job.status != "succeeded"
+            or job.expires_at is None or job.expires_at <= now))
         or not job.result_path
         or not _EXPORT_ZIP.fullmatch(Path(job.result_path).name)
     ):
@@ -303,6 +303,53 @@ def _cleanup_display_proxies(
             report["issues"].append(_issue("delete-failed", str(path), delete_reason))
 
 
+def _cleanup_context_cache(db, settings, cutoff, report, *, dry_run, active_material):
+    from .video_delete_io import VideoDeleteIO, DeletePath
+
+    with CACHE_LOCK:
+        root, reason = trusted_root(settings.data_dir, cache_root(settings))
+        if root is None:
+            report["issues"].append(_root_issue(cache_root(settings), reason or "unsafe"))
+            return
+        if not root.exists() or active_material:
+            return
+        io = VideoDeleteIO(settings)
+        try:
+            # Validate the whole tree before calling the shared LRU implementation.
+            io._validate_directory_tree(root)
+            if not dry_run:
+                report["context_cache"] = evict_cache(settings)
+            for video in root.iterdir():
+                match = re.fullmatch(r"video-([1-9][0-9]*)", video.name)
+                if not match or not video.is_dir() or PINNED_KEYS:
+                    continue
+                video_id = int(match[1])
+                orphan = db.get(Video, video_id) is None
+                for candidate in list(video.iterdir()):
+                    scratch = re.fullmatch(r"\.job-([1-9][0-9]*)-[a-f0-9]{32}", candidate.name)
+                    entry = re.fullmatch(r"[a-f0-9]{64}", candidate.name)
+                    if not candidate.is_dir() or not _older_than(candidate, cutoff):
+                        continue
+                    if scratch:
+                        owner = db.get(BackgroundJob, int(scratch[1]))
+                        if (owner is None or owner.job_type not in {"export", "context_prewarm"}
+                                or owner.status not in TERMINAL_JOB_STATUSES):
+                            continue
+                    elif not (orphan and entry):
+                        continue
+                    if dry_run:
+                        report["would_delete"] += 1
+                        continue
+                    # Reuse identity-frozen quarantine and descriptor-safe purge.
+                    manifest = io.prepare(video_id, [DeletePath(
+                        "context_cache", f"{video.name}/{candidate.name}", "directory")])
+                    io.quarantine(manifest)
+                    io.purge(manifest)
+                    report["deleted"] += 1
+        except (OSError, ValueError, RuntimeError) as exc:
+            report["issues"].append(_issue("context-cache-cleanup-failed", None, str(exc)))
+
+
 def run_retention_cleanup(
     db: Session,
     settings,
@@ -332,6 +379,10 @@ def run_retention_cleanup(
     }
 
     _retry_cleanup_issues(db, settings, report, dry_run=dry_run)
+    active_material = db.query(BackgroundJob.id).filter(
+        BackgroundJob.job_type.in_(("export", "context_prewarm", "media")),
+        ~BackgroundJob.status.in_(TERMINAL_JOB_STATUSES),
+    ).first() is not None
     stale_batches = db.query(VideoImportBatch.id, VideoImportBatch.project_id).filter(
         ((VideoImportBatch.status.in_(("uploading", "failed"))) |
          ((VideoImportBatch.status == "processing") & (VideoImportBatch.source == "heuristic") &
@@ -379,6 +430,7 @@ def run_retention_cleanup(
         db.query(BackgroundJob)
         .filter(
             BackgroundJob.job_type == "export",
+            BackgroundJob.status.in_(TERMINAL_JOB_STATUSES),
             BackgroundJob.result_path.is_not(None),
             BackgroundJob.expires_at.is_not(None),
             BackgroundJob.expires_at <= now,
@@ -447,6 +499,10 @@ def run_retention_cleanup(
         (settings.exports_dir, _EXPORT_STAGING, True),
         (settings.exports_dir, _EXPORT_TEMP_ZIP, False),
     ):
+        # ponytail: retain all temporary media while any worker owns material;
+        # narrow by descriptor only if concurrent retention becomes necessary.
+        if active_material:
+            continue
         _remove_known_temp(
             settings.data_dir,
             root,
@@ -458,6 +514,8 @@ def run_retention_cleanup(
         )
 
     _cleanup_display_proxies(db, settings, temp_cutoff, report, dry_run=dry_run)
+    _cleanup_context_cache(db, settings, temp_cutoff, report,
+                           dry_run=dry_run, active_material=active_material)
 
     all_result_jobs = db.query(BackgroundJob).filter(BackgroundJob.result_path.is_not(None)).all()
     referenced_exports = {

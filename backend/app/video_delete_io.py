@@ -11,12 +11,22 @@ import os
 import re
 import stat
 import uuid
+from functools import wraps
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePath
 from typing import Callable, Iterable, Mapping
 
 from .cleanup_io import trusted_root
 from .config import Settings
+from .context_cache import CACHE_LOCK, PINNED_KEYS, cache_root
+
+
+def _cache_locked(method):
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with CACHE_LOCK:
+            return method(*args, **kwargs)
+    return locked
 
 
 MANIFEST_VERSION = 2
@@ -116,9 +126,11 @@ class VideoDeleteIO:
             "thumbnails": settings.thumbnails_dir,
             "import_batches": settings.import_batches_dir,
             "detection_imports": settings.detection_imports_dir,
+            "context_cache": cache_root(settings),
         }
         self.quarantine_dir = self.data_dir / "video-delete-quarantine"
 
+    @_cache_locked
     def prepare(
         self,
         video_id: int,
@@ -152,6 +164,9 @@ class VideoDeleteIO:
             if item.path_kind not in {"file", "directory"}:
                 raise VideoDeleteIOError("path-kind-invalid")
             identity = self._identity(source, missing_ok=True, expected_kind=item.path_kind)
+            if item.root_kind == "context_cache" and identity is not None:
+                if PINNED_KEYS:
+                    raise VideoDeleteIOError("context-cache-pinned")
             entries.append(
                 DeleteEntry(
                     root_kind=item.root_kind,
@@ -176,6 +191,7 @@ class VideoDeleteIO:
         self._write_manifest(manifest)
         return manifest
 
+    @_cache_locked
     def quarantine(self, manifest: DeleteManifest | str) -> DeleteManifest:
         """Atomically move every present file aside; roll back in reverse on failure."""
         value = self._coerce_manifest(manifest)
@@ -189,6 +205,9 @@ class VideoDeleteIO:
                 if entry.state == "absent":
                     continue
                 source, _ = self._resolve(entry.root_kind, entry.relative_key)
+                if entry.root_kind == "context_cache" and entry.identity is not None:
+                    if PINNED_KEYS:
+                        raise VideoDeleteIOError("context-cache-pinned")
                 target = self._quarantine_path(value.operation_id, entry.quarantine_key)
                 self._require_location(entry, source, target, expected="source")
                 self._ensure_files_directory(value.operation_id)
@@ -213,18 +232,24 @@ class VideoDeleteIO:
         self._write_manifest(value)
         return value
 
+    @_cache_locked
     def restore(self, manifest: DeleteManifest | str) -> DeleteManifest:
         """Restore quarantined files without ever replacing an existing path."""
         value = self._coerce_manifest(manifest)
+        if PINNED_KEYS and any(e.root_kind == "context_cache" for e in value.entries):
+            raise VideoDeleteIOError("context-cache-pinned")
         self._restore_entries(value, reversed(value.entries))
         value.phase = "restored"
         self._write_manifest(value)
         self._remove_operation(value.operation_id)
         return value
 
+    @_cache_locked
     def purge(self, manifest: DeleteManifest | str) -> None:
         """Permanently remove frozen files after the caller has committed DB deletion."""
         value = self._coerce_manifest(manifest)
+        if PINNED_KEYS and any(e.root_kind == "context_cache" for e in value.entries):
+            raise VideoDeleteIOError("context-cache-pinned")
         for entry in value.entries:
             if entry.identity is None:
                 continue

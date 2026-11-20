@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..context_cache import preparation
 from ..deps import project_access
 from ..export_jobs import (
     JOB_TYPE_EXPORT,
@@ -132,6 +133,7 @@ def export_status(
         ready_count=ready,
         missing_count=len(missing),
         missing_clips=missing,
+        preparation=preparation(db, request.app.state.settings, rows),
     )
 
 

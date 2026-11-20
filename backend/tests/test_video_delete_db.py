@@ -313,7 +313,7 @@ def test_full_fk_graph_terminal_job_and_foreign_key_check(ctx, tmp_path):
         frozen = _freeze(db, settings, project_id, video_id, actor_id)
         assert frozen.terminal_job_ids
         assert {item.root_kind for item in frozen.paths} == {
-            "videos", "detection_imports", "clips", "thumbnails"
+            "videos", "detection_imports", "clips", "thumbnails", "context_cache"
         }
         _final(db, ctx.session_factory, frozen, settings)
         assert db.execute(text("PRAGMA foreign_key_check")).all() == []

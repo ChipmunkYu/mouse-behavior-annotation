@@ -11,10 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.media import FfmpegMediaProcessor, MediaCommandError
-from app.media_jobs import media_dedupe_key, render_submission_clip_files
+from app.media_jobs import render_submission_clip_files
 from app.models import BackgroundJob, Clip, Video
 from tests.conftest import auth_headers
-from tests.test_media import _setup
+from tests.test_reviews import (_add_reviewer, _annotate_with_mouse, _review,
+                                _setup_video_with_import, _submit)
 
 
 @pytest.fixture(scope="module")
@@ -49,10 +50,10 @@ def _probe(ffprobe: str, path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _source(ffmpeg: str, path: Path, fps: int, *, duration: int = 1) -> None:
+def _source(ffmpeg: str, path: Path, fps: int, *, duration: float = 1, size: str = "322x242") -> None:
     _run([
         ffmpeg, "-y", "-f", "lavfi", "-i",
-        f"testsrc=size=322x242:rate={fps}:duration={duration}", "-an", "-c:v", "libx264",
+        f"testsrc=size={size}:rate={fps}:duration={duration}", "-an", "-c:v", "libx264",
         "-pix_fmt", "yuv420p", "-f", "mp4", str(path),
     ])
 
@@ -60,7 +61,8 @@ def _source(ffmpeg: str, path: Path, fps: int, *, duration: int = 1) -> None:
 def _entities(tmp_path: Path, fps: int):
     settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
     snapshot = SimpleNamespace(fps=float(fps), frame_count=fps, width=322, height=242)
-    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot,
+                                 video=SimpleNamespace(source="manual"))
     annotation = SimpleNamespace(
         id=9, submission_id=7, start_time=5 / fps, end_time=15 / fps,
         start_frame=5, end_frame=14, crop_region={"x": 10, "y": 12, "w": 300, "h": 200},
@@ -115,7 +117,8 @@ def test_real_render_pins_non_integer_declared_fps(tmp_path, ffmpeg_path, ffprob
 
     settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
     snapshot = SimpleNamespace(fps=declared_fps, frame_count=30, width=322, height=242)
-    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot,
+                                 video=SimpleNamespace(source="manual"))
     annotation = SimpleNamespace(id=9, submission_id=7, start_time=5 / declared_fps,
                                  end_time=15 / declared_fps, start_frame=5, end_frame=14,
                                  crop_region=None)
@@ -147,12 +150,13 @@ def test_real_render_pins_container_duration_to_canonical_timeline(
     """
     ffmpeg, ffprobe = ffmpeg_path, ffprobe_path
     source = tmp_path / "duration-drift-source.mp4"
-    _source(ffmpeg, source, 30)
+    _source(ffmpeg, source, 30, duration=4)
     declared_fps, frames, start_frame = 32.0, 55, 46
 
     settings = SimpleNamespace(clips_dir=tmp_path / "clips", thumbnails_dir=tmp_path / "thumbs")
-    snapshot = SimpleNamespace(fps=declared_fps, frame_count=frames, width=322, height=242)
-    submission = SimpleNamespace(id=7, detection_snapshot=snapshot)
+    snapshot = SimpleNamespace(fps=declared_fps, frame_count=120, width=322, height=242)
+    submission = SimpleNamespace(id=7, detection_snapshot=snapshot,
+                                 video=SimpleNamespace(source="manual"))
     annotation = SimpleNamespace(
         id=9, submission_id=7, start_time=start_frame / declared_fps,
         end_time=(start_frame + frames - 1) / declared_fps, start_frame=start_frame,
@@ -196,33 +200,36 @@ def test_real_clip_then_thumbnail_failure_publishes_no_final(tmp_path, ffmpeg_pa
     assert not list(settings.thumbnails_dir.glob("*"))
 
 
-def test_real_processor_complete_media_worker_updates_job_and_clip(media_ctx, ffmpeg_path):
+def test_real_processor_complete_media_worker_updates_job_and_clip(media_ctx, ffmpeg_path,
+                                                                 ffprobe_path, monkeypatch):
     """Unlike the direct-render tests above, this exercises worker claim and DB transitions."""
     ctx = media_ctx
     ffmpeg = ffmpeg_path
-    headers = auth_headers(ctx.client)
-    project, _categories, video_data, annotations = _setup(
-        ctx, headers, annotations=1, start_times=[1.0])
-    source = ctx.app.state.settings.videos_dir / "src.mp4"
-    _source(ffmpeg, source, 25, duration=4)
+    login = lambda username="demo", password="demo123": auth_headers(ctx.client, username, password)
+    headers, project, categories, video_data = _setup_video_with_import(ctx, login)
     with ctx.session_factory() as db:
         video = db.get(Video, video_data["id"])
-        video.workflow_status = "approved"
-        clip = Clip(project_id=project["id"], annotation_id=annotations[0]["id"],
-                    source_revision=video.media_revision, status="pending")
-        job = BackgroundJob(
-            project_id=project["id"], job_type="media", status="queued",
-            dedupe_key=media_dedupe_key(video.id, video.media_revision),
-            payload={"video_id": video.id, "project_id": project["id"],
-                     "revision": video.media_revision},
-        )
-        db.add_all([clip, job]); db.commit()
-        clip_id, job_id = clip.id, job.id
-
+        source = ctx.app.state.settings.videos_dir / video.storage_path
+    # Match the import fixture's five frames, before submit freezes file identity.
+    _source(ffmpeg, source, 25, duration=0.2, size="1280x720")
+    category = next(c for c in categories if c["mouse_count_min"] <= 1 <= c["mouse_count_max"])
+    _annotate_with_mouse(ctx, headers, project, video_data, category["id"], mouse_ids=[1])
+    _add_reviewer(ctx, project["id"])
+    assert _submit(ctx, headers, project, video_data).status_code == 200
     worker = ctx.app.state.media_worker
+    scheduled = []
+    monkeypatch.setattr(worker, "schedule", scheduled.append)
+    response = _review(ctx, login("reviewer1", "pw123"), project, video_data, "approved")
+    assert response.status_code == 200, response.text
+    with ctx.session_factory() as db:
+        clip = db.query(Clip).filter(Clip.submission_annotation_id.is_not(None)).one()
+        job = db.query(BackgroundJob).filter_by(job_type="media").one()
+        clip_id, job_id = clip.id, job.id
+        assert clip.status == "pending" and job.status == "queued"
+        assert scheduled == [job_id]
     original = worker.processor
     worker.processor = FfmpegMediaProcessor(
-        ffmpeg_path=ffmpeg, timeout_seconds=60, map_audio=False)
+        ffmpeg_path=ffmpeg, ffprobe_path=ffprobe_path, timeout_seconds=60, map_audio=False)
     try:
         worker._run_job(job_id)
     finally:
@@ -234,3 +241,5 @@ def test_real_processor_complete_media_worker_updates_job_and_clip(media_ctx, ff
         assert clip.status == "ready"
         assert (ctx.app.state.settings.clips_dir / clip.clip_path).is_file()
         assert (ctx.app.state.settings.thumbnails_dir / clip.thumbnail_path).is_file()
+        probe = _probe(ffprobe_path, ctx.app.state.settings.clips_dir / clip.clip_path)
+        assert int(probe["streams"][0]["nb_read_frames"]) == 2

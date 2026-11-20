@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import errno
+import hashlib
 import logging
 import os
 import shutil
 import secrets
 import uuid
 import zipfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +33,7 @@ from .models import (BackgroundJob, Clip, DetectionSnapshotState, Project, RawDe
 from .submission_media_plan import build_submission_media_plan
 from .submission_service import validate_snapshot_integrity
 from .heuristic_judgment import published_source_condition
+from . import context_cache as cache
 
 logger = logging.getLogger(__name__)
 JOB_TYPE_EXPORT = "export"
@@ -106,6 +110,7 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
         used_categories.add(name.casefold()); category_directories[str(category_id)] = name
     submission_ids = sorted({submission.id for _annotation, submission, _clip in rows})
     annotation_ids = [annotation.id for annotation, _submission, _clip in rows]
+    batch = cache.context_batch(db, rows)
     refs = [{"submission_id": submission.id, "submission_annotation_id": annotation.id,
              "snapshot_id": submission.detection_snapshot_id,
              "source_media_revision": submission.source_media_revision,
@@ -115,13 +120,16 @@ def enqueue_export_job(db: Session, project: Project, category_ids: list[int] | 
              "raw_digest": submission.detection_snapshot.raw_digest,
              "state_digest": submission.detection_snapshot.state_digest,
              "metadata_digest": submission.detection_snapshot.metadata_digest,
-             "opaque_token": secrets.token_hex(16)}
-            for annotation, submission, _clip in rows]
+             "opaque_token": secrets.token_hex(16),
+             "context": cache.frozen_context(db, annotation, submission, clip, batch),
+             "distance_scale": cache.distance_scale(submission)}
+            for annotation, submission, clip in rows]
     result = db.execute(sqlite_insert(BackgroundJob).values(
         project_id=project.id, job_type=JOB_TYPE_EXPORT, status="queued", progress=0,
         dedupe_key=export_dedupe_key(project.id), payload={
             "contract_version": 1, "project_id": project.id, "category_ids": frozen_categories,
             "source": source,
+            "preparation_version": 1,
             "category_directories": category_directories, "category_tokens": category_tokens,
             "submission_ids": submission_ids, "submission_annotation_ids": annotation_ids,
             "refs": refs,
@@ -191,68 +199,173 @@ class ExportWorker:
         self.synchronous = settings.media_synchronous
         self._executor = None if self.synchronous else ThreadPoolExecutor(max_workers=1)
         self._futures = set()
+        self._drain_lock = threading.RLock()
+        self._draining = False
+        self._stopping = threading.Event()
+        # Owned exclusively by the drain, never by the first (possibly terminal) job.
+        self._prewarm_source = None
+        self._prewarm_source_identity = None
         self.before_publish_hook = None
         self.before_terminal_hook = None
 
     def start(self, *, recover: bool = True) -> None:
         if recover:
             self._recover_interrupted()
-        with self.session_factory() as db:
-            ids = [row[0] for row in db.query(BackgroundJob.id).filter_by(
-                status="queued", job_type=JOB_TYPE_EXPORT).all()]
-        for job_id in ids:
-            self.schedule(job_id)
+        cache.evict_cache(self.settings)
+        self.wake()
 
     def shutdown(self) -> None:
+        self._stopping.set()
         if self._executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
 
     def schedule(self, job_id: int) -> None:
-        if self.synchronous:
-            self._run_job(job_id)
+        self.wake()
+
+    def wake(self) -> None:
+        # One drain future, not one future per queued row. Re-query priority after
+        # every context entry so a bulk prewarm can never FIFO-block an export.
+        with self._drain_lock:
+            if self._draining:
+                return
+            self._draining = True
+            try:
+                if self.synchronous:
+                    self._drain()
+                else:
+                    future = self._executor.submit(self._drain)
+                    self._futures.add(future)
+                    future.add_done_callback(self._futures.discard)
+            except BaseException:
+                self._draining = False
+                raise
+
+    def _drain(self):
+        retry_delay = 0.05
+        released = False
+        try:
+            while not self._stopping.is_set():
+                # Scheduling and the final empty check share a lock, closing the
+                # commit/wakeup race without keeping a transaction while rendering.
+                with self._drain_lock:
+                    with self.session_factory() as db:
+                        job = db.query(BackgroundJob).filter(
+                            BackgroundJob.status == "queued",
+                            BackgroundJob.job_type.in_([JOB_TYPE_EXPORT, cache.JOB_TYPE_PREWARM])
+                        ).order_by((BackgroundJob.job_type == JOB_TYPE_EXPORT).desc(), BackgroundJob.id).first()
+                        job_id = job.id if job else None
+                        if job is None or job.job_type == JOB_TYPE_EXPORT:
+                            self._release_prewarm_source()
+                    if job_id is None:
+                        self._release_prewarm_source()
+                        self._draining = False
+                        released = True
+                        return
+                if self._run_job(job_id) is False:
+                    if self.synchronous:
+                        with self._drain_lock:
+                            self._release_prewarm_source()
+                            self._draining = False
+                            released = True
+                        return
+                    # Keep this drain alive: schedules during a failed claim are
+                    # consumed on its next query, with capped, interruptible backoff.
+                    self._stopping.wait(retry_delay)
+                    retry_delay = min(2.0, retry_delay * 2)
+                else:
+                    retry_delay = 0.05
+        finally:
+            if not released:
+                with self._drain_lock:
+                    try:
+                        self._release_prewarm_source()
+                    finally:
+                        self._draining = False
+
+    def _release_prewarm_source(self):
+        _cleanup_paths([self._prewarm_source], operation="remove drain prewarm source")
+        self._prewarm_source = self._prewarm_source_identity = None
+
+    def _stage_prewarm_source(self, submission, job_id):
+        identity = cache.source_group_identity(submission)
+        if identity != self._prewarm_source_identity:
+            self._release_prewarm_source()
+        if self._prewarm_source is None:
+            self._prewarm_source = stage_submission_input(self.settings, submission, job_id,
+                reserve_check=lambda path, amount: cache.check_space(self.settings, path, amount))
+            self._prewarm_source_identity = identity
         else:
-            future = self._executor.submit(self._run_job, job_id)
-            self._futures.add(future); future.add_done_callback(self._futures.discard)
+            # Each reference must still name the very same immutable source FD.
+            # The private copy's SHA was checked on admission; do not rehash it.
+            from .file_identity import FileIdentity, stream_identity
+            from .submission_service import validate_storage_key
+            root = self.settings.videos_dir.resolve()
+            path = (root / validate_storage_key(submission.source_storage_key)).resolve()
+            if path == root or not path.is_relative_to(root):
+                raise MediaCommandError("immutable submission source is outside videos directory")
+            expected = FileIdentity(submission.source_file_size, submission.source_mtime_ns,
+                                    submission.source_device, submission.source_inode)
+            with path.open("rb") as stream:
+                if stream_identity(stream) != expected:
+                    raise MediaCommandError("immutable submission source file identity mismatch")
+        return self._prewarm_source
 
     def _recover_interrupted(self) -> None:
         with self.session_factory() as db:
-            for job in db.query(BackgroundJob).filter_by(status="running", job_type=JOB_TYPE_EXPORT):
+            for job in db.query(BackgroundJob).filter(BackgroundJob.status == "running",
+                    BackgroundJob.job_type.in_([JOB_TYPE_EXPORT, cache.JOB_TYPE_PREWARM])):
                 if _is_cleanup_incomplete(job):
                     continue
                 if job.attempts >= self.settings.media_max_attempts:
                     job.status, job.error, job.finished_at = "failed", "Interrupted; retry limit reached", _now()
-                    _release_export_key(job)
-                    reset_interrupted_job_clips(db, job)
+                    if job.job_type == JOB_TYPE_EXPORT:
+                        _release_export_key(job)
+                        reset_interrupted_job_clips(db, job)
                 else:
                     job.status, job.started_at, job.error = "queued", None, "Interrupted; requeued"
-                    reset_interrupted_job_clips(db, job)
+                    job.progress = 0
+                    if job.job_type == JOB_TYPE_EXPORT:
+                        reset_interrupted_job_clips(db, job)
             db.commit()
 
     def _run_job(self, job_id: int) -> None:
         try:
             with self.session_factory() as db:
-                claimed = db.query(BackgroundJob).filter_by(id=job_id, status="queued").update(
-                    {"status": "running", "started_at": _now(),
+                claimed = db.query(BackgroundJob).filter(BackgroundJob.id == job_id,
+                    BackgroundJob.status == "queued", BackgroundJob.job_type.in_(
+                        [JOB_TYPE_EXPORT, cache.JOB_TYPE_PREWARM])).update(
+                    {"status": "running", "started_at": _now(), "error": None,
                      "attempts": BackgroundJob.attempts + 1}, synchronize_session=False)
                 db.commit()
                 if not claimed:
                     return
                 job = db.get(BackgroundJob, job_id)
                 try:
-                    self._build(db, job)
+                    cache.cleanup_job_scratch(self.settings, job_id)
+                    _cleanup_paths(self.settings.videos_dir.glob(f".submission-media-job-{job_id}-*.staging"),
+                                   operation="remove interrupted source staging")
+                    if job.job_type == cache.JOB_TYPE_PREWARM:
+                        self._prewarm(db, job)
+                    else:
+                        self._build(db, job)
                 except WorkerCleanupIncomplete as exc:
                     db.rollback()
                     self._record_cleanup_incomplete(job_id, exc)
                 except Exception as exc:
+                    self._release_prewarm_source()
                     logger.exception("Export job %s failed: %s", job_id, exc)
                     db.rollback(); job = db.get(BackgroundJob, job_id)
                     if job and job.status == "running":
                         if self.before_terminal_hook:
                             self.before_terminal_hook()
-                        job.status, job.error, job.finished_at = "failed", _truncate_error(f"Export failed: {exc}"), _now()
-                        _release_export_key(job); db.commit()
+                        prefix = "storage_insufficient: " if isinstance(exc, OSError) and exc.errno == errno.ENOSPC else "Export failed: "
+                        job.status, job.error, job.finished_at = "failed", _truncate_error(f"{prefix}{exc}"), _now()
+                        if job.job_type == JOB_TYPE_EXPORT:
+                            _release_export_key(job)
+                        db.commit()
         except Exception:
             logger.exception("Export job %s crashed", job_id)
+            return False
 
     def _record_cleanup_incomplete(self, job_id: int, exc: BaseException) -> None:
         try:
@@ -311,6 +424,7 @@ class ExportWorker:
         if allowed != set(ids):
             raise MediaCommandError("export source or final authority changed")
         refs_by_id = {ref.get("submission_annotation_id"): ref for ref in refs}
+        batch = cache.context_batch(db, rows)
         for annotation_id in ids:
             annotation, submission, clip = by_id[annotation_id]; ref = refs_by_id.get(annotation_id, {})
             if (ref.get("submission_id") != submission.id or ref.get("snapshot_id") != submission.detection_snapshot_id
@@ -327,6 +441,8 @@ class ExportWorker:
                 raise MediaCommandError("immutable export reference mismatch")
             if require_ready and (clip is None or not clip_entities_ready(clip, self.settings)):
                 raise MediaCommandError("frozen Submission Clip is not ready")
+            if ref.get("context") is not None and ref["context"] != cache.frozen_context(db, annotation, submission, clip, batch):
+                raise MediaCommandError("immutable context reference mismatch")
         return [by_id[item_id] for item_id in ids]
 
     def _ensure_clip(self, db, job, annotation, submission, clip, staged_source: Path) -> Path:
@@ -336,6 +452,10 @@ class ExportWorker:
         if clip is None:
             raise MediaCommandError("published asset Clip is missing; refusing to invent one")
         if not clip_entities_ready(clip, self.settings):
+            snapshot = submission.detection_snapshot
+            cache.check_space(self.settings, self.settings.clips_dir,
+                max(1024 * 1024, (annotation.end_frame - annotation.start_frame + 1) *
+                    snapshot.width * snapshot.height // 8))
             return claim_and_render_submission_clip(db, self.processor, self.settings, submission.id,
                                                     annotation.id, clip.id, input_path=staged_source)[0]
         path = resolve_entity_path(clip.clip_path, self.settings.clips_dir)
@@ -387,35 +507,22 @@ class ExportWorker:
 
     @staticmethod
     def _export_range(db, annotation, submission) -> tuple[int, int]:
-        snapshot = submission.detection_snapshot
-        padding = round(snapshot.fps)
-        start = max(0, annotation.start_frame - padding)
-        end = min(snapshot.frame_count - 1, annotation.end_frame + padding)
-        mouse_ids = set(annotation.mouse_ids)
-        neighbors = (db.query(SubmissionAnnotation)
-                     .filter(SubmissionAnnotation.submission_id == submission.id,
-                             SubmissionAnnotation.category_id == annotation.category_id,
-                             SubmissionAnnotation.id != annotation.id).all())
-        for neighbor in neighbors:
-            if not mouse_ids.intersection(neighbor.mouse_ids):
-                continue
-            if neighbor.end_frame < annotation.start_frame and neighbor.end_frame >= start:
-                start = max(start, neighbor.end_frame + 1)
-            if neighbor.start_frame > annotation.end_frame and neighbor.start_frame <= end:
-                end = min(end, neighbor.start_frame - 1)
-        return start, end
+        return cache.context_range(db, annotation, submission)
 
-    def _write_item(self, db, annotation, submission, staged_source: Path, target: Path, *, clip_path: Path | None = None) -> None:
+    def _write_item(self, db, annotation, submission, staged_source: Path, target: Path, *, clip_path: Path | None = None,
+                    context=None, distance=...) -> None:
         snapshot = submission.detection_snapshot
         video = db.get(Video, submission.video_id)
         heuristic = video.source == "heuristic"
-        start_frame, end_frame = ((0, snapshot.frame_count - 1) if heuristic else self._export_range(db, annotation, submission))
+        start_frame, end_frame = (context["range"] if context else
+            ((0, snapshot.frame_count - 1) if heuristic else self._export_range(db, annotation, submission)))
         plan = build_submission_media_plan(start_time=start_frame / snapshot.fps,
             end_time=(end_frame + 1) / snapshot.fps,
             start_frame=start_frame, end_frame=end_frame, fps=snapshot.fps,
             frame_count=snapshot.frame_count, width=snapshot.width, height=snapshot.height,
             crop_region=annotation.crop_region)
         target.mkdir(parents=True)
+        cache.check_space(self.settings, target, max(1024 * 1024, plan.frame_count * plan.output_width * plan.output_height // 8))
         temp_clip = target / f".clip_{annotation.id}_revexport_{uuid.uuid4().hex}.mp4.part"
         try:
             if heuristic:
@@ -473,10 +580,108 @@ class ExportWorker:
             }
         elif heuristic and video.heuristic_input.get("distance_scale") is not None:
             metadata["distance_scale"] = video.heuristic_input["distance_scale"]
+        if distance is not ...:
+            metadata.pop("distance_scale", None)
+            if distance is not None:
+                metadata["distance_scale"] = distance
         for name, value in (("annotation.json", annotation_doc), ("metadata.json", metadata)):
             with (target / name).open("w", encoding="utf-8") as fh:
                 json.dump(value, fh, ensure_ascii=False, indent=2)
         validate_clip_directory(target, probe, tracks_summary)
+
+    def _extend_legacy_payload(self, db, job):
+        if all("context" in ref and "distance_scale" in ref for ref in (job.payload or {}).get("refs", [])):
+            return
+        old = json.loads(json.dumps(job.payload))
+        rows = self._frozen_rows(db, job, require_ready=False)
+        new = json.loads(json.dumps(old))
+        new["preparation_version"] = 1
+        by_id = {a.id: (a, s, c) for a, s, c in rows}
+        batch = cache.context_batch(db, rows)
+        for ref in new["refs"]:
+            a, s, c = by_id[ref["submission_annotation_id"]]
+            ref.setdefault("context", cache.frozen_context(db, a, s, c, batch))
+            ref.setdefault("distance_scale", cache.distance_scale(s))
+        db.rollback()
+        db.execute(text("BEGIN IMMEDIATE"))
+        db.expire_all()
+        current = db.get(BackgroundJob, job.id)
+        if current.status != "running" or current.payload != old:
+            raise MediaCommandError("legacy export claim/payload changed")
+        current.payload = new
+        db.commit()
+
+    def _verify_hot_source(self, submission):
+        from .submission_service import validate_storage_key
+        from .file_identity import FileIdentity, stream_identity
+        root = self.settings.videos_dir.resolve()
+        path = (root / validate_storage_key(submission.source_storage_key)).resolve()
+        if path == root or not path.is_relative_to(root):
+            raise MediaCommandError("immutable submission source is outside videos directory")
+        expected = FileIdentity(submission.source_file_size, submission.source_mtime_ns,
+                                submission.source_device, submission.source_inode)
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            before = stream_identity(stream)
+            if expected.device and expected.inode and before != expected:
+                raise MediaCommandError("immutable submission source file identity mismatch")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if stream_identity(stream) != before:
+                raise MediaCommandError("immutable submission source changed while hashing")
+        if digest.hexdigest() != submission.source_video_sha256:
+            raise MediaCommandError("immutable submission source SHA-256 mismatch")
+
+    def _prewarm(self, db, job):
+        job_id = job.id
+        payload = json.loads(json.dumps(job.payload))
+        if not self.settings.context_prewarm_enabled or not self.settings.context_cache_max_bytes:
+            self._release_prewarm_source()
+            job.status, job.progress, job.finished_at = "succeeded", 99, _now()
+            db.commit()
+            return
+        row = next((r for r in asset_rows(db, job.project_id, None, source="all")
+                    if r[0].id == payload["submission_annotation_id"]), None)
+        if row is None:
+            self._release_prewarm_source()
+            job.status, job.finished_at = "cancelled", _now()
+            db.commit()
+            return
+        annotation, submission, clip = row
+        context = cache.frozen_context(db, annotation, submission, clip)
+        key = cache.cache_key(self.settings, context)
+        if context != payload["context"] or key != payload["key"]:
+            raise MediaCommandError("prewarm immutable context changed")
+        validate_snapshot_integrity(db, submission.detection_snapshot)
+        source = None
+        try:
+            if self._prewarm_source_identity != cache.source_group_identity(submission):
+                self._release_prewarm_source()
+            elif self._prewarm_source is not None:
+                self._stage_prewarm_source(submission, job.id)
+            if cache.lookup(self.settings, submission.video_id, key) is None:
+                source = self._stage_prewarm_source(submission, job.id)
+                # Preparation owns context material, not the independent exact Clip
+                # claim. Avoid timing out behind a concurrently running media job.
+                clip_path = source if submission.video.source == "heuristic" else None
+                with cache.material(self.settings, submission.video_id, key, job.id,
+                        lambda target: self._write_item(db, annotation, submission, source, target,
+                            clip_path=clip_path, context=context, distance=None)):
+                    pass
+            resident = cache.lookup(self.settings, submission.video_id, key) is not None
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+            job = db.get(BackgroundJob, job_id)
+            if job is None or job.status != "running" or job.payload != payload:
+                raise MediaCommandError("prewarm job claim/payload changed")
+            job.status, job.progress, job.finished_at = "succeeded", 100 if resident else 99, _now()
+            db.commit()
+        except BaseException:
+            self._release_prewarm_source()
+            raise
+        finally:
+            if not self._draining or self._stopping.is_set():
+                self._release_prewarm_source()
 
     @staticmethod
     def _validate_zip(path: Path, expected_dirs: set[str]) -> None:
@@ -492,6 +697,8 @@ class ExportWorker:
             raise MediaCommandError("ZIP must contain exactly four files per independent clip directory")
 
     def _build(self, db: Session, job: BackgroundJob) -> None:
+        cache.evict_cache(self.settings)
+        self._extend_legacy_payload(db, job)
         frozen_payload = json.loads(json.dumps(job.payload))
         rows = self._frozen_rows(db, job, require_ready=False)
         validated_snapshots = set()
@@ -507,12 +714,9 @@ class ExportWorker:
         try:
             self._cleanup_artifacts(staging, temp_zip, [])
             staging.mkdir(parents=True, exist_ok=True)
+            groups = {}
+            # Freeze ZIP names in original order before grouping sources.
             for index, (annotation, submission, clip) in enumerate(rows, 1):
-                source = staged_sources.get(submission.id)
-                if source is None:
-                    source = stage_submission_input(self.settings, submission, job.id)
-                    staged_sources[submission.id] = source
-                clip_path = self._ensure_clip(db, job, annotation, submission, clip, source)
                 category_count = len((job.payload or {}).get("category_ids") or [])
                 parent = (job.payload.get("category_directories", {}).get(str(annotation.category_id), "")
                           if category_count > 1 else "")
@@ -526,12 +730,65 @@ class ExportWorker:
                     name = safe_part(f"{base}_{tail}", limit=120)
                     relative = f"{parent}/{name}".strip("/")
                 used.add(relative.casefold()); expected_dirs.add(relative)
-                self._write_item(db, annotation, submission, source, staging / relative, clip_path=clip_path)
-                current = db.get(BackgroundJob, job.id); current.progress = int(index * 90 / len(rows)) if rows else 90
-                db.commit()
+                group_key = cache.source_group_identity(submission)
+                groups.setdefault(group_key, []).append((annotation, submission, clip, relative,
+                    frozen_payload["refs"][index - 1]))
             with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for path in sorted(staging.rglob("*")):
-                    if path.is_file(): archive.write(path, path.relative_to(staging).as_posix())
+                completed = 0
+                for group_key, entries in groups.items():
+                    # Only cold groups need a full private source copy. Hot groups
+                    # still verify the immutable source SHA/FD identity once per job.
+                    needs_source = any(not clip_entities_ready(c, self.settings) or
+                        cache.lookup(self.settings, s.video_id, cache.cache_key(self.settings, ref["context"])) is None
+                        for a, s, c, relative, ref in entries)
+                    source = None
+                    if needs_source:
+                        source = stage_submission_input(self.settings, entries[0][1], job.id,
+                            reserve_check=lambda path, amount: cache.check_space(self.settings, path, amount))
+                        staged_sources[group_key] = source
+                    else:
+                        self._verify_hot_source(entries[0][1])
+                    for annotation, submission, clip, relative, ref in entries:
+                        key = cache.cache_key(self.settings, ref["context"])
+                        # An entry may have been evicted while a prior entry was
+                        # admitted. Stage lazily if the group was initially all-hot.
+                        if source is None and cache.lookup(self.settings, submission.video_id, key) is None:
+                            source = stage_submission_input(self.settings, submission, job.id,
+                                reserve_check=lambda path, amount: cache.check_space(self.settings, path, amount))
+                            staged_sources[group_key] = source
+                        clip_path = self._ensure_clip(db, job, annotation, submission, clip, source)
+                        def build_item(target):
+                            nonlocal source
+                            if source is None:
+                                source = stage_submission_input(self.settings, submission, job.id,
+                                    reserve_check=lambda path, amount: cache.check_space(self.settings, path, amount))
+                                staged_sources[group_key] = source
+                            self._write_item(db, annotation, submission, source, target,
+                                clip_path=clip_path, context=ref["context"], distance=None)
+                        with cache.material(self.settings, submission.video_id, key, job.id,
+                                build_item) as item:
+                            for name in sorted(FILES):
+                                arcname = f"{relative}/{name}"
+                                if name == "metadata.json":
+                                    metadata = json.loads((item / name).read_text(encoding="utf-8"))
+                                    if ref["distance_scale"] is not None:
+                                        metadata["distance_scale"] = ref["distance_scale"]
+                                    data = json.dumps(metadata, ensure_ascii=False, indent=2).encode()
+                                    cache.check_space(self.settings, temp_zip.parent, len(data) + 4096)
+                                    archive.writestr(arcname, data)
+                                else:
+                                    with (item / name).open("rb") as src, archive.open(arcname, "w", force_zip64=True) as dest:
+                                        for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                                            cache.check_space(self.settings, temp_zip.parent, len(chunk) + 4096)
+                                            dest.write(chunk)
+                        completed += 1
+                        current = db.get(BackgroundJob, job.id)
+                        current.progress = max(1, int(completed * 89 / len(rows)))
+                        db.commit()
+                    _cleanup_paths([source], operation="remove export source group")
+                    staged_sources.pop(group_key, None)
+                cache.check_space(self.settings, temp_zip.parent, len(expected_dirs) * 4096)
+            current = db.get(BackgroundJob, job.id); current.progress = 90; db.commit()
             self._validate_zip(temp_zip, expected_dirs)
             if self.before_publish_hook: self.before_publish_hook()
             # Transaction A is intentionally short: validate the claim, atomically publish,
@@ -545,9 +802,11 @@ class ExportWorker:
                    for _annotation, _submission, clip in locked_rows):
                 raise MediaCommandError("frozen Submission Clip is not ready")
             final_name = f"export_project_{job.project_id}_{job.id}.zip"
+            current.progress = 94
             final = self.settings.exports_dir / final_name
             os.replace(temp_zip, final)
             current.result_path = final_name
+            current.progress = 97
             db.commit()
             published = True
 

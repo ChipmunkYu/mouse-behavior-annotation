@@ -3,7 +3,7 @@
  */
 import { apiFetch, apiRaw, ApiError, handleUnauthorized, uploadFile, type UploadProgress } from "./client";
 import { assertValidVideoStreamUrl } from "./streamUrl";
-import type { paths } from "./generated/schema";
+import type { components, paths } from "./generated/schema";
 import type {
   Annotation,
   AnnotationCreateInput,
@@ -641,8 +641,12 @@ export function createExport(
  * 导出状态汇总：GET /api/projects/:pid/export/status -> ExportStatus。
  * 含最近任务（latest_job）与可导出 / 就绪 / 缺失计数，导出中按任务状态轮询本接口。
  */
-export function getExportStatus(projectId: number | string, source: SourceScope = "manual"): Promise<ExportStatus> {
-  return apiFetch<ExportStatus>(`/projects/${projectId}/export/status?source=${source}`);
+export type ExportPreparation = components["schemas"]["ExportPreparationOut"];
+export type ExportJob = Job;
+export type PreparedExportStatus = ExportStatus;
+
+export function getExportStatus(projectId: number | string, source: SourceScope = "manual"): Promise<PreparedExportStatus> {
+  return apiFetch<PreparedExportStatus>(`/projects/${projectId}/export/status?source=${source}`);
 }
 
 /** 从 Content-Disposition 解析文件名（优先 RFC 5987 filename*，其次 filename=）。 */

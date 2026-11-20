@@ -134,6 +134,7 @@ def ctx(tmp_path):
         data_dir=tmp_path,
         database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
         cleanup_enabled=False,
+        context_prewarm_enabled=False,  # Legacy suites isolate their media/export worker seams.
     )
     app = create_app(settings=settings, media_processor=FakeMediaProcessor())
     with TestClient(app) as client:
@@ -224,6 +225,7 @@ def media_ctx(tmp_path):
         database_url=f"sqlite:///{(tmp_path / 'media.db').as_posix()}",
         media_synchronous=True,
         cleanup_enabled=False,
+        context_prewarm_enabled=False,  # test_context_cache explicitly enables the new lane.
     )
     processor = FakeMediaProcessor()
     app = create_app(settings=settings, media_processor=processor)

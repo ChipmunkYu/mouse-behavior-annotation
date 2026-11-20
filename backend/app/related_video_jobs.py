@@ -135,6 +135,11 @@ def _possibly_related(payload: object, video_id: int,
         return True
     if _matching_ids(payload.get("submission_annotation_ids"), submission_annotation_ids):
         return True
+    if _matching_ids(payload.get("submission_annotation_id"), submission_annotation_ids):
+        return True
+    context = payload.get("context")
+    if isinstance(context, Mapping) and _matching_ids(context.get("submission_id"), submission_ids):
+        return True
     refs = payload.get("refs")
     return (_matching_ids(_ref_ids(refs, "submission_id"), submission_ids)
             or _matching_ids(_ref_ids(refs, "submission_annotation_id"),
@@ -227,6 +232,22 @@ def _classify_display_proxy(payload: Mapping[str, object], project_id: int,
     return related, valid
 
 
+def _classify_prewarm(payload, video_id, submission_ids, annotation_ids):
+    context = payload.get("context")
+    related = payload.get("video_id") == video_id
+    valid = (_integer(payload.get("video_id")) and _hex_digest(payload.get("key"))
+             and _integer(payload.get("submission_annotation_id"))
+             and isinstance(context, Mapping)
+             and _integer(context.get("version")) and context["version"] in {1, 2}
+             and _integer(context.get("submission_id"))
+             and isinstance(context.get("annotation"), Mapping)
+             and context["annotation"].get("id") == payload.get("submission_annotation_id"))
+    if related:
+        valid = (valid and context["submission_id"] in submission_ids
+                 and payload["submission_annotation_id"] in annotation_ids)
+    return related, valid
+
+
 def identify_related_video_jobs(
     db: Session,
     *,
@@ -272,11 +293,12 @@ def identify_related_video_jobs(
                                      frozen_submission_annotations)
         dedupe = job.dedupe_key or ""
         possible = (possible or dedupe.startswith(f"media:video:{video_id}:")
+                    or dedupe.startswith(f"context:{video_id}:")
                     or dedupe.startswith(f"display-proxy:video:{video_id}:")
                     or any(dedupe == f"media:submission:{item}"
                            for item in frozen_submissions))
         same_project_job = job.project_id == project_id
-        guarded_type = job.job_type in {"media", "export", "display_proxy"}
+        guarded_type = job.job_type in {"media", "export", "display_proxy", "context_prewarm"}
         if job.job_type == "cleanup":
             continue
         if not isinstance(payload, Mapping):
@@ -293,6 +315,12 @@ def identify_related_video_jobs(
                                               live_annotation_ids)
         elif job.job_type == "display_proxy":
             related, valid = _classify_display_proxy(payload, project_id, video_id)
+        elif job.job_type == "context_prewarm":
+            related, valid = _classify_prewarm(payload, video_id, frozen_submissions,
+                                               frozen_submission_annotations)
+            valid = valid and job.result_path is None
+            if possible and not related:
+                valid = False  # Descriptor owner and video markers disagree.
         else:
             related, valid = possible, False
         if same_project_job and guarded_type and not valid:

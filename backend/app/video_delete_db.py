@@ -364,7 +364,7 @@ def _collect(db: Session, *, project_id: int, video_id: int, actor_user_id: int,
                                             for row in snapshot_states),
     }
 
-    path_items: list[DeletePath] = []
+    path_items: list[DeletePath] = [DeletePath("context_cache", f"video-{video_id}", "directory")]
     owners: dict[tuple[str, str], set[tuple[str, int]]] = {}
     def add_path(root_kind: str, stored: str | None, table: str, row_id: int) -> None:
         if not stored:

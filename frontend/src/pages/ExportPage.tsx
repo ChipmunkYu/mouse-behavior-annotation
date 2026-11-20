@@ -1,10 +1,10 @@
 /**
  * 导出工作台 /projects/:projectId/export（批次 6）：
- * - 统计摘要：可导出总数 / 就绪数 / 缺失数 + aria 进度条；缺失片段明细列表
+ * - 统计摘要：可导出总数 / 已生成 / 缺失；独立显示当前驻留素材数，不作单调进度条
  *   （缺失 = 视频片段尚未生成；导出任务的后台 worker 可在打包前补生成）
  * - 导出范围：按类别多选 chips（复用片段库 categories 计数接口 + 类别 API 取色），
  *   全部 = 不传 category_ids；「开始导出 ZIP」按钮仅 owner / admin 可见
- * - 导出内容预览：目标目录结构树 + annotations.json 字段摘要；本页只发起并监控
+ * - 导出内容预览：每独立片段目录的四文件结构；本页只发起并监控
  *   后台导出任务，不在浏览器请求内同步调用 ffmpeg
  * - 导出任务：发起后轮询 export/status 直至任务落定（与媒体面板同规则，4s 一次），
  *   处理中显示 Job 进度 / 状态；成功提供下载入口 + 7 天保留提醒；409 冲突提示
@@ -21,12 +21,13 @@ import {
   listCategories,
   listClipCategories,
   listProjects,
+  type PreparedExportStatus as ExportStatus,
+  type ExportJob,
 } from "../api";
 import { ApiError } from "../api/client";
 import type {
   Category,
   ClipCategoryCount,
-  ExportStatus,
   Job,
   Project,
   SourceScope,
@@ -37,6 +38,43 @@ import { formatDate } from "../utils/format";
 
 /** 导出任务轮询间隔（与媒体生成面板一致）。 */
 const POLL_INTERVAL_MS = 4000;
+
+const PHASE_LABELS: Record<NonNullable<ExportJob["phase"]>, string> = {
+  queued: "等待导出", building: "准备素材与打包", validating: "校验压缩包",
+  publishing: "发布导出包", cleanup: "清理临时文件", completed: "导出完成",
+  failed: "导出失败", cancelled: "导出已取消",
+};
+
+function jobFailureMessage(job: ExportJob): string {
+  if (job.error_code === "storage_insufficient") return "存储空间不足，请联系管理员释放空间后重试。";
+  if (job.error_code === "cleanup_incomplete") return "临时文件清理未完成，请联系管理员处理后重试。";
+  return "处理未完成，请重试；如仍失败，请联系管理员并提供任务 ID。";
+}
+
+function PreparationSummary({ preparation }: { preparation: ExportStatus["preparation"] }) {
+  if (!preparation) return <p className="export-tree-note">当前服务未提供素材准备状态；仍可发起导出。</p>;
+  const labels = {
+    empty: "暂无待准备素材", pending: "等待后台准备", preparing: "正在后台准备",
+    partial: preparation.ready_count > 0 ? "部分素材已就绪" : "素材将在导出时准备", ready: "当前素材已就绪", failed: "素材准备失败",
+  };
+  const waiting = Math.max(0, preparation.total_count - preparation.ready_count - preparation.failed_count - preparation.deferred_count);
+  return (
+    <section className="export-preparation" aria-label="导出素材准备状态">
+      <div className={`media-headline ${preparation.state === "failed" ? "warn" : preparation.state === "ready" ? "ok" : "muted"}`} role="status">
+        {labels[preparation.state]}
+      </div>
+      <dl className="export-preparation-counts">
+        <div><dt>已就绪素材</dt><dd className="mono">{preparation.ready_count} / {preparation.total_count}</dd></div>
+        <div><dt>待准备</dt><dd className="mono">{waiting}</dd></div>
+        <div><dt>容量延后</dt><dd className="mono">{preparation.deferred_count}</dd></div>
+        <div><dt>准备失败</dt><dd className="mono">{preparation.failed_count}</dd></div>
+      </dl>
+      {preparation.deferred_count > 0 ? <p className="export-tree-note">部分素材因缓存容量限制延后准备，导出时会尝试按需生成。</p> : null}
+      {preparation.failed_count > 0 || preparation.state === "failed" ? <p className="export-tree-note">部分素材准备失败，导出时会重试；若导出仍失败，请联系管理员。</p> : null}
+      <p className="export-tree-note">此处统计当前驻留的导出素材，不等同于视频片段数。缓存可能被回收，数量会变化；无需等待全部就绪即可导出。</p>
+    </section>
+  );
+}
 
 /** 任务是否仍在进行（决定是否继续轮询）。 */
 function isJobBusy(job: Job | null | undefined): boolean {
@@ -61,13 +99,12 @@ function SummaryCard({
   }
 
   const { exportable_count, ready_count, missing_count, missing_clips } = status;
-  const percent = exportable_count > 0 ? Math.round((ready_count / exportable_count) * 100) : 0;
 
   let headline = "暂无审核通过的标注可导出";
   let tone = "muted";
   if (exportable_count > 0) {
     if (missing_count === 0) {
-      headline = "全部视频片段已就绪，可导出完整包";
+      headline = "视频片段已生成；导出素材准备状态见下方";
       tone = "ok";
     } else {
       headline = `部分视频片段待生成（${missing_count}），导出任务将在后台尝试补齐`;
@@ -84,7 +121,7 @@ function SummaryCard({
         </div>
         <div className="export-stat ok">
           <span className="export-stat-num mono">{ready_count}</span>
-          <span className="export-stat-label">就绪视频片段（可打包）</span>
+          <span className="export-stat-label">已生成视频片段</span>
         </div>
         <div className={missing_count > 0 ? "export-stat danger" : "export-stat"}>
           <span className="export-stat-num mono">{missing_count}</span>
@@ -96,21 +133,7 @@ function SummaryCard({
         {headline}
       </div>
 
-      <div
-        className="media-progress"
-        style={{ marginTop: 8 }}
-        role="progressbar"
-        aria-label="导出就绪进度"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent}
-      >
-        <div className="media-progress-fill" style={{ width: `${percent}%` }} />
-      </div>
-      <div className="media-meta" style={{ marginTop: 6 }}>
-        <span className="mono">{percent}% 就绪</span>
-        <span>就绪视频片段占可导出行为标注的比例</span>
-      </div>
+      <PreparationSummary preparation={status.preparation} />
 
       {missing_count > 0 && missing_clips.length > 0 ? (
         <div className="export-missing">
@@ -220,7 +243,7 @@ function ScopeCard({
             className="btn btn-primary"
             disabled={exporting || busy}
             onClick={onExport}
-            title={busy ? "已有导出任务进行中，请等待完成" : "在后台补齐并打包所选类别的审核通过视频片段与 annotations.json"}
+            title={busy ? "已有导出任务进行中，请等待完成" : "在后台准备并打包所选类别的审核通过片段，无需等待素材缓存就绪"}
           >
             {exporting ? "发起中…" : busy ? "导出进行中…" : "开始导出 ZIP"}
           </button>
@@ -246,48 +269,29 @@ function ScopeCard({
 
 /* ================= 导出内容预览 ================= */
 
-/** annotations.json 字段摘要（与标注工作台单视频统一事件 JSON 格式一致）。 */
-const ANNOTATIONS_JSON_FIELDS: Array<{ key: string; desc: string }> = [
-  { key: "annotation_id", desc: "行为事件唯一 ID" },
-  { key: "video_id", desc: "源视频 ID" },
-  { key: "clip_file", desc: "对应视频片段在 ZIP 内的相对路径（必填）" },
-  { key: "behavior", desc: "行为类别名称" },
-  { key: "mouse_ids", desc: "参与对象对应的 track ID 数组" },
-  { key: "start_time / end_time", desc: "起止时间（秒）" },
-  { key: "start_frame / end_frame", desc: "起止帧号" },
-  { key: "confidence", desc: "可信度" },
-  { key: "review_status", desc: "标注审核状态（approved）" },
-  { key: "annotator", desc: "标注者用户名" },
-  { key: "reviewer", desc: "审核者用户名" },
-  { key: "detection_import_revision", desc: "检测导入版本快照" },
-  { key: "identity_revision", desc: "track 修正版本快照" },
-  { key: "crop_region", desc: "空间标注区域（若有）" },
+const EXPORT_FILES: Array<{ key: string; desc: string }> = [
+  { key: "clip.mp4", desc: "独立片段视频" },
+  { key: "annotation.json", desc: "该片段的行为标注" },
+  { key: "tracks.json", desc: "该片段的轨迹数据" },
+  { key: "metadata.json", desc: "该片段的来源与版本信息" },
 ];
 
 function PreviewCard({
   project,
   pid,
-  status,
 }: {
   project: Project | null;
   pid: number;
-  status: ExportStatus | null;
 }) {
   const rootName = (project?.name ?? `project-${pid}`).replace(/[\\/:*?"<>|]/g, "_");
-  const ready = status?.ready_count ?? 0;
-  const missing = status?.missing_count ?? 0;
-  const exportable = status?.exportable_count ?? 0;
 
   const treeLines = [
     `${rootName}/`,
-    `├── annotations.json             # ${exportable} 条审核通过的行为事件元数据`,
-    `├── clips/                       # 按分组 / 类别组织的 ${ready} 个视频片段`,
-    `│   └── {分组}/{类别}/clip_{annotation_id}.mp4`,
-    `├── corrected_tracks/`,
-    `│   ├── manifest.json`,
-    `│   └── video_{id}/import_{revision}/identity_{revision}/`,
-    `│       └── tracks.corrected.jsonl`,
-    `└── README.txt                   # 导出说明与固定版本统计`,
+    `└── {独立片段目录}/`,
+    `    ├── clip.mp4`,
+    `    ├── annotation.json`,
+    `    ├── tracks.json`,
+    `    └── metadata.json`,
   ];
 
   return (
@@ -296,23 +300,21 @@ function PreviewCard({
         {treeLines.join("\n")}
       </pre>
       <div className="export-tree-note">
-        <b>目标内容预览：</b>导出任务会打包审核通过的行为标注、视频片段与修正后 track 结果；
-        {missing > 0 ? `后台 worker 可在打包前尝试补齐当前缺失的 ${missing} 个视频片段。` : "当前视频片段均已就绪。"}
-        本页面只创建并监控任务，不会同步调用 ffmpeg。「{'{…}'}」为占位符，实际文件名由后端按行为标注生成。
+        每个独立片段目录包含以下四个文件。导出时复用可用素材，缺失素材按需准备。
+        「{'{…}'}」为占位符，实际目录名由系统生成。
       </div>
 
       <div className="export-fields-head">
-        <span className="mono">annotations.json</span> 字段摘要
+        每个片段的文件
       </div>
       <div className="export-fields">
-        {ANNOTATIONS_JSON_FIELDS.map((f) => (
+        {EXPORT_FILES.map((f) => (
           <div key={f.key}>
             <code>{f.key}</code>
             <span className="desc">{f.desc}</span>
           </div>
         ))}
       </div>
-      <div className="export-tree-note">字段以统一行为事件 JSON 格式为准，与行为标注工作台的单视频导出保持一致。</div>
     </Card>
   );
 }
@@ -365,9 +367,9 @@ function JobPanel({
   if (job.status === "queued" || job.status === "running") {
     return (
       <>
-        <div className="media-head">
+        <div className="media-head" role="status">
           <span className="media-loading">
-            <span className="spinner" aria-hidden="true" /> 导出处理中…
+            <span className="spinner" aria-hidden="true" /> {job.phase ? PHASE_LABELS[job.phase] ?? "导出处理中…" : "导出处理中…"}
           </span>
           <span className="flex-spacer" />
           <span className={`media-job ${job.status}`}>
@@ -401,7 +403,7 @@ function JobPanel({
     return (
       <>
         <div className="ok-box" role="status">
-          ✓ 导出完成：视频片段与 annotations.json 已打包为 ZIP。
+          ✓ 导出完成：片段视频、行为标注、轨迹与来源信息已打包为 ZIP。
         </div>
         <div className="export-download-actions">
           <button
@@ -434,10 +436,10 @@ function JobPanel({
     return (
       <>
         <div className="media-error" role="alert">
-          <div>⚠ 导出失败：{job.error ?? "后端未返回详细错误"}</div>
+          <div>⚠ 导出失败：{jobFailureMessage(job)}</div>
           <div className="media-meta">
             <span>任务 <span className="mono">#{job.id}</span></span>
-            <span>状态 <span className="mono">{job.status}</span></span>
+            <span>阶段：{job.phase ? PHASE_LABELS[job.phase] ?? "导出失败" : "导出失败"}</span>
             <span>进度 <span className="mono">{job.progress}%</span></span>
             <span>创建于 {formatDate(job.created_at)}</span>
             {job.started_at ? <span>开始于 {formatDate(job.started_at)}</span> : null}
@@ -457,7 +459,7 @@ function JobPanel({
   return (
     <>
       <div className="media-error" role="alert">
-        ⚠ 导出已取消{job.error ? `：${job.error}` : ""}
+        ⚠ 导出已取消
       </div>
       {downloadError ? (
         <div className="error-box" style={{ marginTop: 8 }} role="alert">
@@ -502,6 +504,8 @@ export default function ExportPage() {
   }, [categories]);
 
   const busy = isJobBusy(status?.latest_job);
+  const preparationBusy = status?.preparation?.state === "pending" || status?.preparation?.state === "preparing";
+  const polling = busy || preparationBusy;
 
   /* ---------- 状态与元数据加载 ---------- */
   const loadStatus = useCallback(
@@ -517,7 +521,7 @@ export default function ExportPage() {
       } catch (err) {
         if (scopeRef.current !== requestedScope) return;
         if (!silent) {
-          setStatusError(err instanceof Error ? err.message : "加载导出状态失败");
+          setStatusError("加载导出状态失败，请刷新重试；请确认当前导出来源。");
         }
       } finally {
         if (!silent && scopeRef.current === requestedScope) setLoading(false);
@@ -553,9 +557,9 @@ export default function ExportPage() {
     void loadStatus();
   }, [pid, loadMeta, loadStatus]);
 
-  /* ---------- 导出中轮询（仅任务进行时，规则与媒体面板一致） ---------- */
+  /* ---------- 仅导出或素材准备活动期间轮询 ---------- */
   useEffect(() => {
-    if (!busy) return;
+    if (!polling) return;
     let alive = true;
     let timer: number | undefined;
     const tick = async () => {
@@ -572,7 +576,7 @@ export default function ExportPage() {
       alive = false;
       if (timer != null) window.clearTimeout(timer);
     };
-  }, [busy, loadStatus]);
+  }, [polling, loadStatus]);
 
   /* ---------- 范围选择 ---------- */
   const toggleCategory = useCallback((id: number) => {
@@ -597,7 +601,7 @@ export default function ExportPage() {
           ? { ...prev, latest_job: job, source, category_ids: selected }
           : { latest_job: job, source, category_ids: selected, exportable_count: 0, ready_count: 0, missing_count: 0, missing_clips: [] }
       );
-      setNotice("导出任务已发起，正在后台打包，请稍候…");
+      setNotice("导出任务已发起，后台将准备素材并打包。");
       void loadStatus(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -605,7 +609,7 @@ export default function ExportPage() {
         // 拉取一次状态：若后端已登记该任务，则自动接管进度与下载入口
         void loadStatus(true);
       } else {
-        setExportError(err instanceof Error ? err.message : "发起导出失败");
+        setExportError("发起导出失败，请重试；如仍失败，请联系管理员。");
       }
     } finally {
       setExporting(false);
@@ -691,7 +695,7 @@ export default function ExportPage() {
           </Card>
         </div>
         <div className="export-col">
-          <PreviewCard project={project} pid={pid} status={status} />
+          <PreviewCard project={project} pid={pid} />
         </div>
       </div>
     </div>

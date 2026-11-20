@@ -1,0 +1,188 @@
+{
+  "scope": "内部受控单条真实历史资产验证；非全710、非公共API全量验收",
+  "tests": [
+    {
+      "label": "cold",
+      "job_id": 2067,
+      "counts": {
+        "render": 1,
+        "tracks": 1,
+        "stagecopy": 1
+      },
+      "timings": {
+        "render": 16.907272912561893,
+        "tracks": 0.11861908063292503,
+        "stagecopy": 0.32225792668759823
+      },
+      "seconds": 18.155085302889347,
+      "status": "succeeded",
+      "artifact": "/data/mouse-annotation/candidates/export-cache-20261120-a1/data/exports/export_project_2_2067.zip",
+      "zip_size": 815554,
+      "zip_sha256": "318a0deeba3c5cb8d6abe9764aeb2215911d0c13389810d3bb5a9c4147fb28a0",
+      "members": {
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/annotation.json": {
+          "size": 271,
+          "crc": 1604546303,
+          "sha256": "0b4dbf2dd6837985ef95d3894688b55ee0fd3ebf7e15d675670ab292dada767f"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/clip.mp4": {
+          "size": 722183,
+          "crc": 2466613870,
+          "sha256": "9f5efa1dcb4ffc61601bf03e6b18575876a958ba22561e7e7a3cbbb1c73b6f97"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/metadata.json": {
+          "size": 1256,
+          "crc": 3017614804,
+          "sha256": "9126c67acf775c6d4bb4ecf9ab2e185dbf2fc773d0bf1fabdc9c0fc53934dd85"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/tracks.json": {
+          "size": 409871,
+          "crc": 3571934460,
+          "sha256": "41f947017363c4af2f531bfd87d7ccdf2ef7995e30be55574d9b640934aac8fa"
+        }
+      },
+      "ffprobe": {
+        "fps": 30.012496111168723,
+        "width": 1920,
+        "height": 1080,
+        "frame_count": 143,
+        "duration": 4.765
+      }
+    },
+    {
+      "label": "warm",
+      "job_id": 2068,
+      "counts": {
+        "render": 0,
+        "tracks": 0,
+        "stagecopy": 0
+      },
+      "timings": {
+        "render": 0.0,
+        "tracks": 0.0,
+        "stagecopy": 0.0
+      },
+      "seconds": 0.5346334110945463,
+      "status": "succeeded",
+      "artifact": "/data/mouse-annotation/candidates/export-cache-20261120-a1/data/exports/export_project_2_2068.zip",
+      "zip_size": 815554,
+      "zip_sha256": "318a0deeba3c5cb8d6abe9764aeb2215911d0c13389810d3bb5a9c4147fb28a0",
+      "members": {
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/annotation.json": {
+          "size": 271,
+          "crc": 1604546303,
+          "sha256": "0b4dbf2dd6837985ef95d3894688b55ee0fd3ebf7e15d675670ab292dada767f"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/clip.mp4": {
+          "size": 722183,
+          "crc": 2466613870,
+          "sha256": "9f5efa1dcb4ffc61601bf03e6b18575876a958ba22561e7e7a3cbbb1c73b6f97"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/metadata.json": {
+          "size": 1256,
+          "crc": 3017614804,
+          "sha256": "9126c67acf775c6d4bb4ecf9ab2e185dbf2fc773d0bf1fabdc9c0fc53934dd85"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/tracks.json": {
+          "size": 409871,
+          "crc": 3571934460,
+          "sha256": "41f947017363c4af2f531bfd87d7ccdf2ef7995e30be55574d9b640934aac8fa"
+        }
+      },
+      "ffprobe": {
+        "fps": 30.012496111168723,
+        "width": 1920,
+        "height": 1080,
+        "frame_count": 143,
+        "duration": 4.765
+      }
+    },
+    {
+      "label": "storage-fault",
+      "job_id": 2069,
+      "counts": {
+        "render": 0,
+        "tracks": 0,
+        "stagecopy": 0
+      },
+      "timings": {
+        "render": 0.0,
+        "tracks": 0.0,
+        "stagecopy": 0.0
+      },
+      "seconds": 0.48494397662580013,
+      "status": "failed",
+      "error_code": "storage_insufficient"
+    },
+    {
+      "label": "ready",
+      "job_id": 2070,
+      "counts": {
+        "render": 0,
+        "tracks": 0,
+        "stagecopy": 0
+      },
+      "timings": {
+        "render": 0.0,
+        "tracks": 0.0,
+        "stagecopy": 0.0
+      },
+      "seconds": 0.5464433990418911,
+      "status": "succeeded",
+      "artifact": "/data/mouse-annotation/candidates/export-cache-20261120-a1/data/exports/export_project_2_2070.zip",
+      "zip_size": 815554,
+      "zip_sha256": "c436b2d8a48463189484aff9b9f9e8164f67652a66dfddb88457e0bfb6641f26",
+      "members": {
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/annotation.json": {
+          "size": 271,
+          "crc": 1604546303,
+          "sha256": "0b4dbf2dd6837985ef95d3894688b55ee0fd3ebf7e15d675670ab292dada767f"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/clip.mp4": {
+          "size": 722183,
+          "crc": 2466613870,
+          "sha256": "9f5efa1dcb4ffc61601bf03e6b18575876a958ba22561e7e7a3cbbb1c73b6f97"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/metadata.json": {
+          "size": 1256,
+          "crc": 3017614804,
+          "sha256": "9126c67acf775c6d4bb4ecf9ab2e185dbf2fc773d0bf1fabdc9c0fc53934dd85"
+        },
+        "Social clustering_WIN_20260920_09_26_52_Pro_part003_000562-000644/tracks.json": {
+          "size": 409871,
+          "crc": 3571934460,
+          "sha256": "41f947017363c4af2f531bfd87d7ccdf2ef7995e30be55574d9b640934aac8fa"
+        }
+      },
+      "ffprobe": {
+        "fps": 30.012496111168723,
+        "width": 1920,
+        "height": 1080,
+        "frame_count": 143,
+        "duration": 4.765
+      }
+    }
+  ],
+  "passed": true,
+  "selected": {
+    "annotation_id": 2877,
+    "submission_id": 43,
+    "clip_id": 1465,
+    "source_file_size": 122236372,
+    "annotation_range": [
+      562,
+      644
+    ],
+    "context_range": [
+      532,
+      674
+    ],
+    "crop": null,
+    "expected": {
+      "fps": 30.012496112017548,
+      "width": 1920,
+      "height": 1080,
+      "frame_count": 143
+    }
+  }
+}

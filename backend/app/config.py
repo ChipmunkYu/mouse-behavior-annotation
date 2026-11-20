@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # ---- 分类导出（批次 6） ----
     # 导出 ZIP 生成后的保留天数：超过后 `export/download` 拒绝下载（批次 7 清理实体文件）。
     export_retention_days: int = Field(default=7, ge=0)
+    context_cache_max_bytes: int = Field(default=2 * 1024**3, ge=0)
+    export_disk_reserve_bytes: int = Field(default=1024**3, ge=0)
+    context_prewarm_enabled: bool = True
 
     # ---- 检测导入限制（v0.6） ----
     detection_import_max_frames: int = 100000

@@ -2043,6 +2043,35 @@ export interface components {
             point_a: components["schemas"]["DistanceCalibrationPoint"];
             point_b: components["schemas"]["DistanceCalibrationPoint"];
         };
+        /** ExportPreparationOut */
+        ExportPreparationOut: {
+            /**
+             * Deferred Count
+             * @default 0
+             */
+            deferred_count: number;
+            /**
+             * Failed Count
+             * @default 0
+             */
+            failed_count: number;
+            /**
+             * Ready Count
+             * @default 0
+             */
+            ready_count: number;
+            /**
+             * State
+             * @default empty
+             * @enum {string}
+             */
+            state: "empty" | "pending" | "preparing" | "partial" | "ready" | "failed";
+            /**
+             * Total Count
+             * @default 0
+             */
+            total_count: number;
+        };
         /**
          * ExportRequest
          * @description 导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。
@@ -2071,6 +2100,7 @@ export interface components {
             missing_clips: components["schemas"]["MissingClipOut"][];
             /** Missing Count */
             missing_count: number;
+            preparation?: components["schemas"]["ExportPreparationOut"];
             /** Ready Count */
             ready_count: number;
             /**
@@ -2274,6 +2304,8 @@ export interface components {
             created_at: string;
             /** Error */
             error?: "processing_failed" | null;
+            /** Error Code */
+            error_code?: ("storage_insufficient" | "processing_failed" | "cleanup_incomplete") | null;
             /** Expires At */
             expires_at?: string | null;
             /** Finished At */
@@ -2284,7 +2316,9 @@ export interface components {
              * Job Type
              * @enum {string}
              */
-            job_type: "media" | "export" | "cleanup" | "display_proxy";
+            job_type: "media" | "export" | "cleanup" | "display_proxy" | "context_prewarm";
+            /** Phase */
+            phase?: ("queued" | "building" | "validating" | "publishing" | "cleanup" | "completed" | "failed" | "cancelled") | null;
             /** Progress */
             progress: number;
             /** Project Id */

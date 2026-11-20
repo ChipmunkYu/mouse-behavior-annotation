@@ -621,10 +621,12 @@ class JobOut(BaseModel):
 
     id: int
     project_id: Optional[int] = None
-    job_type: Literal["media", "export", "cleanup", "display_proxy"]
+    job_type: Literal["media", "export", "cleanup", "display_proxy", "context_prewarm"]
     status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     progress: int
     error: Optional[Literal["processing_failed"]] = None
+    phase: Optional[Literal["queued", "building", "validating", "publishing", "cleanup", "completed", "failed", "cancelled"]] = None
+    error_code: Optional[Literal["storage_insufficient", "processing_failed", "cleanup_incomplete"]] = None
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -637,7 +639,19 @@ class JobOut(BaseModel):
             data = dict(value)
         else:
             data = {name: getattr(value, name, None) for name in cls.model_fields}
-        data["error"] = "processing_failed" if data.get("error") else None
+        error = data.get("error")
+        data["error_code"] = ("cleanup_incomplete" if str(error or "").startswith("Worker cleanup incomplete:") else
+                              "storage_insufficient" if str(error or "").startswith("storage_insufficient:") else
+                              "processing_failed" if error else None)
+        payload = value.get("payload", {}) if isinstance(value, dict) else getattr(value, "payload", {})
+        # Legacy jobs have no phase marker; do not invent a stage for their old progress.
+        if data.get("job_type") == "export" and (payload or {}).get("preparation_version") == 1:
+            status, progress = data.get("status"), data.get("progress") or 0
+            data["phase"] = ({"queued": "queued", "succeeded": "completed", "failed": "failed",
+                              "cancelled": "cancelled"}.get(status) or
+                             ("cleanup" if progress >= 97 else "publishing" if progress >= 94 else
+                              "validating" if progress >= 90 else "building"))
+        data["error"] = "processing_failed" if error else None
         return data
 
 
@@ -711,10 +725,19 @@ class MissingClipOut(BaseModel):
     video_filename: str
 
 
+class ExportPreparationOut(BaseModel):
+    state: Literal["empty", "pending", "preparing", "partial", "ready", "failed"] = "empty"
+    total_count: int = 0
+    ready_count: int = 0
+    failed_count: int = 0
+    deferred_count: int = 0
+
+
 class ExportStatusOut(BaseModel):
     """导出状态：最近任务 + 可导出/已就绪/缺失计数与缺失明细。"""
 
     latest_job: Optional[JobOut] = None
+    preparation: ExportPreparationOut = Field(default_factory=ExportPreparationOut)
     source: Literal["manual", "heuristic", "all"] = "manual"
     category_ids: Optional[list[int]] = None
     exportable_count: int

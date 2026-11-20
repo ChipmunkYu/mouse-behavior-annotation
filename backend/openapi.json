@@ -2428,6 +2428,45 @@
         "title": "DistanceCalibrationPut",
         "type": "object"
       },
+      "ExportPreparationOut": {
+        "properties": {
+          "deferred_count": {
+            "default": 0,
+            "title": "Deferred Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "default": 0,
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "ready_count": {
+            "default": 0,
+            "title": "Ready Count",
+            "type": "integer"
+          },
+          "state": {
+            "default": "empty",
+            "enum": [
+              "empty",
+              "pending",
+              "preparing",
+              "partial",
+              "ready",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total_count": {
+            "default": 0,
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "title": "ExportPreparationOut",
+        "type": "object"
+      },
       "ExportRequest": {
         "description": "导出请求：可选 `category_ids` 限定类别（缺省导出全部审核通过片段）。",
         "properties": {
@@ -2500,6 +2539,9 @@
           "missing_count": {
             "title": "Missing Count",
             "type": "integer"
+          },
+          "preparation": {
+            "$ref": "#/components/schemas/ExportPreparationOut"
           },
           "ready_count": {
             "title": "Ready Count",
@@ -3294,6 +3336,22 @@
             ],
             "title": "Error"
           },
+          "error_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "storage_insufficient",
+                  "processing_failed",
+                  "cleanup_incomplete"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
           "expires_at": {
             "anyOf": [
               {
@@ -3327,10 +3385,32 @@
               "media",
               "export",
               "cleanup",
-              "display_proxy"
+              "display_proxy",
+              "context_prewarm"
             ],
             "title": "Job Type",
             "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "queued",
+                  "building",
+                  "validating",
+                  "publishing",
+                  "cleanup",
+                  "completed",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
           },
           "progress": {
             "title": "Progress",

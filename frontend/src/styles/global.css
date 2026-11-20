@@ -3994,6 +3994,22 @@ a:focus-visible,
   color: var(--text-3);
 }
 
+.export-preparation {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.export-preparation-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.export-preparation-counts dt { font-size: 12px; color: var(--text-2); }
+.export-preparation-counts dd { margin: 4px 0 0; font-size: 18px; font-weight: 700; }
+
 /* 缺失片段 */
 .export-missing {
   margin-top: 10px;

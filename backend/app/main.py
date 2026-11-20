@@ -126,6 +126,7 @@ def create_app(
                 startup.callback(display_worker.shutdown)
             worker.start(recover=False)
             startup.callback(worker.shutdown)
+            # Shared durable drain: exports take priority over context prewarm rows.
             export_worker.start(recover=False)
             startup.callback(export_worker.shutdown)
             cleanup_worker.start()
